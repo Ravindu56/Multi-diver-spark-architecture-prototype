@@ -19,5 +19,7 @@ JAVA_SECURITY_OPT       = '-Djava.security.manager=allow'
 DEFAULT_DATASET_PATH    = './test_dataset.txt'
 DEFAULT_DATASET_SIZE_MB = 50
 
+os.environ['HADOOP_HOME'] = '/dev/null'
+
 # --- Benchmark ---
 DEFAULT_NUM_WORKERS = 4
