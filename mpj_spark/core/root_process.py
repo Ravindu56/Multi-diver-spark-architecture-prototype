@@ -7,11 +7,11 @@ import time
 from collections import defaultdict
 from multiprocessing import Process, Queue
 
-from mpj_spark.core.file_manager import MPJSparkFileManager
-from mpj_spark.core.key_value    import KeyValueStructure
-from mpj_spark.workers.worker_process import mpj_worker_process
-from mpj_spark.benchmarks.timing  import TimingCollector
-from mpj_spark.benchmarks.reporter import print_results, print_timing
+from mpj_spark.core.file_manager       import MPJSparkFileManager
+from mpj_spark.core.key_value          import KeyValueStructure
+from mpj_spark.workers.worker_process  import mpj_worker_process
+from mpj_spark.benchmarks.timing       import TimingCollector
+from mpj_spark.benchmarks.reporter     import print_results, print_timing
 
 
 def mpj_root_process(input_file_path: str,
@@ -36,6 +36,8 @@ def mpj_root_process(input_file_path: str,
     Returns
     -------
     (sorted_results, timing_dict)
+      timing_dict keys: load_time, processing_time (avg per-worker T_Proc),
+                        total_time, parallel_time, avg_init_time, agg_time
     """
     tc = TimingCollector()
 
@@ -55,7 +57,7 @@ def mpj_root_process(input_file_path: str,
 
     for m in metadata_list:
         print(f"  Partition {m['partition_id']}: "
-              f"{m['num_lines']:,} lines → {m['partition_path']}")
+              f"{m['num_lines']:,} lines \u2192 {m['partition_path']}")
     print(f"[ROOT] {num_workers} partitions created in {tc.elapsed('load'):.3f}s")
 
     # ── Phase 2: Launch workers ───────────────────────────────────────────
@@ -114,4 +116,5 @@ def mpj_root_process(input_file_path: str,
 
     fm.cleanup()
 
-    return sorted_results, tc.summary()
+    # Pass worker_timings into summary() so processing_time = avg per-worker T_Proc
+    return sorted_results, tc.summary(worker_timings)

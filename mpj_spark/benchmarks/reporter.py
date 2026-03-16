@@ -57,22 +57,37 @@ def print_timing(tc: TimingCollector, worker_timings: list = None):
 def print_comparison(multi_timing: dict, std_timing: dict):
     """
     Print side-by-side comparison table.
-    Expects keys: load_time, processing_time, total_time
+
+    multi_timing keys expected:
+      load_time       — T_Load (partitioning)
+      processing_time — avg per-worker T_Proc (NOT wall-clock parallel)
+      total_time      — wall-clock total
+
+    std_timing keys expected:
+      load_time, processing_time, total_time
     """
     print('\n' + '=' * 70)
     print('  COMPARISON: Multi-Driver  vs  Standard Spark')
     print('=' * 70)
-    print(f"  {'Metric':<26} {'Multi-Driver':>14} {'Std Spark':>12} {'Speedup':>10}")
-    print(f"  {'-' * 66}")
+    print(f"  {'Metric':<30} {'Multi-Driver':>14} {'Std Spark':>12} {'Speedup':>10}")
+    print(f"  {'-' * 68}")
 
-    def _row(label, key):
+    def _row(label, key, note=''):
         mv      = multi_timing.get(key, 0.0)
         sv      = std_timing.get(key,   0.0)
         speedup = sv / max(mv, 0.0001)
-        flag    = '✓ faster' if speedup >= 1.0 else '✗ slower'
-        print(f'  {label:<26} {mv:>14.4f} {sv:>12.4f} '
-              f'{speedup:>8.2f}x  {flag}')
+        flag    = '\u2713 faster' if speedup >= 1.0 else '\u2717 slower'
+        suffix  = f'  [{note}]' if note else ''
+        print(f'  {label:<30} {mv:>14.4f} {sv:>12.4f} '
+              f'{speedup:>8.2f}x  {flag}{suffix}')
 
-    _row('Load Time (sec)',        'load_time')
-    _row('Processing Time (sec)',  'processing_time')
-    _row('Total Time (sec)',       'total_time')
+    _row('Load Time (sec)',              'load_time')
+    _row('Avg Worker Proc Time (sec)',   'processing_time',
+         note='avg per-worker T_Proc')
+    _row('Total Wall-clock (sec)',       'total_time')
+
+    # ── Extra context row: show wall-clock parallel explicitly ──
+    p_time = multi_timing.get('parallel_time', 0.0)
+    if p_time:
+        print(f"  {'Wall-clock Parallel (sec)':<30} {p_time:>14.4f} "
+              f"{'—':>12}   {'—':>8}     [incl. JVM init]")
