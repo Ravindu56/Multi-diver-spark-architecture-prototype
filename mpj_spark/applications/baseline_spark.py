@@ -9,7 +9,7 @@
 # as each MPJ worker:  cores = TOTAL_CORES // num_workers
 # When num_workers=2 on a 22-core machine, each worker and the
 # baseline both get local[11] — not local[*] (22 cores).
-# This prevents the baseline from having an unfair 2× thread
+# This prevents the baseline from having an unfair 2x thread
 # advantage over the multi-driver workers.
 # ============================================================
 import time
@@ -17,7 +17,9 @@ import time
 from mpj_spark.workers.spark_session import build_spark_session
 
 
-def run_baseline(input_file_path: str, num_workers: int = 1) -> tuple:
+def run_baseline(input_file_path: str,
+                 num_workers:    int = 1,
+                 cores_override: int = None) -> tuple:
     """
     Standard single-driver Spark WordCount.
     Used as the comparison baseline against multi-driver.
@@ -26,17 +28,22 @@ def run_baseline(input_file_path: str, num_workers: int = 1) -> tuple:
     ----------
     input_file_path : str — path to full (un-partitioned) input file
     num_workers     : int — number of MPJ workers in the comparison run.
-                           Used to compute the fair per-entity core budget:
+                           Used to compute fair per-entity core budget:
                            baseline_cores = TOTAL_CORES // num_workers
-                           Defaults to 1 (baseline gets all cores) for
-                           standalone / legacy calls.
+                           Defaults to 1 (baseline gets all cores).
+    cores_override  : int — bypass the formula, force this exact core
+                           count (from --cores CLI flag). None = auto.
 
     Returns
     -------
     (sorted_results, timing_dict)
     """
     from mpj_spark.config import TOTAL_CORES
-    cores = max(1, TOTAL_CORES // num_workers)
+
+    if cores_override is not None:
+        cores = max(1, cores_override)
+    else:
+        cores = max(1, TOTAL_CORES // num_workers)
 
     print('\n' + '=' * 70)
     print('  Standard Spark (Single Driver) — BASELINE')
@@ -47,7 +54,7 @@ def run_baseline(input_file_path: str, num_workers: int = 1) -> tuple:
     t_total_start = time.time()
 
     spark = build_spark_session('Baseline-SingleDriver',
-                                num_workers=num_workers)
+                                cores_override=cores)
     sc    = spark.sparkContext
 
     # Load
