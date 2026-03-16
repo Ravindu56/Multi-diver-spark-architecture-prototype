@@ -3,27 +3,51 @@
 # Standard single-driver Spark WordCount — comparison baseline
 # Paper Reference: Section VI.B — Spark Cluster baseline
 # ============================================================
+# Fair-comparison note
+# --------------------
+# The baseline is constrained to the same per-entity thread budget
+# as each MPJ worker:  cores = TOTAL_CORES // num_workers
+# When num_workers=2 on a 22-core machine, each worker and the
+# baseline both get local[11] — not local[*] (22 cores).
+# This prevents the baseline from having an unfair 2× thread
+# advantage over the multi-driver workers.
+# ============================================================
 import time
 
 from mpj_spark.workers.spark_session import build_spark_session
 
 
-def run_baseline(input_file_path: str) -> tuple:
+def run_baseline(input_file_path: str, num_workers: int = 1) -> tuple:
     """
     Standard single-driver Spark WordCount.
     Used as the comparison baseline against multi-driver.
+
+    Parameters
+    ----------
+    input_file_path : str — path to full (un-partitioned) input file
+    num_workers     : int — number of MPJ workers in the comparison run.
+                           Used to compute the fair per-entity core budget:
+                           baseline_cores = TOTAL_CORES // num_workers
+                           Defaults to 1 (baseline gets all cores) for
+                           standalone / legacy calls.
 
     Returns
     -------
     (sorted_results, timing_dict)
     """
+    from mpj_spark.config import TOTAL_CORES
+    cores = max(1, TOTAL_CORES // num_workers)
+
     print('\n' + '=' * 70)
     print('  Standard Spark (Single Driver) — BASELINE')
+    print(f'  Thread budget: local[{cores}]  '
+          f'({TOTAL_CORES} total cores ÷ {num_workers} workers)')
     print('=' * 70)
 
     t_total_start = time.time()
 
-    spark = build_spark_session('Baseline-SingleDriver')
+    spark = build_spark_session('Baseline-SingleDriver',
+                                num_workers=num_workers)
     sc    = spark.sparkContext
 
     # Load
@@ -47,8 +71,8 @@ def run_baseline(input_file_path: str) -> tuple:
     sorted_results = sorted(results, key=lambda x: x[1], reverse=True)
     t_total_end    = time.time()
 
-    load_time = t_load_end - t_load_start
-    proc_time = t_proc_end - t_proc_start
+    load_time = t_load_end  - t_load_start
+    proc_time = t_proc_end  - t_proc_start
     total     = t_total_end - t_total_start
 
     print(f'  Unique words     : {len(sorted_results):,}')

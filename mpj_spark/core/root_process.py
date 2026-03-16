@@ -17,42 +17,40 @@ from mpj_spark.benchmarks.reporter     import print_results, print_timing
 def mpj_root_process(input_file_path: str,
                      num_workers:     int,
                      app:             str  = 'wordcount',
-                     prewarm:         bool = True) -> tuple:
+                     prewarm:         bool = True,
+                     cores_per_worker: int = None) -> tuple:
     """
     Root Process (Paper §IV.A + Algorithm 1).
 
-    Phases:
-      1. Partition input via MPJSparkFileManager
-      2. Launch workers (each spins up its own SparkSession)
-      2a. [prewarm=True] Wait for ALL JVMs to initialise before
-          starting the parallel computation timer, then fire
-          go-signals to all workers simultaneously.
-      3. Wait for workers to complete computation
-      4. Collect & aggregate results from Queue
-      5. Print final results + timing report
-
     Parameters
     ----------
-    input_file_path : str   — path to input text file
-    num_workers     : int   — number of parallel MPJ workers
-    app             : str   — application key ('wordcount', future: 'kmeans')
-    prewarm         : bool  — if True (default), exclude JVM init from the
-                              parallel computation timer. Mirrors HPC behaviour
-                              where Spark drivers are already live on nodes.
+    input_file_path  : str   — path to input text file
+    num_workers      : int   — number of parallel MPJ workers
+    app              : str   — application key ('wordcount', future: 'kmeans')
+    prewarm          : bool  — exclude JVM init from parallel computation timer
+    cores_per_worker : int   — explicit core count per worker; if None,
+                               auto-computed as TOTAL_CORES // num_workers
 
     Returns
     -------
     (sorted_results, timing_dict)
-      timing_dict keys: load_time, processing_time (avg per-worker T_Proc),
-                        total_time, parallel_time, avg_init_time, agg_time
     """
+    from mpj_spark.config import TOTAL_CORES
     tc = TimingCollector()
+
+    effective_cores = (
+        cores_per_worker
+        if cores_per_worker is not None
+        else max(1, TOTAL_CORES // num_workers)
+    )
 
     mode_label = 'pre-warmed' if prewarm else 'cold-start'
     print('=' * 70)
     print('  MPJ-SPARK Multi-Driver Prototype  v2.0')
     print(f'  Workers: {num_workers} | Input: {input_file_path}')
     print(f'  App: {app} | JVM mode: {mode_label}')
+    print(f'  Cores/worker: local[{effective_cores}]  '
+          f'({TOTAL_CORES} total ÷ {num_workers} workers)')
     print('=' * 70)
 
     tc.start('total')
@@ -75,29 +73,27 @@ def mpj_root_process(input_file_path: str,
     timing_q = Queue()
     procs    = []
 
-    # Per-worker go-queues: each worker gets its own Queue so Root can
-    # fire them individually or all at once after the barrier.
-    go_queues    = [Queue() for _ in range(num_workers)] if prewarm else [None] * num_workers
-    ready_queue  = Queue() if prewarm else None
+    go_queues   = [Queue() for _ in range(num_workers)] if prewarm else [None] * num_workers
+    ready_queue = Queue() if prewarm else None
 
-    tc.start('jvm_init')   # track how long it takes all JVMs to warm up
+    tc.start('jvm_init')
     for i, meta in enumerate(metadata_list):
         p = Process(
             target=mpj_worker_process,
             args=(i, meta, result_q, timing_q, app,
-                  ready_queue, go_queues[i])
+                  ready_queue, go_queues[i], effective_cores)
         )
         procs.append(p)
         p.start()
         print(f'  [ROOT] Worker {i} launched (PID {p.pid}) — warming JVM...')
 
-    # ── Phase 2a: Pre-warm barrier (wait for all JVMs) ─────────────────────
+    # ── Phase 2a: Pre-warm barrier ───────────────────────────────────────
     if prewarm:
         print(f'\n[ROOT] Phase 2a: Waiting for all {num_workers} JVMs to warm up...')
         ready_count  = 0
         init_reports = {}
         while ready_count < num_workers:
-            report = ready_queue.get()   # blocks until next worker is ready
+            report = ready_queue.get()
             wid    = report['worker_id']
             init_reports[wid] = report['init_time']
             ready_count += 1
@@ -110,16 +106,15 @@ def mpj_root_process(input_file_path: str,
         print(f'[ROOT] All JVMs ready. Avg init: {avg_jvm:.2f}s  '
               f'Total wait: {tc.elapsed("jvm_init"):.2f}s')
 
-        # Fire go-signals to ALL workers simultaneously → true parallel start
         print(f'[ROOT] Firing go-signals to all {num_workers} workers...')
-        tc.start('parallel')   # ← parallel timer starts HERE (pure computation)
+        tc.start('parallel')
         for gq in go_queues:
             gq.put('GO')
     else:
         tc.stop('jvm_init')
-        tc.start('parallel')   # legacy: timer starts with process launch
+        tc.start('parallel')
 
-    # ── Phase 3: Wait for computation to finish ─────────────────────────
+    # ── Phase 3: Wait ─────────────────────────────────────────────────────
     print(f'\n[ROOT] Phase 3: Waiting for {num_workers} workers to complete...')
     for p in procs:
         p.join()
@@ -153,10 +148,8 @@ def mpj_root_process(input_file_path: str,
 
     sorted_results = sorted(final_counts.items(), key=lambda x: x[1], reverse=True)
 
-    # ── Report ────────────────────────────────────────────────────────────
     print_results(sorted_results)
     print_timing(tc, worker_timings)
-
     fm.cleanup()
 
     return sorted_results, tc.summary(worker_timings)
