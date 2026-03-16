@@ -20,10 +20,13 @@ def print_results(sorted_results: list, top_n: int = 20):
 
 def print_timing(tc: TimingCollector, worker_timings: list = None):
     """Print timing breakdown (paper metrics format)."""
-    total = tc.elapsed('total') or 1.0
+    total    = tc.elapsed('total')    or 1.0
+    parallel = tc.elapsed('parallel') or 0.0
+    load     = tc.elapsed('load')     or 0.0
+    agg      = tc.elapsed('agg')      or 0.0
 
-    def pct(key):
-        return (tc.elapsed(key) / total) * 100
+    def pct(val):
+        return (val / total) * 100
 
     avg_init = avg_proc = 0.0
     valid = [wt for wt in (worker_timings or []) if 'error' not in wt]
@@ -34,16 +37,12 @@ def print_timing(tc: TimingCollector, worker_timings: list = None):
     print('\n' + '=' * 70)
     print('  TIMING ANALYSIS  (Paper Metrics)')
     print('=' * 70)
-    print(f"  Load Time      (T_Load) : {tc.elapsed('load'):>8.4f} s  "
-          f"({pct('load'):>5.1f}% of total)")
-    print(f"  Driver Init    (T_Init) : {avg_init:>8.4f} s  "
-          f"(avg per worker)")
-    print(f"  Processing     (T_Proc) : {avg_proc:>8.4f} s  "
-          f"(avg per worker)")
-    print(f"  Aggregation    (T_Agg)  : {tc.elapsed('agg'):>8.4f} s  "
-          f"({pct('agg'):>5.1f}% of total)")
-    print(f"  Wall-clock parallel     : {tc.elapsed('parallel'):>8.4f} s")
-    print(f"  Total Execution Time    : {total:>8.4f} s")
+    print(f'  Load Time      (T_Load) : {load:>8.4f} s  ({pct(load):>5.1f}% of total)')
+    print(f'  Driver Init    (T_Init) : {avg_init:>8.4f} s  (avg per worker)')
+    print(f'  Processing     (T_Proc) : {avg_proc:>8.4f} s  (avg per worker)')
+    print(f'  Aggregation    (T_Agg)  : {agg:>8.4f} s  ({pct(agg):>5.1f}% of total)')
+    print(f'  Wall-clock parallel     : {parallel:>8.4f} s')
+    print(f'  Total Execution Time    : {total:>8.4f} s')
 
     if valid:
         print(f'\n  {"Worker":<8} {"Driver Init":>12} {"Processing":>12} {"Total":>10}')
@@ -56,21 +55,24 @@ def print_timing(tc: TimingCollector, worker_timings: list = None):
 
 
 def print_comparison(multi_timing: dict, std_timing: dict):
-    """Print side-by-side comparison table."""
+    """
+    Print side-by-side comparison table.
+    Expects keys: load_time, processing_time, total_time
+    """
     print('\n' + '=' * 70)
     print('  COMPARISON: Multi-Driver  vs  Standard Spark')
     print('=' * 70)
     print(f"  {'Metric':<26} {'Multi-Driver':>14} {'Std Spark':>12} {'Speedup':>10}")
-    print(f"  {'-' * 64}")
+    print(f"  {'-' * 66}")
 
-    def _row(label, mk, sk):
-        mv = multi_timing.get(mk, 0)
-        sv = std_timing.get(sk, 0)
+    def _row(label, key):
+        mv      = multi_timing.get(key, 0.0)
+        sv      = std_timing.get(key,   0.0)
         speedup = sv / max(mv, 0.0001)
-        flag = '✓ faster' if speedup >= 1.0 else '✗ slower'
-        print(f"  {label:<26} {mv:>14.4f} {sv:>12.4f} "
-              f"{speedup:>8.2f}x  {flag}")
+        flag    = '✓ faster' if speedup >= 1.0 else '✗ slower'
+        print(f'  {label:<26} {mv:>14.4f} {sv:>12.4f} '
+              f'{speedup:>8.2f}x  {flag}')
 
-    _row('Load Time (sec)',       'load_time',       'load_time')
-    _row('Processing Time (sec)', 'processing_time', 'processing_time')
-    _row('Total Time (sec)',      'total_time',       'total_time')
+    _row('Load Time (sec)',        'load_time')
+    _row('Processing Time (sec)',  'processing_time')
+    _row('Total Time (sec)',       'total_time')

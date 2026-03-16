@@ -33,4 +33,15 @@ class TimingCollector:
         return self._elapsed.get(name, 0.0)
 
     def summary(self) -> dict:
-        return dict(self._elapsed)
+        """
+        Return timing dict with standardised keys expected by
+        print_comparison() and external callers:
+          load_time, processing_time (wall-clock parallel), total_time
+        """
+        return {
+            'load_time':        self._elapsed.get('load',     0.0),
+            'processing_time':  self._elapsed.get('parallel', 0.0),
+            'total_time':       self._elapsed.get('total',    0.0),
+            # extra detail keys
+            'agg_time':         self._elapsed.get('agg',      0.0),
+        }
