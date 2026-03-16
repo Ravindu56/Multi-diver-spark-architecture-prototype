@@ -20,10 +20,11 @@ def print_results(sorted_results: list, top_n: int = 20):
 
 def print_timing(tc: TimingCollector, worker_timings: list = None):
     """Print timing breakdown (paper metrics format)."""
-    total    = tc.elapsed('total')    or 1.0
-    parallel = tc.elapsed('parallel') or 0.0
-    load     = tc.elapsed('load')     or 0.0
-    agg      = tc.elapsed('agg')      or 0.0
+    total     = tc.elapsed('total')    or 1.0
+    parallel  = tc.elapsed('parallel') or 0.0
+    load      = tc.elapsed('load')     or 0.0
+    agg       = tc.elapsed('agg')      or 0.0
+    jvm_init  = tc.elapsed('jvm_init') or 0.0
 
     def pct(val):
         return (val / total) * 100
@@ -38,19 +39,23 @@ def print_timing(tc: TimingCollector, worker_timings: list = None):
     print('  TIMING ANALYSIS  (Paper Metrics)')
     print('=' * 70)
     print(f'  Load Time      (T_Load) : {load:>8.4f} s  ({pct(load):>5.1f}% of total)')
-    print(f'  Driver Init    (T_Init) : {avg_init:>8.4f} s  (avg per worker)')
-    print(f'  Processing     (T_Proc) : {avg_proc:>8.4f} s  (avg per worker)')
+    if jvm_init > 0:
+        print(f'  JVM Pre-warm   (T_Init) : {jvm_init:>8.4f} s  ({pct(jvm_init):>5.1f}% of total)  [barrier wait]')
+        print(f'  Avg Worker Init         : {avg_init:>8.4f} s  (per worker)')
+    else:
+        print(f'  Driver Init    (T_Init) : {avg_init:>8.4f} s  (avg per worker, cold-start)')
+    print(f'  Processing     (T_Proc) : {avg_proc:>8.4f} s  (avg per worker, pure compute)')
     print(f'  Aggregation    (T_Agg)  : {agg:>8.4f} s  ({pct(agg):>5.1f}% of total)')
-    print(f'  Wall-clock parallel     : {parallel:>8.4f} s')
+    print(f'  Wall-clock parallel     : {parallel:>8.4f} s  (post-barrier computation)')
     print(f'  Total Execution Time    : {total:>8.4f} s')
 
     if valid:
-        print(f'\n  {"Worker":<8} {"Driver Init":>12} {"Processing":>12} {"Total":>10}')
-        print(f'  {"-"*44}')
+        print(f'\n  {"Worker":<8} {"JVM Init":>10} {"Compute":>10} {"Total":>10}')
+        print(f'  {"-"*42}')
         for wt in sorted(valid, key=lambda x: x['worker_id']):
             print(f"  Worker {wt['worker_id']:<3} "
-                  f"{wt['driver_init']:>10.2f} s  "
-                  f"{wt['processing']:>10.2f} s  "
+                  f"{wt['driver_init']:>8.2f} s  "
+                  f"{wt['processing']:>8.2f} s  "
                   f"{wt['total']:>8.2f} s")
 
 
@@ -58,19 +63,22 @@ def print_comparison(multi_timing: dict, std_timing: dict):
     """
     Print side-by-side comparison table.
 
-    multi_timing keys expected:
-      load_time       — T_Load (partitioning)
-      processing_time — avg per-worker T_Proc (NOT wall-clock parallel)
-      total_time      — wall-clock total
-
-    std_timing keys expected:
-      load_time, processing_time, total_time
+    multi_timing keys: load_time, processing_time (avg T_Proc),
+                       total_time, parallel_time, jvm_init_time
+    std_timing keys  : load_time, processing_time, total_time
     """
+    jvm_mode = (
+        'pre-warmed — JVM init excluded from T_Proc'
+        if multi_timing.get('jvm_init_time', 0) > 0
+        else 'cold-start — JVM init included in total'
+    )
+
     print('\n' + '=' * 70)
     print('  COMPARISON: Multi-Driver  vs  Standard Spark')
+    print(f'  Mode: {jvm_mode}')
     print('=' * 70)
-    print(f"  {'Metric':<30} {'Multi-Driver':>14} {'Std Spark':>12} {'Speedup':>10}")
-    print(f"  {'-' * 68}")
+    print(f"  {'Metric':<32} {'Multi-Driver':>14} {'Std Spark':>12} {'Speedup':>10}")
+    print(f"  {'-' * 70}")
 
     def _row(label, key, note=''):
         mv      = multi_timing.get(key, 0.0)
@@ -78,16 +86,24 @@ def print_comparison(multi_timing: dict, std_timing: dict):
         speedup = sv / max(mv, 0.0001)
         flag    = '\u2713 faster' if speedup >= 1.0 else '\u2717 slower'
         suffix  = f'  [{note}]' if note else ''
-        print(f'  {label:<30} {mv:>14.4f} {sv:>12.4f} '
+        print(f'  {label:<32} {mv:>14.4f} {sv:>12.4f} '
               f'{speedup:>8.2f}x  {flag}{suffix}')
 
-    _row('Load Time (sec)',              'load_time')
-    _row('Avg Worker Proc Time (sec)',   'processing_time',
-         note='avg per-worker T_Proc')
-    _row('Total Wall-clock (sec)',       'total_time')
+    _row('Load Time (sec)',             'load_time')
+    _row('Avg Worker Proc Time (sec)',  'processing_time',
+         note='pure computation only')
+    _row('Total Wall-clock (sec)',      'total_time')
 
-    # ── Extra context row: show wall-clock parallel explicitly ──
-    p_time = multi_timing.get('parallel_time', 0.0)
+    # Extra rows for transparency
+    p_time   = multi_timing.get('parallel_time',  0.0)
+    jvm_time = multi_timing.get('jvm_init_time',  0.0)
+    init_avg = multi_timing.get('avg_init_time',  0.0)
     if p_time:
-        print(f"  {'Wall-clock Parallel (sec)':<30} {p_time:>14.4f} "
-              f"{'—':>12}   {'—':>8}     [incl. JVM init]")
+        print(f"  {'Wall-clock Parallel (sec)':<32} {p_time:>14.4f} "
+              f"{'\u2014':>12}   {'\u2014':>8}     [post-barrier]")
+    if jvm_time:
+        print(f"  {'JVM Pre-warm Total (sec)':<32} {jvm_time:>14.4f} "
+              f"{'\u2014':>12}   {'\u2014':>8}     [excluded from T_Proc]")
+    if init_avg:
+        print(f"  {'Avg Worker JVM Init (sec)':<32} {init_avg:>14.4f} "
+              f"{'\u2014':>12}   {'\u2014':>8}     [per worker]")
