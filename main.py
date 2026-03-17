@@ -6,11 +6,12 @@ import os
 os.environ['JAVA_TOOL_OPTIONS'] = '-Djava.security.manager=allow'
 
 import argparse
-from mpj_spark.core.root_process          import mpj_root_process
+from mpj_spark.core.root_process           import mpj_root_process
 from mpj_spark.applications.baseline_spark import run_baseline
-from mpj_spark.benchmarks.reporter        import print_comparison
-from mpj_spark.utils.dataset_generator    import generate_test_dataset
-from mpj_spark.config                     import (
+from mpj_spark.benchmarks.reporter         import print_comparison
+from mpj_spark.benchmarks.dev_logger        import DevLogger
+from mpj_spark.utils.dataset_generator     import generate_test_dataset
+from mpj_spark.config                      import (
     DEFAULT_DATASET_PATH, DEFAULT_DATASET_SIZE_MB,
     DEFAULT_NUM_WORKERS, TOTAL_CORES,
 )
@@ -39,12 +40,21 @@ def parse_args():
                        f'Default: auto = {TOTAL_CORES} total ÷ --workers. '
                        'Use 0 to restore unconstrained local[*] behaviour.'
                    ))
-    p.set_defaults(prewarm=True)
+    p.add_argument('--no-log',   dest='log', action='store_false',
+                   help='Disable dev run logging (skip writing to logs/dev/)')
+    p.add_argument('--log-history', action='store_true',
+                   help='Print summary table of all past dev runs and exit')
+    p.set_defaults(prewarm=True, log=True)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # ── Print run history and exit ───────────────────────────────────
+    if args.log_history:
+        DevLogger().print_summary_table()
+        return
 
     cores_per_entity = None
     if args.cores is not None:
@@ -75,13 +85,31 @@ def main():
     )
 
     # ── Baseline comparison ────────────────────────────────────────────
+    std_timing = None
     if args.compare:
         _, std_timing = run_baseline(
             input_file,
-            num_workers=args.workers,          # ← baseline gets same core budget
-            cores_override=cores_per_entity,   # ← or manual override
+            num_workers=args.workers,
+            cores_override=cores_per_entity,
         )
         print_comparison(multi_timing, std_timing)
+
+    # ── Dev logging ─────────────────────────────────────────────────
+    if args.log:
+        logger = DevLogger()
+        run_id = logger.log_run(
+            run_config={
+                'workers':          args.workers,
+                'generate':         args.generate,
+                'input_file':       input_file,
+                'app':              args.app,
+                'prewarm':          args.prewarm,
+                'cores_per_entity': cores_display,
+            },
+            multi_timing=multi_timing,
+            std_timing=std_timing,
+        )
+        print(f'\n[LOG] Run saved → {logger.text_path}  (run_id: {run_id})')
 
 
 if __name__ == '__main__':
