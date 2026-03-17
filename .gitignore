@@ -5,3 +5,9 @@ git remote add origin https://github.com/Ravindu56/Multi-diver-spark-architectur
 *.log
 /_pycache__/*
 __pycache__/
+logs/
+*.log
+*.log.*
+logs/
+*.log.*
+logs/dev/
