@@ -4,39 +4,54 @@
 # Root process — orchestrates the 5-phase MPJ-Spark pipeline
 # Supports: wordcount | kmeans
 # ================================================================
+
+import os
 import time
 import multiprocessing as mp
 from multiprocessing import Queue, Process, Event
 
 from mpj_spark.core.file_manager import MPJSparkFileManager
-from mpj_spark.core.key_value import KeyValueStructure
+from mpj_spark.core.key_value    import KeyValueStructure
 from mpj_spark.workers.worker_process import worker_process
-from mpj_spark.benchmarks.timing import TimingCollector
-from mpj_spark.benchmarks.reporter import print_comparison_table
-from mpj_spark.utils.dev_logger import DevLogger
+from mpj_spark.utils.dev_logger  import DevLogger
 
 
-# ── K-Means centroid aggregation ─────────────────────────────────────
+# ── Adapter: wraps MPJSparkFileManager into a simple function call ──────
+def dynamic_partition(input_path: str, num_partitions: int, output_dir: str) -> list:
+    """
+    Stream-split input file into N partition files using MPJSparkFileManager.
+    Returns a list of partition file paths.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    manager = MPJSparkFileManager(
+        input_file=input_path,
+        num_partitions=num_partitions,
+        output_dir=output_dir,
+    )
+    return manager.partition()
+
+
+# ── K-Means centroid aggregation ─────────────────────────────────────────
 def aggregate_kmeans_results(worker_results: list) -> dict:
     """
     Merge K-Means results from multiple workers via weighted centroid average.
 
-    Each worker trained on a different data partition. We weight each
-    worker's centroids by its row count relative to total rows.
-    Total WCSS is summed (WCSS is additive across disjoint partitions).
+    Each worker trained on a different data partition. Centroids are merged
+    by weighting each worker's contribution by its row count relative to
+    total rows. Total WCSS is summed (WCSS is additive across partitions).
 
     Parameters
     ----------
-    worker_results : list[dict]  — each dict is return value of kmeans.run()
-        Required keys: centres (list[list[float]]), wcss (float),
-                       k (int), row_count (int)
+    worker_results : list[dict]
+        Each dict: {'centres': list[list[float]], 'wcss': float,
+                    'k': int, 'row_count': int}
 
     Returns
     -------
     dict:
-        centres     : list[list[float]]  — merged global centroids
-        total_wcss  : float              — summed within-cluster SS
-        total_rows  : int                — total rows across all workers
+        centres     : list[list[float]]
+        total_wcss  : float
+        total_rows  : int
         num_workers : int
     """
     import numpy as np
@@ -56,6 +71,15 @@ def aggregate_kmeans_results(worker_results: list) -> dict:
 
     total_wcss = sum(r['wcss'] for r in worker_results)
 
+    print('\n[Root] K-Means Aggregation Complete')
+    print(f'       Total rows  : {total_rows:,}')
+    print(f'       Total WCSS  : {total_wcss:.4f}')
+    print(f'       Workers     : {num_workers}')
+    print('       Global Centres:')
+    for i, c in enumerate(merged_centres):
+        preview = ', '.join(f'{v:.3f}' for v in c[:4])
+        print(f'         C{i}: [{preview}{"..." if len(c) > 4 else ""}]')
+
     return {
         'centres'    : merged_centres,
         'total_wcss' : total_wcss,
@@ -64,7 +88,7 @@ def aggregate_kmeans_results(worker_results: list) -> dict:
     }
 
 
-# ── Root orchestrator ─────────────────────────────────────────────────
+# ── Root orchestrator ─────────────────────────────────────────────────────
 def run_root(
     input_file:     str,
     num_workers:    int  = 2,
@@ -80,16 +104,15 @@ def run_root(
 
     Phases
     ------
-    1. Partition  — stream-split input into N files (O(1) RAM)
-    2. Launch     — spawn N workers, build SparkSessions (JVM warm-up)
-    3. Fire       — simultaneous go-signal to all workers
+    1. Partition  — O(1) RAM stream-split into N partition files
+    2. Launch     — spawn N worker processes, build SparkSessions
+    3. Fire       — simultaneous go-signal (barrier sync)
     4. Collect    — gather results + timings from queues
-    5. Aggregate  — WordCount reduce OR K-Means centroid merge
+    5. Aggregate  — WordCount reduce OR K-Means weighted centroid merge
     """
     from mpj_spark.config import TOTAL_CORES, DATA_DIR
 
-    logger    = DevLogger(worker_id='root')
-    collector = TimingCollector()
+    logger = DevLogger(worker_id='root')
 
     SEP = '=' * 70
     print(f'\n{SEP}')
@@ -99,7 +122,8 @@ def run_root(
     print(SEP)
 
     cores = max(1, cores_override) if cores_override else max(1, TOTAL_CORES // num_workers)
-    print(f'  Core budget per worker : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers})')
+    print(f'  Core budget per worker : local[{cores}]  '
+          f'({TOTAL_CORES} total ÷ {num_workers} workers)')
 
     worker_cfg = {
         'app'            : app,
@@ -207,10 +231,6 @@ def run_root(
         agg = aggregate_kmeans_results(worker_results)
         print(f'\n  Total rows processed : {agg["total_rows"]:,}')
         print(f'  Total WCSS (inertia) : {agg["total_wcss"]:.4f}')
-        print(f'  Merged cluster centres ({num_workers} workers → global):')
-        for i, c in enumerate(agg['centres']):
-            preview = ', '.join(f'{v:.3f}' for v in c[:4])
-            print(f'    C{i}: [{preview}{"..." if len(c) > 4 else ""}]')
 
     t_agg_end = time.perf_counter()
     agg_time  = t_agg_end - t_agg_start
@@ -231,7 +251,7 @@ def run_root(
         agg_time=agg_time, total_time=t_wall,
     )
 
-    # ── Optional: Baseline comparison ────────────────────────────────
+    # ── Optional baseline comparison ─────────────────────────────────────
     if compare:
         print(f'\n[Root] Running baseline ({app}) for comparison ...')
 
@@ -252,15 +272,19 @@ def run_root(
                 max_iter=kmeans_iter,
             )
 
+        from mpj_spark.benchmarks.reporter import print_comparison_table
         multi_timing = {
             'load_time'      : load_time,
             'processing_time': avg_proc,
             'total_time'     : t_wall,
         }
-
         print_comparison_table(
             multi_timing=multi_timing,
             baseline_timing=baseline_timing,
             num_workers=num_workers,
             app=app,
         )
+
+
+# Backwards-compatibility alias
+mpj_root_process = run_root
