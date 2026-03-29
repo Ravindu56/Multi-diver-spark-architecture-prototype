@@ -39,7 +39,7 @@ def run_baseline_kmeans(
     # ── Build SparkSession ────────────────────────────────────────────
     # Try passing cores_override; fall back if the function doesn't accept it
     try:
-        spark = build_spark_session('Baseline-KMeans', cores_override=cores, num_workers=num_workers=1,)
+        spark = build_spark_session('Baseline-KMeans', cores_override=cores, num_workers=1)
     except TypeError:
         spark = build_spark_session('Baseline-KMeans', cores)
     
