@@ -1,11 +1,6 @@
 # ================================================================
 # mpj_spark/applications/baseline_kmeans.py
-#
 # Standard single-driver Spark K-Means — fair comparison baseline
-#
-# Fair-comparison guarantee (mirrors baseline_spark.py):
-#   cores = max(1, TOTAL_CORES // num_workers)
-# Same per-entity thread budget as multi-driver workers.
 # ================================================================
 import time
 
@@ -18,7 +13,7 @@ def run_baseline_kmeans(
     max_iter:        int = 20,
 ) -> tuple:
     """
-    Single-driver Spark K-Means — fair baseline for multi-driver comparison.
+    Single-driver Spark K-Means. Fair baseline for multi-driver comparison.
 
     Returns
     -------
@@ -40,8 +35,14 @@ def run_baseline_kmeans(
     print('=' * 70)
 
     t_total_start = time.perf_counter()
-    spark = build_spark_session('Baseline-KMeans', cores_override=cores)
 
+    # ── Build SparkSession ────────────────────────────────────────────
+    # Try passing cores_override; fall back if the function doesn't accept it
+    try:
+        spark = build_spark_session('Baseline-KMeans', cores_override=cores)
+    except TypeError:
+        spark = build_spark_session('Baseline-KMeans', cores)
+    
     # ── Load ─────────────────────────────────────────────────────────
     t_load_start = time.perf_counter()
     raw_rdd      = spark.sparkContext.textFile(input_file_path)
@@ -63,10 +64,16 @@ def run_baseline_kmeans(
 
     # ── Assemble + Train ─────────────────────────────────────────────
     t_proc_start = time.perf_counter()
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol='features', handleInvalid='skip')
-    df_vec    = assembler.transform(df).select('features').cache()
-    model     = KMeans(k=k, maxIter=max_iter, seed=42,
-                       featuresCol='features', initMode='k-means||').fit(df_vec)
+    assembler = VectorAssembler(
+        inputCols=feature_cols,
+        outputCol='features',
+        handleInvalid='skip'
+    )
+    df_vec = assembler.transform(df).select('features').cache()
+    model  = KMeans(
+        k=k, maxIter=max_iter, seed=42,
+        featuresCol='features', initMode='k-means||'
+    ).fit(df_vec)
     t_proc_end  = time.perf_counter()
     t_total_end = time.perf_counter()
 
