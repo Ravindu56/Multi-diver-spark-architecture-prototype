@@ -26,7 +26,11 @@ def dynamic_partition(input_path: str, num_partitions: int, output_dir: str) -> 
     import os
     os.makedirs(output_dir, exist_ok=True)
     manager = MPJSparkFileManager(shared_storage_path=output_dir)
-    return manager.dynamic_partition(input_path, num_partitions)
+    raw = manager.dynamic_partition(input_path, num_partitions)
+    # dynamic_partition returns list of dicts with key 'partition_path'
+    if raw and isinstance(raw[0], dict):
+        return [r['partition_path'] for r in raw]
+    return raw
 
 
 # ── K-Means centroid aggregation ─────────────────────────────────────────
