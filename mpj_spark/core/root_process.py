@@ -8,7 +8,7 @@ import time
 import multiprocessing as mp
 from multiprocessing import Queue, Process, Event
 
-from mpj_spark.core.file_manager import dynamic_partition
+from mpj_spark.core.file_manager import MPJSparkFileManager
 from mpj_spark.core.key_value import KeyValueStructure
 from mpj_spark.workers.worker_process import worker_process
 from mpj_spark.benchmarks.timing import TimingCollector

@@ -12,3 +12,4 @@ logs/
 *.log.*
 logs/dev/
 mpj_spark/utils/Research.code-workspace
+data/
