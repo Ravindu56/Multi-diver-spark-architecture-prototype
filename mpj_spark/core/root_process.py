@@ -20,15 +20,13 @@ from mpj_spark.utils.dev_logger  import DevLogger
 def dynamic_partition(input_path: str, num_partitions: int, output_dir: str) -> list:
     """
     Stream-split input file into N partition files using MPJSparkFileManager.
-    Returns a list of partition file paths.
+    MPJSparkFileManager only accepts shared_storage_path in __init__.
+    The file path and partitions are passed via the instance methods.
     """
+    import os
     os.makedirs(output_dir, exist_ok=True)
-    manager = MPJSparkFileManager(
-        input_file=input_path,
-        num_partitions=num_partitions,
-        output_dir=output_dir,
-    )
-    return manager.partition()
+    manager = MPJSparkFileManager(shared_storage_path=output_dir)
+    return manager.dynamic_partition(input_path, num_partitions)
 
 
 # ── K-Means centroid aggregation ─────────────────────────────────────────
