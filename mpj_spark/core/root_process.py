@@ -1,155 +1,266 @@
-# ============================================================
-# core/root_process.py
-# MPJ Root Process — orchestrates the full multi-driver pipeline
-# Paper Reference: Section IV.A + Algorithm 1
-# ============================================================
+# ================================================================
+# mpj_spark/core/root_process.py
+#
+# Root process — orchestrates the 5-phase MPJ-Spark pipeline
+# Supports: wordcount | kmeans
+# ================================================================
 import time
-from collections import defaultdict
-from multiprocessing import Process, Queue
+import multiprocessing as mp
+from multiprocessing import Queue, Process, Event
 
-from mpj_spark.core.file_manager       import MPJSparkFileManager
-from mpj_spark.core.key_value          import KeyValueStructure
-from mpj_spark.workers.worker_process  import mpj_worker_process
-from mpj_spark.benchmarks.timing       import TimingCollector
-from mpj_spark.benchmarks.reporter     import print_results, print_timing
+from mpj_spark.core.file_manager import dynamic_partition
+from mpj_spark.core.key_value import KeyValueStructure
+from mpj_spark.workers.worker_process import worker_process
+from mpj_spark.benchmarks.timing import TimingCollector
+from mpj_spark.benchmarks.reporter import print_comparison_table
+from mpj_spark.utils.dev_logger import DevLogger
 
 
-def mpj_root_process(input_file_path: str,
-                     num_workers:     int,
-                     app:             str  = 'wordcount',
-                     prewarm:         bool = True,
-                     cores_per_worker: int = None) -> tuple:
+# ── K-Means centroid aggregation ─────────────────────────────────────
+def aggregate_kmeans_results(worker_results: list) -> dict:
     """
-    Root Process (Paper §IV.A + Algorithm 1).
+    Merge K-Means results from multiple workers via weighted centroid average.
+
+    Each worker trained on a different data partition. We weight each
+    worker's centroids by its row count relative to total rows.
+    Total WCSS is summed (WCSS is additive across disjoint partitions).
 
     Parameters
     ----------
-    input_file_path  : str   — path to input text file
-    num_workers      : int   — number of parallel MPJ workers
-    app              : str   — application key ('wordcount', future: 'kmeans')
-    prewarm          : bool  — exclude JVM init from parallel computation timer
-    cores_per_worker : int   — explicit core count per worker; if None,
-                               auto-computed as TOTAL_CORES // num_workers
+    worker_results : list[dict]  — each dict is return value of kmeans.run()
+        Required keys: centres (list[list[float]]), wcss (float),
+                       k (int), row_count (int)
 
     Returns
     -------
-    (sorted_results, timing_dict)
+    dict:
+        centres     : list[list[float]]  — merged global centroids
+        total_wcss  : float              — summed within-cluster SS
+        total_rows  : int                — total rows across all workers
+        num_workers : int
     """
-    from mpj_spark.config import TOTAL_CORES
-    tc = TimingCollector()
+    import numpy as np
 
-    effective_cores = (
-        cores_per_worker
-        if cores_per_worker is not None
-        else max(1, TOTAL_CORES // num_workers)
+    total_rows  = sum(r['row_count'] for r in worker_results)
+    k           = worker_results[0]['k']
+    num_dims    = len(worker_results[0]['centres'][0])
+    num_workers = len(worker_results)
+
+    merged_centres = []
+    for c_idx in range(k):
+        weighted_sum = np.zeros(num_dims)
+        for r in worker_results:
+            weight        = r['row_count'] / total_rows
+            weighted_sum += weight * np.array(r['centres'][c_idx])
+        merged_centres.append(weighted_sum.tolist())
+
+    total_wcss = sum(r['wcss'] for r in worker_results)
+
+    return {
+        'centres'    : merged_centres,
+        'total_wcss' : total_wcss,
+        'total_rows' : total_rows,
+        'num_workers': num_workers,
+    }
+
+
+# ── Root orchestrator ─────────────────────────────────────────────────
+def run_root(
+    input_file:     str,
+    num_workers:    int  = 2,
+    compare:        bool = False,
+    prewarm:        bool = True,
+    cores_override: int  = None,
+    app:            str  = 'wordcount',
+    kmeans_k:       int  = 3,
+    kmeans_iter:    int  = 20,
+):
+    """
+    Main Root process — 5-phase MPJ-Spark pipeline.
+
+    Phases
+    ------
+    1. Partition  — stream-split input into N files (O(1) RAM)
+    2. Launch     — spawn N workers, build SparkSessions (JVM warm-up)
+    3. Fire       — simultaneous go-signal to all workers
+    4. Collect    — gather results + timings from queues
+    5. Aggregate  — WordCount reduce OR K-Means centroid merge
+    """
+    from mpj_spark.config import TOTAL_CORES, DATA_DIR
+
+    logger    = DevLogger(worker_id='root')
+    collector = TimingCollector()
+
+    SEP = '=' * 70
+    print(f'\n{SEP}')
+    print(f'  MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}')
+    if app == 'kmeans':
+        print(f'  k={kmeans_k}  max_iter={kmeans_iter}')
+    print(SEP)
+
+    cores = max(1, cores_override) if cores_override else max(1, TOTAL_CORES // num_workers)
+    print(f'  Core budget per worker : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers})')
+
+    worker_cfg = {
+        'app'            : app,
+        'cores_override' : cores,
+        'kmeans_k'       : kmeans_k,
+        'kmeans_max_iter': kmeans_iter,
+    }
+
+    # ════════════════════════════════════════════════════════════
+    # Phase 1 — Partition
+    # ════════════════════════════════════════════════════════════
+    print(f'\n[Root] Phase 1 — Partitioning into {num_workers} parts ...')
+    t_load_start = time.perf_counter()
+
+    partition_paths = dynamic_partition(
+        input_path=input_file,
+        num_partitions=num_workers,
+        output_dir=DATA_DIR,
     )
 
-    mode_label = 'pre-warmed' if prewarm else 'cold-start'
-    print('=' * 70)
-    print('  MPJ-SPARK Multi-Driver Prototype  v2.0')
-    print(f'  Workers: {num_workers} | Input: {input_file_path}')
-    print(f'  App: {app} | JVM mode: {mode_label}')
-    print(f'  Cores/worker: local[{effective_cores}]  '
-          f'({TOTAL_CORES} total ÷ {num_workers} workers)')
-    print('=' * 70)
+    t_load_end = time.perf_counter()
+    load_time  = t_load_end - t_load_start
+    print(f'[Root] Partitioning done in {load_time:.3f}s')
 
-    tc.start('total')
+    # ════════════════════════════════════════════════════════════
+    # Phase 2 — Launch Workers
+    # ════════════════════════════════════════════════════════════
+    print(f'\n[Root] Phase 2 — Launching {num_workers} workers ...')
 
-    # ── Phase 1: Partition ────────────────────────────────────────────────
-    print('\n[ROOT] Phase 1: Partitioning input...')
-    fm = MPJSparkFileManager()
-    tc.start('load')
-    metadata_list = fm.dynamic_partition(input_file_path, num_workers)
-    tc.stop('load')
+    result_queue  = Queue()
+    timing_queue  = Queue()
+    go_signals    = [Event() for _ in range(num_workers)]
+    ready_signals = [Event() for _ in range(num_workers)]
+    processes     = []
 
-    for m in metadata_list:
-        print(f"  Partition {m['partition_id']}: "
-              f"{m['num_lines']:,} lines \u2192 {m['partition_path']}")
-    print(f"[ROOT] {num_workers} partitions created in {tc.elapsed('load'):.3f}s")
-
-    # ── Phase 2: Launch workers ───────────────────────────────────────────
-    print(f'\n[ROOT] Phase 2: Launching {num_workers} MPJ Workers (JVM init)...')
-    result_q = Queue()
-    timing_q = Queue()
-    procs    = []
-
-    go_queues   = [Queue() for _ in range(num_workers)] if prewarm else [None] * num_workers
-    ready_queue = Queue() if prewarm else None
-
-    tc.start('jvm_init')
-    for i, meta in enumerate(metadata_list):
+    for i in range(num_workers):
         p = Process(
-            target=mpj_worker_process,
-            args=(i, meta, result_q, timing_q, app,
-                  ready_queue, go_queues[i], effective_cores)
+            target=worker_process,
+            args=(i, partition_paths[i], result_queue,
+                  go_signals[i], ready_signals[i], timing_queue, worker_cfg),
+            daemon=True,
         )
-        procs.append(p)
         p.start()
-        print(f'  [ROOT] Worker {i} launched (PID {p.pid}) — warming JVM...')
+        processes.append(p)
+        print(f'[Root] Worker {i} started (PID {p.pid})')
 
-    # ── Phase 2a: Pre-warm barrier ───────────────────────────────────────
-    if prewarm:
-        print(f'\n[ROOT] Phase 2a: Waiting for all {num_workers} JVMs to warm up...')
-        ready_count  = 0
-        init_reports = {}
-        while ready_count < num_workers:
-            report = ready_queue.get()
-            wid    = report['worker_id']
-            init_reports[wid] = report['init_time']
-            ready_count += 1
-            print(f'  [ROOT] Worker {wid} JVM ready '
-                  f'(init={report["init_time"]:.2f}s) '
-                  f'[{ready_count}/{num_workers}]')
+    print('[Root] Waiting for all workers to be JVM-ready ...')
+    for i, sig in enumerate(ready_signals):
+        sig.wait()
+        print(f'[Root] Worker {i} ready ✓')
 
-        tc.stop('jvm_init')
-        avg_jvm = sum(init_reports.values()) / len(init_reports)
-        print(f'[ROOT] All JVMs ready. Avg init: {avg_jvm:.2f}s  '
-              f'Total wait: {tc.elapsed("jvm_init"):.2f}s')
+    # ════════════════════════════════════════════════════════════
+    # Phase 3 — Fire
+    # ════════════════════════════════════════════════════════════
+    print('\n[Root] Phase 3 — Firing all workers simultaneously ...')
+    t_proc_start = time.perf_counter()
+    for sig in go_signals:
+        sig.set()
 
-        print(f'[ROOT] Firing go-signals to all {num_workers} workers...')
-        tc.start('parallel')
-        for gq in go_queues:
-            gq.put('GO')
-    else:
-        tc.stop('jvm_init')
-        tc.start('parallel')
+    # ════════════════════════════════════════════════════════════
+    # Phase 4 — Collect
+    # ════════════════════════════════════════════════════════════
+    print('[Root] Phase 4 — Collecting results ...')
+    worker_results = []
+    worker_timings = []
+    errors         = []
 
-    # ── Phase 3: Wait ─────────────────────────────────────────────────────
-    print(f'\n[ROOT] Phase 3: Waiting for {num_workers} workers to complete...')
-    for p in procs:
-        p.join()
-    tc.stop('parallel')
-
-    # ── Phase 4: Collect ──────────────────────────────────────────────────
-    print('\n[ROOT] Phase 4: Collecting results...')
-    all_results, worker_timings = [], []
-
-    while not result_q.empty():
-        r = result_q.get()
-        if 'error' in r:
-            print(f"  [ERROR] Worker {r['worker_id']}: {r['error']}")
+    for _ in range(num_workers):
+        res = result_queue.get(timeout=600)
+        if res['status'] == 'success':
+            worker_results.append(res['result'])
         else:
-            all_results.append(r)
-            print(f"  Received {r['num_items']:,} items from Worker {r['worker_id']}")
+            errors.append(res)
+            print(f"[Root] Worker {res['worker_id']} ERROR: {res.get('error')}")
 
-    while not timing_q.empty():
-        worker_timings.append(timing_q.get())
+    for _ in range(num_workers):
+        worker_timings.append(timing_queue.get(timeout=60))
 
-    # ── Phase 5: Aggregate ────────────────────────────────────────────────
-    print('\n[ROOT] Phase 5: Aggregating results...')
-    tc.start('agg')
-    final_counts: dict = defaultdict(int)
-    for wr in all_results:
-        kv = KeyValueStructure.from_serializable(wr['results'])
-        for key, val in kv.data:
-            final_counts[key] += val
-    tc.stop('agg')
-    tc.stop('total')
+    t_proc_end = time.perf_counter()
+    proc_time  = t_proc_end - t_proc_start
 
-    sorted_results = sorted(final_counts.items(), key=lambda x: x[1], reverse=True)
+    for p in processes:
+        p.join(timeout=30)
 
-    print_results(sorted_results)
-    print_timing(tc, worker_timings)
-    fm.cleanup()
+    if errors:
+        print(f'[Root] {len(errors)} worker(s) failed. Aborting aggregation.')
+        return
 
-    return sorted_results, tc.summary(worker_timings)
+    # ════════════════════════════════════════════════════════════
+    # Phase 5 — Aggregate
+    # ════════════════════════════════════════════════════════════
+    print('\n[Root] Phase 5 — Aggregating results ...')
+    t_agg_start = time.perf_counter()
+
+    if app == 'wordcount':
+        kv = KeyValueStructure()
+        for r in worker_results:
+            kv.merge(r)
+        final_result = kv.get_top_n(20)
+        print(f'\n  Top-20 words:')
+        for word, count in final_result:
+            print(f'    {word:<20} {count:>10,}')
+
+    elif app == 'kmeans':
+        agg = aggregate_kmeans_results(worker_results)
+        print(f'\n  Total rows processed : {agg["total_rows"]:,}')
+        print(f'  Total WCSS (inertia) : {agg["total_wcss"]:.4f}')
+        print(f'  Merged cluster centres ({num_workers} workers → global):')
+        for i, c in enumerate(agg['centres']):
+            preview = ', '.join(f'{v:.3f}' for v in c[:4])
+            print(f'    C{i}: [{preview}{"..." if len(c) > 4 else ""}]')
+
+    t_agg_end = time.perf_counter()
+    agg_time  = t_agg_end - t_agg_start
+    t_wall    = load_time + proc_time + agg_time
+    avg_proc  = sum(t['processing_time'] for t in worker_timings) / num_workers
+
+    print(f'\n{"─"*70}')
+    print(f'  MPJ Multi-Driver Timing Summary')
+    print(f'{"─"*70}')
+    print(f'  Partition / Load Time    : {load_time:.4f} s')
+    print(f'  Avg Worker Process Time  : {avg_proc:.4f} s')
+    print(f'  Aggregation Time         : {agg_time:.4f} s')
+    print(f'  Total Wall-clock Time    : {t_wall:.4f} s')
+
+    logger.log_run(
+        app=app, num_workers=num_workers, cores=cores,
+        load_time=load_time, proc_time=avg_proc,
+        agg_time=agg_time, total_time=t_wall,
+    )
+
+    # ── Optional: Baseline comparison ────────────────────────────────
+    if compare:
+        print(f'\n[Root] Running baseline ({app}) for comparison ...')
+
+        if app == 'wordcount':
+            from mpj_spark.applications.baseline_spark import run_baseline
+            _, baseline_timing = run_baseline(
+                input_file_path=input_file,
+                num_workers=num_workers,
+                cores_override=cores_override,
+            )
+        elif app == 'kmeans':
+            from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
+            _, baseline_timing = run_baseline_kmeans(
+                input_file_path=input_file,
+                num_workers=num_workers,
+                cores_override=cores_override,
+                k=kmeans_k,
+                max_iter=kmeans_iter,
+            )
+
+        multi_timing = {
+            'load_time'      : load_time,
+            'processing_time': avg_proc,
+            'total_time'     : t_wall,
+        }
+
+        print_comparison_table(
+            multi_timing=multi_timing,
+            baseline_timing=baseline_timing,
+            num_workers=num_workers,
+            app=app,
+        )
