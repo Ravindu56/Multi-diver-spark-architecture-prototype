@@ -92,7 +92,7 @@ def run_root(
     cores = max(1, cores_override) if cores_override else max(1, TOTAL_CORES // num_workers)
     print(f'  Core budget per worker : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)')
     worker_cfg = {'app': app, 'cores_override': cores,
-                  'kmeans_k': kmeans_k, 'kmeans_max_iter': kmeans_iter}
+                  'kmeans_k': kmeans_k, 'kmeans_max_iter': kmeans_iter, 'num_workers'    : num_workers}
 
     # Phase 1 — Partition
     print(f'\n[Root] Phase 1 — Partitioning into {num_workers} parts ...')

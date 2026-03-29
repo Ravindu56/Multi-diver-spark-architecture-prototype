@@ -47,10 +47,13 @@ def worker_process(
         # ── Phase 1: Build SparkSession ───────────────────────────────
         print(f"[Worker {worker_id}] Starting SparkSession (app={app_name}) ...")
         t_init_start = time.perf_counter()
+        
+        num_workers = worker_config.get('num_workers', 1)
 
         spark = build_spark_session(
             app_name=f'MPJ-Worker-{worker_id}-{app_name}',
             cores_override=cores_override,
+            num_workers=num_workers,
         )
 
         t_init_end = time.perf_counter()
