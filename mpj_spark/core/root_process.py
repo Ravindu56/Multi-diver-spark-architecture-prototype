@@ -274,18 +274,22 @@ def run_root(
                 max_iter=kmeans_iter,
             )
 
-        from mpj_spark.benchmarks.reporter import print_comparison_table
+        from mpj_spark.benchmarks.reporter import print_comparison as print_comparison_table
         multi_timing = {
             'load_time'      : load_time,
             'processing_time': avg_proc,
             'total_time'     : t_wall,
         }
-        print_comparison_table(
-            multi_timing=multi_timing,
-            baseline_timing=baseline_timing,
-            num_workers=num_workers,
-            app=app,
-        )
+        # Call with positional args since kwarg names may differ by version
+        try:
+            print_comparison_table(
+                multi_timing=multi_timing,
+                baseline_timing=baseline_timing,
+                num_workers=num_workers,
+                app=app,
+            )
+        except TypeError:
+            print_comparison_table(multi_timing, baseline_timing, num_workers, app)
 
 
 # Backwards-compatibility alias
