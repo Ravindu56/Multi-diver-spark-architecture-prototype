@@ -21,18 +21,24 @@
 # FIXES APPLIED:
 #   FIX 1 — Replace Python UDF parse_row() + createDataFrame(rdd)
 #            with spark.read.csv() — fully native JVM columnar reader.
-#            Eliminates Python↔JVM serialisation on every row.
+#            Eliminates Python<->JVM serialisation on every row.
 #
 #   FIX 2 — Remove standalone df_vec.count() before model.fit().
 #            The extra count() action forced a full DAG scan just to
 #            count rows, triggering the BlockManager lock warnings.
 #            row_count is now read from model.summary after fitting.
+#
+#   FIX 3 (Issue #1) — Changed initMode from 'random' to 'k-means||'.
+#            With initMode='random' the seed parameter was not reliably
+#            honoured by Spark's initialisation path, causing different
+#            cluster centres on every run even with seed=42.
+#            'k-means||' (Spark's parallel seeding algorithm) correctly
+#            uses the fixed seed, making runs fully reproducible.
 # ================================================================
 
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.feature import VectorAssembler
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
 
 
 def run(partition_path: str, k: int = 3, max_iter: int = 20, seed: int = 42) -> dict:
@@ -58,23 +64,23 @@ def run(partition_path: str, k: int = 3, max_iter: int = 20, seed: int = 42) -> 
     if spark is None:
         raise RuntimeError("[KMeans] No active SparkSession found in worker.")
 
-    # ── 1. Load CSV directly via native Spark reader ─────────────────
+    # -- 1. Load CSV directly via native Spark reader ---------------------
     # FIX 1: spark.read.csv stays entirely inside the JVM tungsten engine.
-    # No Python UDF, no RDD↔DataFrame conversion overhead.
+    # No Python UDF, no RDD<->DataFrame conversion overhead.
     df_raw = spark.read.csv(
         partition_path,
         inferSchema=True,   # infers column types in a single JVM pass
-        header=False,       # our partition files have no header
+        header=False,       # partition files have no header
     )
 
     # Column names from inferSchema are _c0, _c1, ..., _cN
     feature_cols = df_raw.columns  # e.g. ['_c0', '_c1', ..., '_c9']
     num_features = len(feature_cols)
 
-    # Drop any rows that contain nulls (replaces the filter(lambda r: r is not None))
+    # Drop any rows that contain nulls
     df = df_raw.dropna()
 
-    # ── 2. Assemble feature vector column ────────────────────────────
+    # -- 2. Assemble feature vector column --------------------------------
     assembler = VectorAssembler(
         inputCols=feature_cols,
         outputCol='features',
@@ -82,25 +88,28 @@ def run(partition_path: str, k: int = 3, max_iter: int = 20, seed: int = 42) -> 
     )
     df_vec = assembler.transform(df).select('features').cache()
 
-    # ── 3. Train KMeans model ────────────────────────────────────────
+    # -- 3. Train KMeans model --------------------------------------------
     # FIX 2: Do NOT call df_vec.count() here.
-    # The extra count() action caused a full DAG scan and triggered
-    # the "BlockManager: Task N already completed" warnings.
     # row_count is retrieved from model.summary after a single fit() pass.
-    effective_k = k  # worker partitions are large enough; no need to cap
+    #
+    # FIX 3 (Issue #1): Use initMode='k-means||' instead of 'random'.
+    # Spark's 'random' initMode does not reliably honour the seed
+    # parameter, so results varied across runs even with seed=42.
+    # 'k-means||' is Spark's parallel seeding algorithm and correctly
+    # uses the provided seed, ensuring fully reproducible results.
+    effective_k = k
 
-    print(f"[KMeans Worker] k={effective_k} | max_iter={max_iter} | loading...")
+    print(f"[KMeans Worker] k={effective_k} | max_iter={max_iter} | seed={seed} | loading...")
 
     model = KMeans(
         k=effective_k,
         maxIter=max_iter,
         seed=seed,
         featuresCol='features',
-        initMode='random',   # faster init for per-partition sub-problems
-                             # k-means|| runs extra distributed rounds unnecessarily
+        initMode='k-means||',  # FIX 3: deterministic with fixed seed
     ).fit(df_vec)
 
-    # ── 4. Extract results ───────────────────────────────────────────
+    # -- 4. Extract results -----------------------------------------------
     centres   = [c.tolist() for c in model.clusterCenters()]
     wcss      = float(model.summary.trainingCost)
     row_count = model.summary.predictions.count()  # cheap: already materialised

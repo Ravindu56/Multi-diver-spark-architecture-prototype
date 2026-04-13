@@ -19,7 +19,6 @@ def dynamic_partition(input_path, num_partitions, output_dir):
     paths = []
     for item in raw:
         if isinstance(item, dict):
-            # MPJSparkFileManager returns dicts with a path key
             p = item.get('path') or item.get('file_path') or item.get('partition_path')
             if p is None:
                 p = list(item.values())[0]
@@ -29,18 +28,91 @@ def dynamic_partition(input_path, num_partitions, output_dir):
     return paths
 
 
-def aggregate_kmeans_results(worker_results):
+def align_centres_greedy(reference, candidate):
+    """
+    Re-order candidate centroid list to best match the reference ordering.
+
+    Fix #2 (Issue #2) — Cross-worker label misalignment:
+    Each worker assigns its own arbitrary label indices to clusters.
+    Before computing a weighted average across workers we must match
+    each worker's C_i to the semantically closest centroid in Worker 0
+    (the reference). This greedy nearest-neighbour approach runs in
+    O(k^2) which is negligible for typical k values (<= 20).
+
+    Parameters
+    ----------
+    reference : list[list[float]]  — Worker 0's centroid list (k centroids)
+    candidate : list[list[float]]  — Another worker's centroid list (k centroids)
+
+    Returns
+    -------
+    list[list[float]]  — candidate centroids reordered to match reference labels
+    list[int]          — permutation indices applied (for logging)
+    """
     import numpy as np
+    k = len(reference)
+    ref = [np.array(c) for c in reference]
+    cand = [np.array(c) for c in candidate]
+
+    used = set()
+    permutation = []
+    for r in ref:
+        best_idx  = -1
+        best_dist = float('inf')
+        for j, c in enumerate(cand):
+            if j in used:
+                continue
+            dist = float(np.linalg.norm(r - c))
+            if dist < best_dist:
+                best_dist = dist
+                best_idx  = j
+        used.add(best_idx)
+        permutation.append(best_idx)
+
+    aligned = [candidate[i] for i in permutation]
+    return aligned, permutation
+
+
+def aggregate_kmeans_results(worker_results):
+    """
+    Aggregate per-worker K-Means results into global cluster centres.
+
+    Fix #2 (Issue #2): Applies greedy centroid alignment before averaging
+    so that label indices are semantically consistent across all workers.
+    Without alignment, Worker 0's C1 (cluster near 8) could be averaged
+    with Worker 1's C1 (cluster near 15), producing a meaningless global
+    centroid that does not represent any real cluster.
+    """
+    import numpy as np
+
     total_rows = sum(r['row_count'] for r in worker_results)
     k          = worker_results[0]['k']
     num_dims   = len(worker_results[0]['centres'][0])
+
+    # Worker 0 is the reference — its label ordering is authoritative
+    reference_centres = worker_results[0]['centres']
+    aligned_results   = [worker_results[0]]  # reference is already aligned
+
+    for w_idx, r in enumerate(worker_results[1:], start=1):
+        aligned_centres, perm = align_centres_greedy(
+            reference_centres, r['centres']
+        )
+        print(f'[Root] Worker {w_idx} centroid alignment permutation: {perm}')
+        aligned_results.append({
+            **r,
+            'centres': aligned_centres,
+        })
+
+    # Weighted average of aligned centroids
     merged = []
     for c_idx in range(k):
         ws = np.zeros(num_dims)
-        for r in worker_results:
+        for r in aligned_results:
             ws += (r['row_count'] / total_rows) * np.array(r['centres'][c_idx])
         merged.append(ws.tolist())
+
     total_wcss = sum(r['wcss'] for r in worker_results)
+
     print('\n[Root] K-Means Aggregation Complete')
     print(f'       Total rows  : {total_rows:,}')
     print(f'       Total WCSS  : {total_wcss:.4f}')
@@ -49,8 +121,13 @@ def aggregate_kmeans_results(worker_results):
     for i, c in enumerate(merged):
         preview = ', '.join(f'{v:.3f}' for v in c[:4])
         print(f'         C{i}: [{preview}{"..." if len(c) > 4 else ""}]')
-    return {'centres': merged, 'total_wcss': total_wcss,
-            'total_rows': total_rows, 'num_workers': len(worker_results)}
+
+    return {
+        'centres'    : merged,
+        'total_wcss' : total_wcss,
+        'total_rows' : total_rows,
+        'num_workers': len(worker_results),
+    }
 
 
 def _print_table(multi_timing, baseline_timing, num_workers, app):
@@ -90,9 +167,14 @@ def run_root(
         print(f'  k={kmeans_k}  max_iter={kmeans_iter}')
     print(SEP)
     cores = max(1, cores_override) if cores_override else max(1, TOTAL_CORES // num_workers)
-    print(f'  Core budget per worker : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)')
-    worker_cfg = {'app': app, 'cores_override': cores,
-                  'kmeans_k': kmeans_k, 'kmeans_max_iter': kmeans_iter, 'num_workers'    : num_workers}
+    print(f'  Core budget per worker : local[{cores}]  ({TOTAL_CORES} total \u00f7 {num_workers} workers)')
+    worker_cfg = {
+        'app'            : app,
+        'cores_override' : cores,
+        'kmeans_k'       : kmeans_k,
+        'kmeans_max_iter': kmeans_iter,
+        'num_workers'    : num_workers,
+    }
 
     # Phase 1 — Partition
     print(f'\n[Root] Phase 1 — Partitioning into {num_workers} parts ...')
@@ -122,7 +204,7 @@ def run_root(
     print('[Root] Waiting for all workers to be JVM-ready ...')
     for i, sig in enumerate(ready_signals):
         sig.wait()
-        print(f'[Root] Worker {i} ready ✓')
+        print(f'[Root] Worker {i} ready \u2713')
 
     # Phase 3 — Fire
     print('\n[Root] Phase 3 — Firing all workers simultaneously ...')
@@ -194,9 +276,11 @@ def run_root(
             from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
             _, baseline_timing = run_baseline_kmeans(
                 input_file, num_workers, cores_override, kmeans_k, kmeans_iter)
-        multi_timing = {'load_time': load_time,
-                        'processing_time': avg_proc,
-                        'total_time': t_wall}
+        multi_timing = {
+            'load_time'       : load_time,
+            'processing_time' : avg_proc,
+            'total_time'      : t_wall,
+        }
         _print_table(multi_timing, baseline_timing, num_workers, app)
 
 
