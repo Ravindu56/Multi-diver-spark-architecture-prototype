@@ -1,6 +1,7 @@
 # ================================================================
 # mpj_spark/core/root_process.py
 # ================================================================
+import math
 import os
 import time
 from multiprocessing import Queue, Process, Event
@@ -28,16 +29,23 @@ def dynamic_partition(input_path, num_partitions, output_dir):
     return paths
 
 
-def align_centres_greedy(reference, candidate):
+def align_centres_hungarian(reference, candidate):
     """
-    Re-order candidate centroid list to best match the reference ordering.
+    Re-order candidate centroid list to optimally match the reference
+    ordering using the Hungarian algorithm.
 
-    Fix #2 (Issue #2) — Cross-worker label misalignment:
-    Each worker assigns its own arbitrary label indices to clusters.
-    Before computing a weighted average across workers we must match
-    each worker's C_i to the semantically closest centroid in Worker 0
-    (the reference). This greedy nearest-neighbour approach runs in
-    O(k^2) which is negligible for typical k values (<= 20).
+    Fix #5 (Issue #5) — Exact centroid label matching:
+    The previous greedy nearest-neighbour approach was not guaranteed
+    to find the globally optimal permutation. For example with k=3
+    and centroids [A, B, C] the greedy pass could match A->A, then
+    be forced into a suboptimal match for B and C because the best
+    global partner for B was already consumed by A.
+
+    The Hungarian algorithm (scipy.optimize.linear_sum_assignment)
+    solves the assignment problem exactly in O(k^3), which is
+    negligible for typical k values (<= 50). This guarantees that
+    the weighted centroid average in aggregate_kmeans_results() always
+    combines semantically identical clusters across workers.
 
     Parameters
     ----------
@@ -50,26 +58,23 @@ def align_centres_greedy(reference, candidate):
     list[int]          — permutation indices applied (for logging)
     """
     import numpy as np
-    k = len(reference)
-    ref = [np.array(c) for c in reference]
-    cand = [np.array(c) for c in candidate]
+    from scipy.optimize import linear_sum_assignment
 
-    used = set()
-    permutation = []
-    for r in ref:
-        best_idx  = -1
-        best_dist = float('inf')
-        for j, c in enumerate(cand):
-            if j in used:
-                continue
-            dist = float(np.linalg.norm(r - c))
-            if dist < best_dist:
-                best_dist = dist
-                best_idx  = j
-        used.add(best_idx)
-        permutation.append(best_idx)
+    ref  = np.array(reference)   # shape (k, d)
+    cand = np.array(candidate)   # shape (k, d)
 
-    aligned = [candidate[i] for i in permutation]
+    # Cost matrix: Euclidean distance between every pair (ref_i, cand_j)
+    # Shape: (k, k)  —  cost[i, j] = ||ref[i] - cand[j]||
+    diff = ref[:, np.newaxis, :] - cand[np.newaxis, :, :]  # (k, k, d)
+    cost = np.linalg.norm(diff, axis=2)                     # (k, k)
+
+    # Hungarian algorithm: returns (row_indices, col_indices)
+    # row_indices is always [0, 1, ..., k-1]; col_indices is the optimal
+    # assignment of candidate centroids to reference centroid positions.
+    _, col_ind = linear_sum_assignment(cost)
+
+    permutation = col_ind.tolist()
+    aligned     = [candidate[i] for i in permutation]
     return aligned, permutation
 
 
@@ -77,11 +82,15 @@ def aggregate_kmeans_results(worker_results):
     """
     Aggregate per-worker K-Means results into global cluster centres.
 
-    Fix #2 (Issue #2): Applies greedy centroid alignment before averaging
-    so that label indices are semantically consistent across all workers.
-    Without alignment, Worker 0's C1 (cluster near 8) could be averaged
-    with Worker 1's C1 (cluster near 15), producing a meaningless global
-    centroid that does not represent any real cluster.
+    Fix #5 (Issue #5): Applies Hungarian centroid alignment before
+    averaging so that label indices are semantically consistent across
+    all workers. Without alignment, Worker 0's C1 (cluster near 8)
+    could be averaged with Worker 1's C1 (cluster near 15), producing
+    a meaningless global centroid that does not represent any real cluster.
+
+    The Hungarian algorithm guarantees the globally optimal assignment
+    (minimum total distance), unlike the previous greedy approach which
+    only guaranteed locally optimal per-step matches.
     """
     import numpy as np
 
@@ -94,10 +103,10 @@ def aggregate_kmeans_results(worker_results):
     aligned_results   = [worker_results[0]]  # reference is already aligned
 
     for w_idx, r in enumerate(worker_results[1:], start=1):
-        aligned_centres, perm = align_centres_greedy(
+        aligned_centres, perm = align_centres_hungarian(
             reference_centres, r['centres']
         )
-        print(f'[Root] Worker {w_idx} centroid alignment permutation: {perm}')
+        print(f'[Root] Worker {w_idx} centroid alignment permutation (Hungarian): {perm}')
         aligned_results.append({
             **r,
             'centres': aligned_centres,
@@ -166,7 +175,15 @@ def run_root(
     if app == 'kmeans':
         print(f'  k={kmeans_k}  max_iter={kmeans_iter}')
     print(SEP)
-    cores = max(1, cores_override) if cores_override else max(1, TOTAL_CORES // num_workers)
+    # Fix #4 (Issue #4): Use math.ceil instead of floor division so that
+    # remainder cores are not wasted. e.g. 22 cores / 4 workers:
+    #   floor = 5  (2 cores unused)
+    #   ceil  = 6  (all cores assigned, last worker may share but JVM
+    #               thread pools self-limit to available physical cores)
+    if cores_override:
+        cores = max(1, cores_override)
+    else:
+        cores = max(1, math.ceil(TOTAL_CORES / num_workers))
     print(f'  Core budget per worker : local[{cores}]  ({TOTAL_CORES} total \u00f7 {num_workers} workers)')
     worker_cfg = {
         'app'            : app,
