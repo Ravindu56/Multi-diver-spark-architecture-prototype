@@ -139,10 +139,11 @@ def aggregate_kmeans_results(worker_results):
     }
 
 
-def _print_table(multi_timing, baseline_timing, num_workers, app):
+def _print_table(multi_timing, baseline_timing, num_workers, app, baseline_threads=None):
     SEP = '=' * 70
+    thread_note = f'  [baseline local[{baseline_threads}] — fair mode]' if baseline_threads else ''
     print(f'\n{SEP}')
-    print(f'  Comparison: Multi-Driver vs Baseline ({app}, {num_workers} workers)')
+    print(f'  Comparison: Multi-Driver vs Baseline ({app}, {num_workers} workers){thread_note}')
     print(SEP)
     print(f'  {"Metric":<25} {"Multi-Driver":>14} {"Baseline":>14} {"Speedup":>10}')
     print(f'  {"-"*25} {"-"*14} {"-"*14} {"-"*10}')
@@ -166,6 +167,7 @@ def run_root(
     app='wordcount',
     kmeans_k=3,
     kmeans_iter=20,
+    baseline_threads=None,
 ):
     from mpj_spark.config import TOTAL_CORES, DATA_DIR
     logger = DevLogger(worker_id='root')
@@ -292,13 +294,16 @@ def run_root(
         elif app == 'kmeans':
             from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
             _, baseline_timing = run_baseline_kmeans(
-                input_file, num_workers, cores_override, kmeans_k, kmeans_iter)
+                input_file, num_workers, cores_override,
+                kmeans_k, kmeans_iter,
+                baseline_threads=baseline_threads)
         multi_timing = {
             'load_time'       : load_time,
             'processing_time' : avg_proc,
             'total_time'      : t_wall,
         }
-        _print_table(multi_timing, baseline_timing, num_workers, app)
+        _print_table(multi_timing, baseline_timing, num_workers, app,
+                     baseline_threads=baseline_threads)
 
 
 mpj_root_process = run_root
