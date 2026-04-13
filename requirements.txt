@@ -1,3 +1,4 @@
 pyspark>=3.3.0
 numpy>=1.21.0
+scipy>=1.9.0
 setuptools>=65.0
