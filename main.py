@@ -1,20 +1,32 @@
 # ================================================================
 # main.py  —  MPJ-Spark Multi-Driver Prototype
 #
-# Usage
-# -----
-# WordCount (existing):
-#   python3 main.py --workers 2 --generate 500 --compare
+# Changes from feature/ml-kmeans-workload:
 #
-# K-Means (new):
-#   python3 main.py --app kmeans --workers 2 --generate 500 --compare
-#   python3 main.py --app kmeans --workers 4 --kmeans-k 5 --kmeans-iter 50
+#   GOSSIP EXTENSION (feature/adaptive-gossip-aggregation):
+#     Added three new CLI flags:
+#       --gossip              enable adaptive gossip aggregation
+#       --gossip-threshold F  convergence drift criterion (default 0.001)
+#       --gossip-max-rounds N hard cap on rounds (default 10)
+#       --gossip-fanout N     initial peer fan-out (default 2, then adaptive)
 #
-# Fair comparison (equal total thread budget):
-#   python3 main.py --app kmeans --workers 4 --compare --baseline-threads 20
+# Usage examples:
+# ---------------
+# Standard (unchanged):
+#   python main.py --app kmeans --workers 4 --generate 200 --compare \
+#                  --kmeans-k 5 --kmeans-iter 30
+#
+# Gossip mode:
+#   python main.py --app kmeans --workers 4 --generate 200 --gossip \
+#                  --kmeans-k 5 --kmeans-iter 30
+#
+# Gossip tuned:
+#   python main.py --app kmeans --workers 8 --generate 500 --gossip \
+#                  --gossip-threshold 0.0005 --gossip-max-rounds 15 \
+#                  --gossip-fanout 3 --kmeans-k 5 --kmeans-iter 30 --compare
 #
 # Log history:
-#   python3 main.py --log-history
+#   python main.py --log-history
 # ================================================================
 import argparse
 import os
@@ -53,6 +65,22 @@ def parse_args():
                         '(default: same per-worker budget as each MPJ worker)')
     p.add_argument('--log-history', action='store_true',
                    help='Print all previous run logs and exit')
+
+    # ── GOSSIP FLAGS (new) ────────────────────────────────────────
+    p.add_argument('--gossip', action='store_true',
+                   help='Enable adaptive gossip protocol for centroid aggregation.\n'
+                        'Only active when --app kmeans.\n'
+                        'Replaces batch Hungarian aggregation with O(log N) peer rounds.')
+    p.add_argument('--gossip-threshold', type=float, default=1e-3,
+                   help='Gossip convergence threshold: stop when max centroid drift\n'
+                        'drops below this value. (default: 0.001)')
+    p.add_argument('--gossip-max-rounds', type=int, default=10,
+                   help='Hard cap on number of gossip rounds. (default: 10)')
+    p.add_argument('--gossip-fanout', type=int, default=2,
+                   help='Initial number of peers contacted per worker per round.\n'
+                        'Adapted automatically after round 1. (default: 2)')
+    # ─────────────────────────────────────────────────────────────
+
     return p.parse_args()
 
 
@@ -100,20 +128,29 @@ def main():
         print(f'[main] K-Means iter     : {args.kmeans_iter}')
     if args.baseline_threads:
         print(f'[main] Baseline threads : {args.baseline_threads}  [fair comparison mode]')
+    if args.gossip:
+        print(f'[main] Gossip mode      : ON  '
+              f'(threshold={args.gossip_threshold}, '
+              f'max_rounds={args.gossip_max_rounds}, '
+              f'fanout={args.gossip_fanout})')
 
     # ── Run Root process ──────────────────────────────────────────────
     from mpj_spark.core.root_process import run_root
 
     run_root(
-        input_file       = dataset_path,
-        num_workers      = args.workers,
-        compare          = args.compare,
-        prewarm          = not args.no_prewarm,
-        cores_override   = args.cores,
-        app              = args.app,
-        kmeans_k         = args.kmeans_k,
-        kmeans_iter      = args.kmeans_iter,
-        baseline_threads = args.baseline_threads,
+        input_file        = dataset_path,
+        num_workers       = args.workers,
+        compare           = args.compare,
+        prewarm           = not args.no_prewarm,
+        cores_override    = args.cores,
+        app               = args.app,
+        kmeans_k          = args.kmeans_k,
+        kmeans_iter       = args.kmeans_iter,
+        baseline_threads  = args.baseline_threads,
+        use_gossip        = args.gossip,
+        gossip_threshold  = args.gossip_threshold,
+        gossip_max_rounds = args.gossip_max_rounds,
+        gossip_fanout     = args.gossip_fanout,
     )
 
 

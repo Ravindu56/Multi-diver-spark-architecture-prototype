@@ -1,5 +1,22 @@
 # ================================================================
 # mpj_spark/core/root_process.py
+#
+# Changes from feature/ml-kmeans-workload:
+#
+#   GOSSIP EXTENSION (feature/adaptive-gossip-aggregation):
+#     - Added `use_gossip` parameter to run_root().
+#     - When use_gossip=True AND app=='kmeans':
+#         * A multiprocessing.Queue (gossip_queue) is created.
+#         * gossip_queue is passed into every worker_process call.
+#         * Phase 5 calls GossipAggregator.aggregate() instead of
+#           the Hungarian batch aggregation.
+#         * Round diagnostics are printed and included in timing.
+#     - When use_gossip=False (default), behaviour is byte-for-byte
+#       identical to feature/ml-kmeans-workload.
+#
+# Original changes (kept):
+#   Fix #4 — math.ceil core allocation
+#   Fix #5 — Hungarian centroid alignment in batch aggregation
 # ================================================================
 import math
 import os
@@ -16,7 +33,6 @@ def dynamic_partition(input_path, num_partitions, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     manager = MPJSparkFileManager(shared_storage_path=output_dir)
     raw = manager.dynamic_partition(input_path, num_partitions)
-    # Ensure we return plain file path strings, not dicts
     paths = []
     for item in raw:
         if isinstance(item, dict):
@@ -33,46 +49,16 @@ def align_centres_hungarian(reference, candidate):
     """
     Re-order candidate centroid list to optimally match the reference
     ordering using the Hungarian algorithm.
-
-    Fix #5 (Issue #5) — Exact centroid label matching:
-    The previous greedy nearest-neighbour approach was not guaranteed
-    to find the globally optimal permutation. For example with k=3
-    and centroids [A, B, C] the greedy pass could match A->A, then
-    be forced into a suboptimal match for B and C because the best
-    global partner for B was already consumed by A.
-
-    The Hungarian algorithm (scipy.optimize.linear_sum_assignment)
-    solves the assignment problem exactly in O(k^3), which is
-    negligible for typical k values (<= 50). This guarantees that
-    the weighted centroid average in aggregate_kmeans_results() always
-    combines semantically identical clusters across workers.
-
-    Parameters
-    ----------
-    reference : list[list[float]]  — Worker 0's centroid list (k centroids)
-    candidate : list[list[float]]  — Another worker's centroid list (k centroids)
-
-    Returns
-    -------
-    list[list[float]]  — candidate centroids reordered to match reference labels
-    list[int]          — permutation indices applied (for logging)
+    Fix #5 (Issue #5) — Exact centroid label matching.
     """
     import numpy as np
     from scipy.optimize import linear_sum_assignment
 
-    ref  = np.array(reference)   # shape (k, d)
-    cand = np.array(candidate)   # shape (k, d)
-
-    # Cost matrix: Euclidean distance between every pair (ref_i, cand_j)
-    # Shape: (k, k)  —  cost[i, j] = ||ref[i] - cand[j]||
-    diff = ref[:, np.newaxis, :] - cand[np.newaxis, :, :]  # (k, k, d)
-    cost = np.linalg.norm(diff, axis=2)                     # (k, k)
-
-    # Hungarian algorithm: returns (row_indices, col_indices)
-    # row_indices is always [0, 1, ..., k-1]; col_indices is the optimal
-    # assignment of candidate centroids to reference centroid positions.
+    ref  = np.array(reference)
+    cand = np.array(candidate)
+    diff = ref[:, np.newaxis, :] - cand[np.newaxis, :, :]
+    cost = np.linalg.norm(diff, axis=2)
     _, col_ind = linear_sum_assignment(cost)
-
     permutation = col_ind.tolist()
     aligned     = [candidate[i] for i in permutation]
     return aligned, permutation
@@ -81,16 +67,8 @@ def align_centres_hungarian(reference, candidate):
 def aggregate_kmeans_results(worker_results):
     """
     Aggregate per-worker K-Means results into global cluster centres.
-
-    Fix #5 (Issue #5): Applies Hungarian centroid alignment before
-    averaging so that label indices are semantically consistent across
-    all workers. Without alignment, Worker 0's C1 (cluster near 8)
-    could be averaged with Worker 1's C1 (cluster near 15), producing
-    a meaningless global centroid that does not represent any real cluster.
-
-    The Hungarian algorithm guarantees the globally optimal assignment
-    (minimum total distance), unlike the previous greedy approach which
-    only guaranteed locally optimal per-step matches.
+    Fix #5: Hungarian centroid alignment before weighted averaging.
+    Used when use_gossip=False (original batch aggregation path).
     """
     import numpy as np
 
@@ -98,9 +76,8 @@ def aggregate_kmeans_results(worker_results):
     k          = worker_results[0]['k']
     num_dims   = len(worker_results[0]['centres'][0])
 
-    # Worker 0 is the reference — its label ordering is authoritative
     reference_centres = worker_results[0]['centres']
-    aligned_results   = [worker_results[0]]  # reference is already aligned
+    aligned_results   = [worker_results[0]]
 
     for w_idx, r in enumerate(worker_results[1:], start=1):
         aligned_centres, perm = align_centres_hungarian(
@@ -112,7 +89,6 @@ def aggregate_kmeans_results(worker_results):
             'centres': aligned_centres,
         })
 
-    # Weighted average of aligned centroids
     merged = []
     for c_idx in range(k):
         ws = np.zeros(num_dims)
@@ -168,7 +144,23 @@ def run_root(
     kmeans_k=3,
     kmeans_iter=20,
     baseline_threads=None,
+    use_gossip=False,             # NEW: enable adaptive gossip aggregation
+    gossip_threshold=1e-3,        # NEW: convergence drift threshold
+    gossip_max_rounds=10,         # NEW: hard cap on gossip rounds
+    gossip_fanout=2,              # NEW: initial peer fan-out per round
 ):
+    """
+    Root orchestrator for MPJ-Spark.
+
+    New parameters (gossip extension):
+    ------------------------------------
+    use_gossip       : bool  — if True, Phase 5 uses GossipAggregator
+                               instead of batch Hungarian aggregation.
+                               Only active when app='kmeans'.
+    gossip_threshold : float — convergence criterion (max centroid drift)
+    gossip_max_rounds: int   — maximum gossip rounds before forced stop
+    gossip_fanout    : int   — initial fan-out (adaptive thereafter)
+    """
     from mpj_spark.config import TOTAL_CORES, DATA_DIR
     logger = DevLogger(worker_id='root')
     SEP = '=' * 70
@@ -176,17 +168,20 @@ def run_root(
     print(f'  MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}')
     if app == 'kmeans':
         print(f'  k={kmeans_k}  max_iter={kmeans_iter}')
+    if use_gossip and app == 'kmeans':
+        print(f'  Aggregation  : Adaptive Gossip  '
+              f'(threshold={gossip_threshold}, max_rounds={gossip_max_rounds}, '
+              f'fanout={gossip_fanout})')
+    else:
+        print(f'  Aggregation  : Batch Hungarian (default)')
     print(SEP)
-    # Fix #4 (Issue #4): Use math.ceil instead of floor division so that
-    # remainder cores are not wasted. e.g. 22 cores / 4 workers:
-    #   floor = 5  (2 cores unused)
-    #   ceil  = 6  (all cores assigned, last worker may share but JVM
-    #               thread pools self-limit to available physical cores)
+
     if cores_override:
         cores = max(1, cores_override)
     else:
         cores = max(1, math.ceil(TOTAL_CORES / num_workers))
     print(f'  Core budget per worker : local[{cores}]  ({TOTAL_CORES} total \u00f7 {num_workers} workers)')
+
     worker_cfg = {
         'app'            : app,
         'cores_override' : cores,
@@ -211,15 +206,22 @@ def run_root(
     go_signals    = [Event() for _ in range(num_workers)]
     ready_signals = [Event() for _ in range(num_workers)]
     processes     = []
+
+    # ── GOSSIP: create shared gossip_queue if enabled ─────────────
+    gossip_queue = Queue() if (use_gossip and app == 'kmeans') else None
+    # ─────────────────────────────────────────────────────────────
+
     for i in range(num_workers):
         p = Process(
             target=worker_process,
             args=(i, partition_paths[i], result_queue,
-                  go_signals[i], ready_signals[i], timing_queue, worker_cfg),
+                  go_signals[i], ready_signals[i], timing_queue, worker_cfg,
+                  gossip_queue),   # GOSSIP: pass queue (None if disabled)
             daemon=True)
         p.start()
         processes.append(p)
         print(f'[Root] Worker {i} started (PID {p.pid})')
+
     print('[Root] Waiting for all workers to be JVM-ready ...')
     for i, sig in enumerate(ready_signals):
         sig.wait()
@@ -257,6 +259,7 @@ def run_root(
     print('\n[Root] Phase 5 — Aggregating results ...')
     t_agg_start = time.perf_counter()
     agg = None
+
     if app == 'wordcount':
         kv = KeyValueStructure()
         for r in worker_results:
@@ -265,10 +268,33 @@ def run_root(
         print('\n  Top-20 words:')
         for word, count in top:
             print(f'    {word:<20} {count:>10,}')
+
     elif app == 'kmeans':
-        agg = aggregate_kmeans_results(worker_results)
+        if use_gossip and gossip_queue is not None:
+            # ── GOSSIP AGGREGATION PATH ───────────────────────────
+            # gossip_queue is already populated by each worker via
+            # the gossip hook in worker_process.py.
+            print('[Root] Using Adaptive Gossip aggregation ...')
+            from mpj_spark.core.gossip_aggregator import GossipAggregator
+            gagg = GossipAggregator(
+                num_workers           = num_workers,
+                convergence_threshold = gossip_threshold,
+                max_rounds            = gossip_max_rounds,
+                initial_fanout        = gossip_fanout,
+                verbose               = True,
+            )
+            agg = gagg.aggregate(gossip_queue, timeout_per_worker=120.0)
+            print(f'[Root] Gossip converged={agg["converged"]} '
+                  f'rounds={agg["rounds_run"]} '
+                  f'agg_time={agg["agg_time_s"]}s')
+            # ── END GOSSIP PATH ───────────────────────────────────
+        else:
+            # ── ORIGINAL BATCH HUNGARIAN PATH (unchanged) ─────────
+            agg = aggregate_kmeans_results(worker_results)
+
         print(f'\n  Total rows processed : {agg["total_rows"]:,}')
         print(f'  Total WCSS (inertia) : {agg["total_wcss"]:.4f}')
+
     t_agg_end = time.perf_counter()
     agg_time  = t_agg_end - t_agg_start
     t_wall    = load_time + proc_time + agg_time
@@ -281,6 +307,9 @@ def run_root(
     print(f'  Avg Worker Process Time  : {avg_proc:.4f} s')
     print(f'  Aggregation Time         : {agg_time:.4f} s')
     print(f'  Total Wall-clock Time    : {t_wall:.4f} s')
+    if use_gossip and agg and 'round_log' in agg:
+        print(f'  Gossip Rounds            : {agg["rounds_run"]}')
+        print(f'  Gossip Converged         : {agg["converged"]}')
 
     logger.log_run(app=app, num_workers=num_workers, cores=cores,
                    load_time=load_time, proc_time=avg_proc,

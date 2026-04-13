@@ -1,12 +1,18 @@
 # ================================================================
 # mpj_spark/workers/worker_process.py
 #
-# CHANGE from previous version:
-#   In Phase 3/4, kmeans now receives partition_path (str) directly,
-#   not a pre-built text_rdd. This is required for Fix 1 so the
-#   native spark.read.csv() can open the file itself inside the JVM.
+# Changes from feature/ml-kmeans-workload:
 #
-#   wordcount still uses text_rdd — no change there.
+#   GOSSIP EXTENSION (feature/adaptive-gossip-aggregation):
+#     - Added optional `gossip_queue` parameter.
+#     - After KMeans completes, worker pushes its raw centroid state
+#       into gossip_queue BEFORE putting final result into result_queue.
+#     - This feeds the GossipAggregator in root_process.py.
+#     - wordcount and non-gossip kmeans paths are completely unchanged.
+#
+# Original changes (kept from feature/ml-kmeans-workload):
+#   Phase 3/4: kmeans receives partition_path (str) directly,
+#   not a pre-built text_rdd. Required for Fix 1 (native spark.read.csv).
 # ================================================================
 import time
 import traceback
@@ -24,7 +30,21 @@ def worker_process(
     ready_signal,
     timing_queue:   Queue,
     worker_config:  dict = None,
+    gossip_queue:   Queue = None,   # NEW: optional gossip participation
 ):
+    """
+    Worker process: builds a local SparkSession, runs the assigned
+    application on its data partition, and returns results.
+
+    gossip_queue (optional):
+        If provided AND app == 'kmeans', the worker pushes its raw
+        KMeans result dict into gossip_queue immediately after fit(),
+        before sending to result_queue. The GossipAggregator in
+        root_process.py drains this queue to run peer-exchange rounds.
+
+        If None (default), behaviour is identical to the original
+        feature/ml-kmeans-workload implementation.
+    """
     if worker_config is None:
         worker_config = {}
 
@@ -68,9 +88,7 @@ def worker_process(
             load_time  = t_load_end - t_load_start
             print(f"[Worker {worker_id}] Loaded {row_count:,} rows in {load_time:.3f}s")
         else:
-            # For kmeans: file path is passed directly to the app.
-            # spark.read.csv() inside kmeans.run() handles loading natively.
-            t_load_end = t_load_start  # load time accounted inside proc
+            t_load_end = t_load_start
             load_time  = 0.0
 
         # ── Phase 4: Application dispatch ────────────────────────────
@@ -82,12 +100,26 @@ def worker_process(
 
         elif app_name == 'kmeans':
             from mpj_spark.applications import kmeans
-            # FIX 1: pass partition_path (str) — not text_rdd
             app_result = kmeans.run(
                 partition_path,
                 k=kmeans_k,
                 max_iter=kmeans_iter,
             )
+
+            # ── GOSSIP HOOK ───────────────────────────────────────────
+            # Push raw centroid state into gossip_queue so the
+            # GossipAggregator can run peer-exchange rounds.
+            # This is a non-blocking put() — queue is large enough
+            # (maxsize=0 by default in multiprocessing.Queue).
+            if gossip_queue is not None:
+                gossip_queue.put({
+                    'worker_id' : worker_id,
+                    'centres'   : app_result['centres'],
+                    'wcss'      : app_result['wcss'],
+                    'row_count' : app_result['row_count'],
+                })
+                print(f"[Worker {worker_id}] Centroid state pushed to gossip_queue.")
+            # ── END GOSSIP HOOK ───────────────────────────────────────
 
         else:
             raise ValueError(
