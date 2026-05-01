@@ -10,6 +10,9 @@
 #   python3 main.py --app kmeans --workers 2 --generate 500 --compare
 #   python3 main.py --app kmeans --workers 4 --kmeans-k 5 --kmeans-iter 50
 #
+# Fair comparison (equal total thread budget):
+#   python3 main.py --app kmeans --workers 4 --compare --baseline-threads 20
+#
 # Log history:
 #   python3 main.py --log-history
 # ================================================================
@@ -42,6 +45,12 @@ def parse_args():
                    help='Number of K-Means clusters (default: 3)')
     p.add_argument('--kmeans-iter', type=int,  default=20,
                    help='Maximum K-Means iterations (default: 20)')
+    p.add_argument('--baseline-threads', type=int, default=None,
+                   help='Override thread count for the baseline Spark session.\n'
+                        'Use this for a fair comparison by giving the baseline\n'
+                        'the same total threads as all MPJ workers combined.\n'
+                        'Example: --workers 4 --baseline-threads 20\n'
+                        '(default: same per-worker budget as each MPJ worker)')
     p.add_argument('--log-history', action='store_true',
                    help='Print all previous run logs and exit')
     return p.parse_args()
@@ -81,27 +90,30 @@ def main():
         print(f"[main] Tip:   Use --generate <MB> to create one first.")
         sys.exit(1)
 
-    print(f'\n[main] Dataset      : {dataset_path}')
-    print(f'[main] App          : {args.app}')
-    print(f'[main] Workers      : {args.workers}')
-    print(f'[main] Compare      : {args.compare}')
-    print(f'[main] Pre-warm     : {not args.no_prewarm}')
+    print(f'\n[main] Dataset          : {dataset_path}')
+    print(f'[main] App              : {args.app}')
+    print(f'[main] Workers          : {args.workers}')
+    print(f'[main] Compare          : {args.compare}')
+    print(f'[main] Pre-warm         : {not args.no_prewarm}')
     if args.app == 'kmeans':
-        print(f'[main] K-Means k    : {args.kmeans_k}')
-        print(f'[main] K-Means iter : {args.kmeans_iter}')
+        print(f'[main] K-Means k        : {args.kmeans_k}')
+        print(f'[main] K-Means iter     : {args.kmeans_iter}')
+    if args.baseline_threads:
+        print(f'[main] Baseline threads : {args.baseline_threads}  [fair comparison mode]')
 
     # ── Run Root process ──────────────────────────────────────────────
     from mpj_spark.core.root_process import run_root
 
     run_root(
-        input_file     = dataset_path,
-        num_workers    = args.workers,
-        compare        = args.compare,
-        prewarm        = not args.no_prewarm,
-        cores_override = args.cores,
-        app            = args.app,
-        kmeans_k       = args.kmeans_k,
-        kmeans_iter    = args.kmeans_iter,
+        input_file       = dataset_path,
+        num_workers      = args.workers,
+        compare          = args.compare,
+        prewarm          = not args.no_prewarm,
+        cores_override   = args.cores,
+        app              = args.app,
+        kmeans_k         = args.kmeans_k,
+        kmeans_iter      = args.kmeans_iter,
+        baseline_threads = args.baseline_threads,
     )
 
 

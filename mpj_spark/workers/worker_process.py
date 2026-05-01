@@ -1,8 +1,12 @@
 # ================================================================
 # mpj_spark/workers/worker_process.py
 #
-# Worker process — spawned by Root via multiprocessing.Process
-# Supports: wordcount | kmeans
+# CHANGE from previous version:
+#   In Phase 3/4, kmeans now receives partition_path (str) directly,
+#   not a pre-built text_rdd. This is required for Fix 1 so the
+#   native spark.read.csv() can open the file itself inside the JVM.
+#
+#   wordcount still uses text_rdd — no change there.
 # ================================================================
 import time
 import traceback
@@ -21,18 +25,6 @@ def worker_process(
     timing_queue:   Queue,
     worker_config:  dict = None,
 ):
-    """
-    Worker process entry point.
-
-    Lifecycle
-    ---------
-    1. Build SparkSession (JVM warm-up)
-    2. Signal ready → wait for go_signal from Root (barrier sync)
-    3. Load partition as text RDD
-    4. Dispatch to application (wordcount OR kmeans)
-    5. Put result + timing into queues
-    6. Stop SparkSession
-    """
     if worker_config is None:
         worker_config = {}
 
@@ -47,9 +39,8 @@ def worker_process(
         # ── Phase 1: Build SparkSession ───────────────────────────────
         print(f"[Worker {worker_id}] Starting SparkSession (app={app_name}) ...")
         t_init_start = time.perf_counter()
-        
-        num_workers = worker_config.get('num_workers', 1)
 
+        num_workers = worker_config.get('num_workers', 1)
         spark = build_spark_session(
             app_name=f'MPJ-Worker-{worker_id}-{app_name}',
             cores_override=cores_override,
@@ -60,21 +51,27 @@ def worker_process(
         init_time  = t_init_end - t_init_start
         print(f"[Worker {worker_id}] SparkSession ready in {init_time:.3f}s")
 
-        # ── Phase 2: Barrier — ready → wait for go ───────────────────
+        # ── Phase 2: Barrier ─────────────────────────────────────────
         ready_signal.set()
         print(f"[Worker {worker_id}] Waiting for go-signal ...")
         go_signal.wait()
         print(f"[Worker {worker_id}] Go! Loading partition ...")
 
-        # ── Phase 3: Load partition ───────────────────────────────────
+        # ── Phase 3: Load (wordcount only — kmeans loads inside app) ─
         t_load_start = time.perf_counter()
-        text_rdd     = spark.sparkContext.textFile(partition_path)
-        text_rdd.cache()
-        row_count    = text_rdd.count()
-        t_load_end   = time.perf_counter()
-        load_time    = t_load_end - t_load_start
 
-        print(f"[Worker {worker_id}] Loaded {row_count:,} rows in {load_time:.3f}s")
+        if app_name == 'wordcount':
+            text_rdd  = spark.sparkContext.textFile(partition_path)
+            text_rdd.cache()
+            row_count = text_rdd.count()
+            t_load_end = time.perf_counter()
+            load_time  = t_load_end - t_load_start
+            print(f"[Worker {worker_id}] Loaded {row_count:,} rows in {load_time:.3f}s")
+        else:
+            # For kmeans: file path is passed directly to the app.
+            # spark.read.csv() inside kmeans.run() handles loading natively.
+            t_load_end = t_load_start  # load time accounted inside proc
+            load_time  = 0.0
 
         # ── Phase 4: Application dispatch ────────────────────────────
         t_proc_start = time.perf_counter()
@@ -85,7 +82,12 @@ def worker_process(
 
         elif app_name == 'kmeans':
             from mpj_spark.applications import kmeans
-            app_result = kmeans.run(text_rdd, k=kmeans_k, max_iter=kmeans_iter)
+            # FIX 1: pass partition_path (str) — not text_rdd
+            app_result = kmeans.run(
+                partition_path,
+                k=kmeans_k,
+                max_iter=kmeans_iter,
+            )
 
         else:
             raise ValueError(
@@ -97,7 +99,7 @@ def worker_process(
         proc_time  = t_proc_end - t_proc_start
         print(f"[Worker {worker_id}] Processing done in {proc_time:.3f}s")
 
-        # ── Phase 5: Put results into queues ─────────────────────────
+        # ── Phase 5: Put results ──────────────────────────────────────
         result_queue.put({
             'worker_id': worker_id,
             'result'   : app_result,

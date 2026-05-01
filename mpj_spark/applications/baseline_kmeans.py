@@ -6,14 +6,27 @@ import time
 
 
 def run_baseline_kmeans(
-    input_file_path: str,
-    num_workers:     int = 1,
-    cores_override:  int = None,
-    k:               int = 3,
-    max_iter:        int = 20,
+    input_file_path:  str,
+    num_workers:      int = 1,
+    cores_override:   int = None,
+    k:                int = 3,
+    max_iter:         int = 20,
+    baseline_threads: int = None,
 ) -> tuple:
     """
     Single-driver Spark K-Means. Fair baseline for multi-driver comparison.
+
+    Parameters
+    ----------
+    baseline_threads : int, optional
+        When provided, the baseline SparkSession is given exactly this many
+        threads (local[N]), regardless of num_workers or cores_override.
+        Use this to give the baseline the same *total* thread count as all
+        MPJ workers combined, e.g.:
+            --workers 4 --cores 5  →  MPJ uses 4×local[5] = 20 threads
+            --baseline-threads 20  →  baseline uses local[20]  (fair)
+        When omitted the baseline uses the same per-worker budget as each
+        individual MPJ worker (existing behaviour, conservative comparison).
 
     Returns
     -------
@@ -26,23 +39,34 @@ def run_baseline_kmeans(
     from pyspark.ml.clustering import KMeans
     from pyspark.ml.feature import VectorAssembler
 
-    cores = max(1, cores_override) if cores_override else max(1, TOTAL_CORES // num_workers)
+    # Thread budget resolution (priority order):
+    #   1. baseline_threads explicitly passed  →  fair comparison mode
+    #   2. cores_override passed               →  manual override
+    #   3. default: TOTAL_CORES // num_workers →  same per-worker budget
+    if baseline_threads is not None:
+        cores = max(1, baseline_threads)
+        budget_label = f'local[{cores}]  [fair: total MPJ threads = {cores}]'
+    elif cores_override:
+        cores = max(1, cores_override)
+        budget_label = f'local[{cores}]  (cores_override)'
+    else:
+        cores = max(1, TOTAL_CORES // num_workers)
+        budget_label = f'local[{cores}]  ({TOTAL_CORES} total \u00f7 {num_workers} workers)'
 
     print('\n' + '=' * 70)
     print('  Standard Spark K-Means (Single Driver) — BASELINE')
-    print(f'  Thread budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)')
+    print(f'  Thread budget : {budget_label}')
     print(f'  k={k}  max_iter={max_iter}')
     print('=' * 70)
 
     t_total_start = time.perf_counter()
 
     # ── Build SparkSession ────────────────────────────────────────────
-    # Try passing cores_override; fall back if the function doesn't accept it
     try:
         spark = build_spark_session('Baseline-KMeans', cores_override=cores, num_workers=1)
     except TypeError:
         spark = build_spark_session('Baseline-KMeans', cores)
-    
+
     # ── Load ─────────────────────────────────────────────────────────
     t_load_start = time.perf_counter()
     raw_rdd      = spark.sparkContext.textFile(input_file_path)
