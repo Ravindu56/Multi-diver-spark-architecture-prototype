@@ -1,21 +1,5 @@
 # ================================================================
 # mpj_spark/workers/worker_process.py
-#
-# Changes from feature/adaptive-gossip-aggregation (previous):
-#
-#   OPTION 1 — Global Seeding:
-#     - worker_config may now carry 'seed_centres' (list[list[float]])
-#       set by root after its pre-partitioning sampling step.
-#     - seed_centres is forwarded into kmeans.run() so every worker
-#       warm-starts from the SAME initial centroid positions.
-#
-#   OPTION 2 — Re-assignment Pass:
-#     - Added optional `reassign_queue` parameter.
-#     - After gossip completes, root sends final global centroids via
-#       reassign_queue.  Worker reads them, runs a lightweight assign-
-#       only pass (no model.fit), computes per-cluster (sum, count),
-#       and puts the stats back into reassign_queue for root to
-#       recompute exact weighted global centroids.
 # ================================================================
 import time
 import traceback
@@ -39,25 +23,12 @@ def _reassign_pass(spark, partition_path: str, global_centres: list,
     Loads the partition, assigns every point to the nearest centroid
     in `global_centres` (no model training), then returns per-cluster
     (weighted_sum, count) for exact centroid recomputation at root.
-
-    Parameters
-    ----------
-    spark           : active SparkSession
-    partition_path  : path to this worker's CSV partition
-    global_centres  : list[list[float]] — gossip-final global centroids
-    worker_id       : int
-
-    Returns
-    -------
-    dict with keys:
-        cluster_sums   : list[list[float]]  — sum of feature vectors per cluster
-        cluster_counts : list[int]          — number of points per cluster
-        row_count      : int                — total rows processed
     """
     import numpy as _np
     from pyspark.ml.feature import VectorAssembler
     from pyspark.sql import functions as F
-    from pyspark.sql.types import IntegerType
+    from pyspark.sql.types import IntegerType, DoubleType
+    from pyspark.sql.functions import udf, col
 
     centres_bc = spark.sparkContext.broadcast(_np.array(global_centres))
     k          = len(global_centres)
@@ -71,22 +42,14 @@ def _reassign_pass(spark, partition_path: str, global_centres: list,
         inputCols=feature_cols, outputCol='features', handleInvalid='skip')
     df_vec = assembler.transform(df).select('features')
 
-    # Assign cluster label: argmin L2 distance to each broadcast centroid
     def assign_cluster(features):
-        arr  = _np.array(features.toArray())
+        arr   = _np.array(features.toArray())
         dists = _np.linalg.norm(centres_bc.value - arr, axis=1)
         return int(_np.argmin(dists))
 
-    from pyspark.sql.functions import udf
-    assign_udf = udf(assign_cluster, IntegerType())
-    df_assigned = df_vec.withColumn('cluster', assign_udf(F.col('features')))
+    assign_udf  = udf(assign_cluster, IntegerType())
+    df_assigned = df_vec.withColumn('cluster', assign_udf(col('features')))
 
-    # Collect cluster sums and counts via groupBy
-    # Expand DenseVector to individual columns for aggregation
-    from pyspark.sql.functions import col
-    from pyspark.sql.types import DoubleType
-
-    # Build a DataFrame with one column per feature dimension
     def expand_to_cols(df_a, dims_):
         for d in range(dims_):
             df_a = df_a.withColumn(
@@ -106,9 +69,9 @@ def _reassign_pass(spark, partition_path: str, global_centres: list,
     for row in df_agg:
         c   = row['cluster']
         cnt = row['cnt']
-        cluster_counts[c]  = cnt
-        cluster_sums[c]    = [row[f's{d}'] for d in range(dims)]
-        total_rows        += cnt
+        cluster_counts[c] = cnt
+        cluster_sums[c]   = [row[f's{d}'] for d in range(dims)]
+        total_rows       += cnt
 
     centres_bc.unpersist()
     print(f'{_tag(worker_id, "REASSIGN")} Done — {total_rows:,} rows assigned to {k} clusters')
@@ -138,13 +101,12 @@ def worker_process(
     kmeans_k       = int(worker_config.get('kmeans_k',         3))
     kmeans_iter    = int(worker_config.get('kmeans_max_iter',  20))
     num_workers    = worker_config.get('num_workers',  1)
-    # Option 1 — global seed centroids broadcast by root (None = use k-means||)
     seed_centres   = worker_config.get('seed_centres',     None)
 
     logger = DevLogger(worker_id=worker_id)
 
     try:
-        # ── INIT ───────────────────────────────────────────────────────
+        # ── INIT ──────────────────────────────────────────────────────
         print(f'{_tag(worker_id, "INIT")} Starting SparkSession (app={app_name}) ...')
         t_init_start = time.perf_counter()
         spark = build_spark_session(
@@ -155,12 +117,12 @@ def worker_process(
         init_time = time.perf_counter() - t_init_start
         print(f'{_tag(worker_id, "INIT")} SparkSession ready  ({init_time:.3f}s)')
 
-        # ── BARRIER ─────────────────────────────────────────────────
+        # ── BARRIER ───────────────────────────────────────────────────
         ready_signal.set()
         print(f'{_tag(worker_id, "WAIT")} Waiting for go-signal ...')
         go_signal.wait()
 
-        # ── LOAD ──────────────────────────────────────────────────
+        # ── LOAD ──────────────────────────────────────────────────────
         print(f'{_tag(worker_id, "LOAD")} Loading partition ...')
         t_load_start = time.perf_counter()
 
@@ -173,7 +135,7 @@ def worker_process(
         else:
             load_time = 0.0
 
-        # ── PROC ──────────────────────────────────────────────────
+        # ── PROC ──────────────────────────────────────────────────────
         print(f'{_tag(worker_id, "PROC")} Running {app_name} ...')
         t_proc_start = time.perf_counter()
 
@@ -183,7 +145,6 @@ def worker_process(
 
         elif app_name == 'kmeans':
             from mpj_spark.applications import kmeans
-            # Option 1: pass broadcast seed_centres (None = k-means|| fallback)
             app_result = kmeans.run(
                 partition_path,
                 k=kmeans_k,
@@ -199,29 +160,26 @@ def worker_process(
                 })
                 print(f'{_tag(worker_id, "PROC")} Centroid state → gossip_queue')
 
-            # Option 2: Re-assignment pass — wait for gossip-final centroids
-            if reassign_queue is not None:
-                print(f'{_tag(worker_id, "REASSIGN")} Waiting for global centroids ...')
-                msg = reassign_queue.get(timeout=120)
-                if msg.get('type') == 'reassign':
-                    global_centres = msg['centres']
-                    reassign_stats = _reassign_pass(
-                        spark, partition_path, global_centres, worker_id)
-                    reassign_queue.put({
-                        'type'          : 'stats',
-                        'worker_id'     : worker_id,
-                        'cluster_sums'  : reassign_stats['cluster_sums'],
-                        'cluster_counts': reassign_stats['cluster_counts'],
-                        'row_count'     : reassign_stats['row_count'],
-                    })
-
         else:
             raise ValueError(f"Unknown app '{app_name}'. Valid: 'wordcount', 'kmeans'")
 
         proc_time = time.perf_counter() - t_proc_start
         print(f'{_tag(worker_id, "DONE")} {app_name} complete  ({proc_time:.3f}s)')
 
-        # ── QUEUE RESULTS ─────────────────────────────────────────
+        # ── EMIT RESULT (MUST happen before reassign_queue.get) ───────
+        #
+        # CRITICAL ordering: result_queue and timing_queue MUST be
+        # populated here, before any reassign_queue.get() call.
+        #
+        # If we blocked on reassign_queue first, root's Phase 4
+        # result_queue.get() would wait forever — root never reaches
+        # Phase 5 gossip, never calls reassign_queue.put(), and both
+        # sides deadlock until the 120 s timeout fires.
+        #
+        # Correct lifecycle:
+        #   worker: gossip_queue.put → result_queue.put → reassign_queue.get
+        #   root:   Phase4 result_queue.get → Phase5 gossip → reassign_queue.put
+        # ─────────────────────────────────────────────────────────────
         result_queue.put({'worker_id': worker_id, 'result': app_result, 'status': 'success'})
         timing_queue.put({
             'worker_id'      : worker_id,
@@ -232,6 +190,28 @@ def worker_process(
         })
         logger.log_worker_timing(worker_id=worker_id, init_time=init_time,
                                  load_time=load_time, proc_time=proc_time)
+
+        # ── OPTION 2: Re-assignment pass ──────────────────────────────
+        #
+        # Now safe to block: root has already received the result above
+        # and will proceed through Phase 5 gossip, then call
+        # reassign_queue.put() for every worker. Timeout raised to 300 s
+        # to accommodate gossip convergence time on large datasets.
+        # ─────────────────────────────────────────────────────────────
+        if reassign_queue is not None and app_name == 'kmeans':
+            print(f'{_tag(worker_id, "REASSIGN")} Waiting for global centroids ...')
+            msg = reassign_queue.get(timeout=300)
+            if msg.get('type') == 'reassign':
+                global_centres = msg['centres']
+                reassign_stats = _reassign_pass(
+                    spark, partition_path, global_centres, worker_id)
+                reassign_queue.put({
+                    'type'          : 'stats',
+                    'worker_id'     : worker_id,
+                    'cluster_sums'  : reassign_stats['cluster_sums'],
+                    'cluster_counts': reassign_stats['cluster_counts'],
+                    'row_count'     : reassign_stats['row_count'],
+                })
 
     except Exception as exc:
         print(f'{_tag(worker_id, "ERROR")} {exc}')
