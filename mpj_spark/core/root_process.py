@@ -1,29 +1,30 @@
 # ================================================================
 # mpj_spark/core/root_process.py
 #
-# Changes from feature/adaptive-gossip-aggregation (previous):
+# FIX: JVM isolation for Phase 1b global seeding.
+#
+#   PROBLEM: compute_global_seed_centres() previously ran a
+#   SparkSession directly in the root process, then called
+#   spark.stop(). PySpark's Py4J gateway does not terminate the
+#   underlying JVM synchronously — the JVM thread lingers on its
+#   port. When multiprocessing workers were then forked, they
+#   inherited a half-dead Py4J state, causing:
+#     - KeyError: 'c'
+#     - SparkConf does not exist in the JVM
+#     - Method lower([]) does not exist
+#
+#   FIX: _seeding_worker() runs the entire Spark seeding session
+#   inside an isolated subprocess (multiprocessing.Process). That
+#   subprocess gets its own OS-level JVM. The root blocks on
+#   p.join() before any computation worker is ever forked, so the
+#   seeding JVM is fully reclaimed before workers call SparkConf().
 #
 #   OPTION 1 — Global Seeding (Phase 1b):
-#     - run_root() accepts new bool `use_global_seed` (default True
-#       when use_gossip=True and app='kmeans').
-#     - Phase 1b: root samples 5% of the full dataset with a
-#       temporary SparkSession, runs KMeans(k, initMode='k-means||')
-#       on the sample, extracts k seed centroids, shuts down session.
-#     - Seed centroids stored in worker_cfg['seed_centres'] so every
-#       worker warm-starts from the SAME initial positions.
+#     Seed centroids broadcast to workers via worker_cfg['seed_centres'].
 #
 #   OPTION 2 — Re-assignment Pass (Phase 5b):
-#     - After gossip converges, Phase 5b sends gossip-final centroids
-#       to all workers via reassign_queue.
-#     - Each worker runs _reassign_pass() — assign-only, no fit —
-#       and returns per-cluster (cluster_sums, cluster_counts).
-#     - Root collects all stats and recomputes exact weighted centroids:
-#           C_j = (Σ_i count_ij × sum_ij) / Σ_i count_ij
-#     - These replace the gossip-averaged centroids in final output.
-#
-#   Both options are active by default when use_gossip=True and
-#   app='kmeans'. Both can be independently disabled via run_root()
-#   parameters for ablation study benchmarking.
+#     After gossip converges, exact weighted global centroids are
+#     recomputed from per-worker assign-only passes.
 # ================================================================
 import math
 import os
@@ -54,6 +55,112 @@ def _ok(msg):
 def _info(msg):
     print(f'     {msg}')
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Isolated seeding subprocess
+# ──────────────────────────────────────────────────────────────────────
+
+def _seeding_worker(
+    result_q: Queue,
+    input_file: str,
+    k: int,
+    total_cores: int,
+    sample_fraction: float,
+    seed: int,
+):
+    """
+    Runs entirely inside a dedicated subprocess.
+
+    Starts its own JVM, performs the seeding Spark job, puts
+    {'status': 'ok', 'centres': [...]} or {'status': 'error', 'msg': ...}
+    onto result_q, then exits. The OS reclaims the JVM on process exit.
+    """
+    try:
+        from pyspark.sql import SparkSession
+        from pyspark.ml.clustering import KMeans
+        from pyspark.ml.feature import VectorAssembler
+
+        spark = (
+            SparkSession.builder
+            .appName('MPJ-Root-Seeding')
+            .master(f'local[{min(total_cores, 8)}]')
+            .config('spark.ui.enabled', 'false')
+            .config('spark.sql.shuffle.partitions', '8')
+            .config('spark.driver.memory', '2g')
+            .getOrCreate()
+        )
+        spark.sparkContext.setLogLevel('ERROR')
+
+        df_raw  = spark.read.csv(input_file, inferSchema=True, header=False)
+        df_samp = df_raw.sample(fraction=sample_fraction, seed=seed).dropna()
+
+        assembler = VectorAssembler(
+            inputCols=df_raw.columns, outputCol='features', handleInvalid='skip')
+        df_vec = assembler.transform(df_samp).select('features')
+
+        model   = KMeans(k=k, maxIter=20, seed=seed,
+                         featuresCol='features', initMode='k-means||').fit(df_vec)
+        centres = [c.tolist() for c in model.clusterCenters()]
+
+        spark.stop()
+        result_q.put({'status': 'ok', 'centres': centres})
+
+    except Exception as exc:  # noqa: BLE001
+        result_q.put({'status': 'error', 'msg': str(exc)})
+
+
+def compute_global_seed_centres(
+    input_file: str,
+    k: int,
+    total_cores: int,
+    sample_fraction: float = 0.05,
+    seed: int = 42,
+) -> list:
+    """
+    Option 1 — Phase 1b: compute k global seed centroids.
+
+    Spawns an isolated subprocess so the seeding JVM is completely
+    dead (OS-reclaimed) before any computation worker is forked.
+    Blocks until the subprocess exits, then returns the centroids.
+
+    Returns list[list[float]] of shape (k, dims).
+    """
+    print(f'  [Seeding] Sampling {sample_fraction*100:.0f}% of dataset '
+          f'for global seed centroids (isolated subprocess) ...')
+    t0 = time.perf_counter()
+
+    result_q = Queue()
+    p = Process(
+        target=_seeding_worker,
+        args=(result_q, input_file, k, total_cores, sample_fraction, seed),
+        daemon=False,   # must NOT be daemon — we need p.join() to block
+    )
+    p.start()
+    p.join()           # ← root blocks here; seeding JVM fully reclaimed before returning
+
+    if p.exitcode != 0:
+        raise RuntimeError(
+            f'[Seeding] subprocess exited with code {p.exitcode}. '
+            f'Check logs above for traceback.')
+
+    result = result_q.get_nowait()
+    if result['status'] != 'ok':
+        raise RuntimeError(f'[Seeding] seeding worker failed: {result["msg"]}')
+
+    centres = result['centres']
+    elapsed = time.perf_counter() - t0
+
+    print(f'  [Seeding] {k} seed centroids computed in {elapsed:.3f}s')
+    for i, c in enumerate(centres):
+        preview = ', '.join(f'{v:.3f}' for v in c[:4])
+        print(f'  [Seeding] Seed C{i}: [{preview}...]')
+
+    return centres
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
 
 def dynamic_partition(input_path, num_partitions, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -115,64 +222,6 @@ def aggregate_kmeans_results(worker_results):
             'total_rows': total_rows, 'num_workers': len(worker_results)}
 
 
-def compute_global_seed_centres(
-    input_file: str,
-    k: int,
-    total_cores: int,
-    sample_fraction: float = 0.05,
-    seed: int = 42,
-) -> list:
-    """
-    Option 1 — Phase 1b: compute k global seed centroids from a
-    small sample of the full dataset.
-
-    Opens a temporary SparkSession, samples `sample_fraction` of
-    input_file, runs KMeans(k, initMode='k-means||') on the sample,
-    extracts centroids, and shuts down. Total overhead: ~2-4s.
-
-    Returns list[list[float]] of shape (k, dims).
-    """
-    from pyspark.sql import SparkSession
-    from pyspark.ml.clustering import KMeans
-    from pyspark.ml.feature import VectorAssembler
-
-    print(f'  [Seeding] Sampling {sample_fraction*100:.0f}% of dataset for global seed centroids ...')
-    t0 = time.perf_counter()
-
-    spark = (
-        SparkSession.builder
-        .appName('MPJ-Root-Seeding')
-        .master(f'local[{min(total_cores, 8)}]')
-        .config('spark.ui.enabled', 'false')
-        .config('spark.sql.shuffle.partitions', '8')
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel('ERROR')
-
-    try:
-        df_raw  = spark.read.csv(input_file, inferSchema=True, header=False)
-        df_samp = df_raw.sample(fraction=sample_fraction, seed=seed).dropna()
-
-        feature_cols = df_raw.columns
-        assembler    = VectorAssembler(
-            inputCols=feature_cols, outputCol='features', handleInvalid='skip')
-        df_vec = assembler.transform(df_samp).select('features')
-
-        model    = KMeans(k=k, maxIter=20, seed=seed,
-                          featuresCol='features', initMode='k-means||').fit(df_vec)
-        centres  = [c.tolist() for c in model.clusterCenters()]
-        elapsed  = time.perf_counter() - t0
-
-        print(f'  [Seeding] {k} seed centroids computed in {elapsed:.3f}s')
-        for i, c in enumerate(centres):
-            preview = ', '.join(f'{v:.3f}' for v in c[:4])
-            print(f'  [Seeding] Seed C{i}: [{preview}...]')
-        return centres
-
-    finally:
-        spark.stop()
-
-
 def reassign_pass_root(
     processes_alive: list,
     gossip_centres: list,
@@ -194,7 +243,6 @@ def reassign_pass_root(
     for _ in range(num_workers):
         reassign_queue.put({'type': 'reassign', 'centres': gossip_centres})
 
-    # Collect all worker stats
     all_sums   = np.zeros((k, dims))
     all_counts = np.zeros(k, dtype=np.int64)
     total_rows = 0
@@ -209,13 +257,12 @@ def reassign_pass_root(
             total_rows += msg['row_count']
             received   += 1
 
-    # Exact weighted centroid recomputation
     corrected = []
     for j in range(k):
         if all_counts[j] > 0:
             corrected.append((all_sums[j] / all_counts[j]).tolist())
         else:
-            corrected.append(gossip_centres[j])  # empty cluster: keep gossip value
+            corrected.append(gossip_centres[j])
 
     print(f'  [Reassign] Recomputed {k} exact global centroids from {total_rows:,} rows')
     for i, c in enumerate(corrected):
@@ -223,6 +270,10 @@ def reassign_pass_root(
         print(f'  [Reassign] C{i}: [{preview}...]')
     return corrected
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Output helpers
+# ──────────────────────────────────────────────────────────────────────
 
 def _print_comparison(multi_timing, baseline_timing, num_workers, app, baseline_threads=None):
     note = f'  [baseline-threads={baseline_threads}]' if baseline_threads else ''
@@ -267,6 +318,10 @@ def _print_timing_summary(load_time, avg_proc, agg_time, t_wall,
     print(DASH)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Main entry point
+# ──────────────────────────────────────────────────────────────────────
+
 def run_root(
     input_file,
     num_workers=2,
@@ -281,13 +336,12 @@ def run_root(
     gossip_threshold=1e-3,
     gossip_max_rounds=10,
     gossip_fanout=2,
-    use_global_seed=True,    # Option 1: enabled by default with gossip+kmeans
-    use_reassign=True,       # Option 2: enabled by default with gossip+kmeans
+    use_global_seed=True,
+    use_reassign=True,
 ):
     from mpj_spark.config import TOTAL_CORES, DATA_DIR
     logger = DevLogger(worker_id='root')
 
-    # ── Header ────────────────────────────────────────────────
     do_seed     = use_global_seed and use_gossip and app == 'kmeans'
     do_reassign = use_reassign    and use_gossip and app == 'kmeans'
 
@@ -316,13 +370,12 @@ def run_root(
     cores = max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / num_workers))
     print(f'  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)')
 
-    # Will be populated by Option 1 seeding below
     seed_centres = None
     seed_time    = None
 
-    # ── Phase 1b: Global Seeding (Option 1) ────────────────────
+    # ── Phase 1b: Global Seeding — isolated subprocess (Option 1) ──
     if do_seed:
-        _phase('1b', 'Computing global seed centroids (Option 1)')
+        _phase('1b', 'Computing global seed centroids (Option 1 — isolated subprocess)')
         t_seed = time.perf_counter()
         seed_centres = compute_global_seed_centres(
             input_file=input_file,
@@ -332,7 +385,8 @@ def run_root(
             seed=42,
         )
         seed_time = time.perf_counter() - t_seed
-        _ok(f'Global seed centroids ready  ({seed_time:.3f}s)')
+        _ok(f'Global seed centroids ready  ({seed_time:.3f}s)  '
+            f'[seeding JVM fully terminated before workers fork]')
 
     worker_cfg = {
         'app'            : app,
@@ -340,17 +394,17 @@ def run_root(
         'kmeans_k'       : kmeans_k,
         'kmeans_max_iter': kmeans_iter,
         'num_workers'    : num_workers,
-        'seed_centres'   : seed_centres,  # None if do_seed=False
+        'seed_centres'   : seed_centres,
     }
 
-    # ── Phase 1: Partition ──────────────────────────────────
+    # ── Phase 1: Partition ─────────────────────────────────────────
     _phase(1, 'Partitioning')
     t_load_start    = time.perf_counter()
     partition_paths = dynamic_partition(input_file, num_workers, DATA_DIR)
     load_time       = time.perf_counter() - t_load_start
     _ok(f'Split into {num_workers} partitions  ({load_time:.3f}s)')
 
-    # ── Phase 2: Launch workers ─────────────────────────────
+    # ── Phase 2: Launch workers ────────────────────────────────────
     _phase(2, f'Launching {num_workers} workers')
     result_queue  = Queue()
     timing_queue  = Queue()
@@ -376,13 +430,13 @@ def run_root(
         sig.wait()
         _ok(f'Worker {i} JVM ready')
 
-    # ── Phase 3: Fire ────────────────────────────────────
+    # ── Phase 3: Fire ──────────────────────────────────────────────
     _phase(3, 'Firing all workers simultaneously')
     t_proc_start = time.perf_counter()
     for sig in go_signals:
         sig.set()
 
-    # ── Phase 4: Collect ─────────────────────────────────
+    # ── Phase 4: Collect ───────────────────────────────────────────
     _phase(4, 'Collecting results')
     worker_results = []
     worker_timings = []
@@ -404,11 +458,11 @@ def run_root(
         return
     _ok(f'All {num_workers} workers completed')
 
-    # ── Phase 5: Aggregate ───────────────────────────────
+    # ── Phase 5: Aggregate ─────────────────────────────────────────
     _phase(5, 'Aggregating results')
-    t_agg_start  = time.perf_counter()
-    gossip_info  = None
-    agg          = None
+    t_agg_start = time.perf_counter()
+    gossip_info = None
+    agg         = None
 
     if app == 'wordcount':
         kv = KeyValueStructure()
@@ -439,16 +493,16 @@ def run_root(
         _info(f'Total rows : {agg["total_rows"]:,}')
         _info(f'Total WCSS : {agg["total_wcss"]:.4f}')
 
-    agg_time     = time.perf_counter() - t_agg_start
+    agg_time      = time.perf_counter() - t_agg_start
     reassign_time = None
 
-    # ── Phase 5b: Re-assignment Pass (Option 2) ───────────────
+    # ── Phase 5b: Re-assignment Pass (Option 2) ────────────────────
     if do_reassign and agg is not None and app == 'kmeans':
         _phase('5b', 'Re-assignment pass (Option 2) — exact global centroid correction')
-        t_reassign = time.perf_counter()
+        t_reassign     = time.perf_counter()
         gossip_centres = agg['centres']
-        k_val  = len(gossip_centres)
-        d_val  = len(gossip_centres[0])
+        k_val          = len(gossip_centres)
+        d_val          = len(gossip_centres[0])
 
         corrected_centres = reassign_pass_root(
             processes_alive=processes,
@@ -458,7 +512,7 @@ def run_root(
             k=k_val,
             dims=d_val,
         )
-        reassign_time = time.perf_counter() - t_reassign
+        reassign_time  = time.perf_counter() - t_reassign
         agg['centres'] = corrected_centres
 
         print(f'\n{DASH}')
@@ -481,12 +535,11 @@ def run_root(
         reassign_time=reassign_time,
     )
 
-    # Silent file log
     logger.log_run(app=app, num_workers=num_workers, cores=cores,
                    load_time=load_time, proc_time=avg_proc,
                    agg_time=agg_time, total_time=t_wall)
 
-    # ── Baseline comparison ───────────────────────────────
+    # ── Baseline comparison ────────────────────────────────────────
     if compare:
         _phase('B', f'Running {app} baseline for comparison')
         if app == 'wordcount':
