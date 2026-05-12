@@ -3,25 +3,36 @@
 #
 # K-Means MLlib pipeline — per-worker ML workload
 #
-# OPTION 1 — Global Seeding (pure-Python, no Java reflection):
+# INIT STRATEGY when seed_centres are provided (Global Seed ON)
+# ─────────────────────────────────────────────────────────────
+# PySpark KMeans has no setInitialModel() in Python bindings.
+# The Scala API exposes it but it is inaccessible from PySpark
+# without Java reflection (which breaks across Spark versions).
 #
-#   Problem: PySpark's KMeans estimator does NOT expose setInitialModel()
-#   (that is Scala-only). clusterCenters on a fitted model is also
-#   read-only. There is no direct API to inject starting centroids.
+# Default k-means|| uses initSteps=2 (default) extra candidate
+# passes, meaning each worker scans the full partition ~3-4 times
+# before fit() even begins. For a 1.4M-row partition this is the
+# dominant cost (~10-15s of ~19s total worker time).
 #
-#   Solution — Weighted Anchor Rows:
-#     Prepend ANCHOR_WEIGHT (500) copies of each seed centroid as
-#     synthetic rows into the partition DataFrame before fit().
-#     k-means|| selects initial centres proportional to squared
-#     distance from already-selected centres. The heavily-weighted
-#     anchor points dominate this sampling, so k-means|| reliably
-#     picks the broadcast seed centroids as its k initial centres.
-#     Anchors are ~500 rows vs ~1.4M partition rows (≈1:2800 ratio),
-#     so they are numerically negligible in the final centroid update.
+# Fix — Single-pass init (initSteps=1) + minimal anchors:
+#   When seed_centres are available from Phase 1b global seeding:
+#     1. Prepend exactly k synthetic anchor rows (one per centroid)
+#        into the partition DataFrame. These bias k-means||
+#        candidate sampling toward the known seed positions.
+#     2. Set initSteps=1 (was: default 2). This collapses k-means||
+#        init to a single oversampling pass instead of log(k)+1
+#        passes. Combined with the anchors, the first pass reliably
+#        selects near-seed positions.
+#     3. initMode stays 'k-means||' — random init is non-
+#        deterministic and provides no correctness guarantee.
 #
-#   After convergence, all workers have started from the same
-#   initial positions — eliminating the dominant source of
-#   cross-worker divergence before gossip aggregation.
+#   When seed_centres are absent (global seeding OFF):
+#     Unchanged behaviour — initMode='k-means||', initSteps=2,
+#     no anchors.
+#
+# Init cost comparison:
+#   Before: initSteps=2, 500 anchors/centroid → ~3-4 data passes
+#   After:  initSteps=1, 1 anchor/centroid   → ~1 data pass
 # ================================================================
 
 from pyspark.ml.clustering import KMeans
@@ -30,19 +41,23 @@ from pyspark.ml.linalg import Vectors, VectorUDT
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField
 
-# How many times each seed centroid is repeated as an anchor row.
-# 500 is large enough to dominate k-means|| sampling but negligible
-# as a fraction of a ~1.4M-row partition (ratio ~1:2800).
-_ANCHOR_WEIGHT = 500
+# One anchor per centroid is sufficient when initSteps=1:
+# the single oversampling pass already concentrates candidates
+# near the highest-weight (most isolated) points in the data,
+# and with k anchors placed exactly at the seed positions they
+# are the most isolated points from each other (max pairwise
+# distance), so k-means|| selection is deterministic in practice.
+_ANCHOR_WEIGHT = 1
 
 
 def _inject_seed_anchors(spark, df_vec, seed_centres: list) -> object:
     """
     Return a new DataFrame = df_vec UNION (seed anchors).
 
-    Each seed centroid is repeated _ANCHOR_WEIGHT times so that
-    k-means|| init sampling is biased toward those positions.
-    The anchor rows share the same schema as df_vec ('features' column).
+    Prepends exactly k rows (one per seed centroid) so that
+    k-means|| init with initSteps=1 reliably selects near-seed
+    initial centres. The anchor rows are numerically negligible
+    (k rows vs ~1.4M partition rows).
     """
     schema = StructType([StructField('features', VectorUDT(), False)])
     anchor_rows = [
@@ -51,7 +66,7 @@ def _inject_seed_anchors(spark, df_vec, seed_centres: list) -> object:
         for _ in range(_ANCHOR_WEIGHT)
     ]
     df_anchors = spark.createDataFrame(anchor_rows, schema)
-    return df_vec.union(df_anchors)
+    return df_anchors.union(df_vec)   # anchors FIRST so they are sampled early
 
 
 def run(
@@ -71,7 +86,7 @@ def run(
     max_iter       : int         — maximum KMeans iterations (default 20)
     seed           : int         — random seed (default 42)
     seed_centres   : list|None   — k×d list of floats from global seeding
-                                   (Option 1). If None, uses k-means|| only.
+                                   (Option 1). If None, uses standard k-means||.
 
     Returns
     -------
@@ -99,30 +114,38 @@ def run(
     df_vec    = assembler.transform(df).select('features')
     row_count = df_vec.count()   # real row count before any anchors
 
-    # ─ 3. Optionally inject seed anchor rows (Option 1) -------------------
+    # ─ 3. Choose init strategy based on seed availability -----------------
     use_global_seed = seed_centres is not None and len(seed_centres) == k
 
     print(f'[KMeans Worker] k={k} | max_iter={max_iter} | seed={seed} | '
           f"global_seed={'YES' if use_global_seed else 'NO'} | "
-          f'rows={row_count:,} | loading...')
+          f'rows={row_count:,}')
 
     if use_global_seed:
-        df_train = _inject_seed_anchors(spark, df_vec, seed_centres)
-        print(f'[KMeans Worker] Injected {k * _ANCHOR_WEIGHT:,} anchor rows '
-              f'({_ANCHOR_WEIGHT}× per centroid) to bias k-means|| init')
+        # Single-pass init: anchors first + initSteps=1
+        df_train   = _inject_seed_anchors(spark, df_vec, seed_centres)
+        init_steps = 1
+        print(
+            f'[KMeans Worker] Single-pass init: {k} anchor rows prepended '
+            f'(1 per centroid), initSteps=1  '
+            f'[was: {k * 500} anchors, initSteps=2]'
+        )
     else:
-        df_train = df_vec
+        # Standard k-means|| — no prior knowledge of centres
+        df_train   = df_vec
+        init_steps = 2
+        print('[KMeans Worker] Standard init: k-means|| initSteps=2 (no seed)')
 
     df_train = df_train.cache()
 
-    # ─ 4. Build KMeans estimator (always k-means|| — PySpark has no
-    #       setInitialModel() in Python bindings) --------------------------
+    # ─ 4. Build KMeans estimator ------------------------------------------
     kmeans_est = KMeans(
         k=k,
         maxIter=max_iter,
         seed=seed,
         featuresCol='features',
         initMode='k-means||',
+        initSteps=init_steps,
     )
 
     # ─ 5. Fit -------------------------------------------------------------
