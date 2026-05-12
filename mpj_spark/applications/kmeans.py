@@ -3,11 +3,25 @@
 #
 # K-Means MLlib pipeline — per-worker ML workload
 #
-# OPTION 1 — Global Seeding:
-#   Root broadcasts k seed centroids via worker_config['seed_centres'].
-#   Workers warm-start via _make_seed_model() which builds a valid
-#   KMeansModel from those centroids using a pure-Python synthetic
-#   DataFrame (no Java reflection, no _java_obj calls).
+# OPTION 1 — Global Seeding (pure-Python, no Java reflection):
+#
+#   Problem: PySpark's KMeans estimator does NOT expose setInitialModel()
+#   (that is Scala-only). clusterCenters on a fitted model is also
+#   read-only. There is no direct API to inject starting centroids.
+#
+#   Solution — Weighted Anchor Rows:
+#     Prepend ANCHOR_WEIGHT (500) copies of each seed centroid as
+#     synthetic rows into the partition DataFrame before fit().
+#     k-means|| selects initial centres proportional to squared
+#     distance from already-selected centres. The heavily-weighted
+#     anchor points dominate this sampling, so k-means|| reliably
+#     picks the broadcast seed centroids as its k initial centres.
+#     Anchors are ~500 rows vs ~1.4M partition rows (≈1:2800 ratio),
+#     so they are numerically negligible in the final centroid update.
+#
+#   After convergence, all workers have started from the same
+#   initial positions — eliminating the dominant source of
+#   cross-worker divergence before gossip aggregation.
 # ================================================================
 
 from pyspark.ml.clustering import KMeans
@@ -16,34 +30,28 @@ from pyspark.ml.linalg import Vectors, VectorUDT
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField
 
+# How many times each seed centroid is repeated as an anchor row.
+# 500 is large enough to dominate k-means|| sampling but negligible
+# as a fraction of a ~1.4M-row partition (ratio ~1:2800).
+_ANCHOR_WEIGHT = 500
 
-def _make_seed_model(spark, seed_centres: list, k: int):
+
+def _inject_seed_anchors(spark, df_vec, seed_centres: list) -> object:
     """
-    Build a KMeansModel whose clusterCenters() are exactly `seed_centres`.
+    Return a new DataFrame = df_vec UNION (seed anchors).
 
-    Strategy: create a DataFrame of exactly k rows where row i = seed_centres[i]
-    (each centroid is its own data point). Fitting KMeans(k, maxIter=1) on this
-    degenerate k-row dataset forces the model to adopt those exact centroids,
-    because with k distinct points there is one cluster per point and Lloyd's
-    single pass leaves the centroids unchanged.
-
-    No Java reflection, no _java_obj, no Scala converters required.
-    Works on any PySpark 3.x version with local or cluster master.
+    Each seed centroid is repeated _ANCHOR_WEIGHT times so that
+    k-means|| init sampling is biased toward those positions.
+    The anchor rows share the same schema as df_vec ('features' column).
     """
     schema = StructType([StructField('features', VectorUDT(), False)])
-    # Create one row per seed centroid
-    rows = [(Vectors.dense(list(c)),) for c in seed_centres]
-    df_seed = spark.createDataFrame(rows, schema)
-
-    seed_model = KMeans(
-        k=k,
-        maxIter=1,          # single pass on k rows → centroids = seed points
-        seed=42,
-        featuresCol='features',
-        initMode='k-means||',
-    ).fit(df_seed)
-
-    return seed_model
+    anchor_rows = [
+        (Vectors.dense(list(c)),)
+        for c in seed_centres
+        for _ in range(_ANCHOR_WEIGHT)
+    ]
+    df_anchors = spark.createDataFrame(anchor_rows, schema)
+    return df_vec.union(df_anchors)
 
 
 def run(
@@ -63,7 +71,7 @@ def run(
     max_iter       : int         — maximum KMeans iterations (default 20)
     seed           : int         — random seed (default 42)
     seed_centres   : list|None   — k×d list of floats from global seeding
-                                   (Option 1). If None, uses k-means||.
+                                   (Option 1). If None, uses k-means|| only.
 
     Returns
     -------
@@ -71,7 +79,7 @@ def run(
         centres         : list[list[float]]  — cluster centroid coordinates
         wcss            : float              — within-cluster sum of squares
         k               : int                — clusters used
-        row_count       : int                — rows processed
+        row_count       : int                — rows processed (excl. anchors)
         partition_path  : str                — path for re-assignment pass
         used_global_seed: bool               — whether global seeding was used
     """
@@ -88,40 +96,46 @@ def run(
     # ─ 2. Assemble feature vector -----------------------------------------
     assembler = VectorAssembler(
         inputCols=feature_cols, outputCol='features', handleInvalid='skip')
-    df_vec = assembler.transform(df).select('features').cache()
+    df_vec    = assembler.transform(df).select('features')
+    row_count = df_vec.count()   # real row count before any anchors
 
-    # ─ 3. Build KMeans estimator ------------------------------------------
+    # ─ 3. Optionally inject seed anchor rows (Option 1) -------------------
     use_global_seed = seed_centres is not None and len(seed_centres) == k
 
     print(f'[KMeans Worker] k={k} | max_iter={max_iter} | seed={seed} | '
-          f"global_seed={'YES' if use_global_seed else 'NO'} | loading...")
+          f"global_seed={'YES' if use_global_seed else 'NO'} | "
+          f'rows={row_count:,} | loading...')
 
     if use_global_seed:
-        seed_model = _make_seed_model(spark, seed_centres, k)
-        kmeans_est = KMeans(
-            k=k, maxIter=max_iter, seed=seed,
-            featuresCol='features', initMode='random',
-        )
-        kmeans_est.setInitialModel(seed_model)
+        df_train = _inject_seed_anchors(spark, df_vec, seed_centres)
+        print(f'[KMeans Worker] Injected {k * _ANCHOR_WEIGHT:,} anchor rows '
+              f'({_ANCHOR_WEIGHT}× per centroid) to bias k-means|| init')
     else:
-        kmeans_est = KMeans(
-            k=k, maxIter=max_iter, seed=seed,
-            featuresCol='features', initMode='k-means||',
-        )
+        df_train = df_vec
 
-    # ─ 4. Fit -------------------------------------------------------------
-    model     = kmeans_est.fit(df_vec)
-    centres   = [c.tolist() for c in model.clusterCenters()]
-    wcss      = float(model.summary.trainingCost)
-    row_count = model.summary.predictions.count()
+    df_train = df_train.cache()
 
-    print(f'[KMeans Worker] Rows: {row_count:,} | k={k} | max_iter={max_iter}')
+    # ─ 4. Build KMeans estimator (always k-means|| — PySpark has no
+    #       setInitialModel() in Python bindings) --------------------------
+    kmeans_est = KMeans(
+        k=k,
+        maxIter=max_iter,
+        seed=seed,
+        featuresCol='features',
+        initMode='k-means||',
+    )
+
+    # ─ 5. Fit -------------------------------------------------------------
+    model   = kmeans_est.fit(df_train)
+    centres = [c.tolist() for c in model.clusterCenters()]
+    wcss    = float(model.summary.trainingCost)
+
     print(f'[KMeans Worker] WCSS = {wcss:.4f}')
     for i, c in enumerate(centres):
         preview = ', '.join(f'{v:.3f}' for v in c[:4])
         print(f"[KMeans Worker] C{i}: [{preview}{'...' if num_features > 4 else ''}]")
 
-    df_vec.unpersist()
+    df_train.unpersist()
 
     return {
         'centres'         : centres,
