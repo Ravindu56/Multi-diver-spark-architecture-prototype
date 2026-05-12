@@ -172,7 +172,7 @@ def aggregate_kmeans_results(worker_results):
     print('  Global centres:')
     for i, c in enumerate(merged):
         preview = ', '.join(f'{v:.3f}' for v in c[:4])
-        _info(f'  C{i}: [{preview]{"..." if len(c) > 4 else ""}]')
+        _info(f'  C{i}: [{preview}{"..." if len(c) > 4 else ""}]')
     return {'centres': merged, 'total_wcss': total_wcss,
             'total_rows': total_rows, 'num_workers': len(worker_results)}
 
@@ -680,7 +680,7 @@ def run_root(
         print('  Final Corrected Centres (post re-assignment):')
         for i, c in enumerate(corrected_centres):
             preview = ', '.join(f'{v:.3f}' for v in c[:4])
-            _info(f'C{i}: [{preview]{"..." if d_val > 4 else ""}]')
+            _info(f'C{i}: [{preview}{"..." if d_val > 4 else ""}]')
         print(DASH)
         _ok(f'Re-assignment done  ({reassign_time:.3f}s)')
 
