@@ -1,88 +1,229 @@
-# ============================================================
-# workers/worker_process.py
-# MPJ Worker Process — each owns an independent Spark Driver
-# Paper Reference: Section IV.A + Algorithm 1
-# ============================================================
+# ================================================================
+# mpj_spark/workers/worker_process.py
+# ================================================================
 import time
+import traceback
 from multiprocessing import Queue
 
-from mpj_spark.core.key_value        import KeyValueStructure
-from mpj_spark.workers.spark_session  import build_spark_session
+import numpy as np
+
+from mpj_spark.workers.spark_session import build_spark_session
+from mpj_spark.utils.dev_logger import DevLogger
 
 
-def mpj_worker_process(worker_id:          int,
-                       partition_metadata:  dict,
-                       result_queue:        Queue,
-                       timing_queue:        Queue,
-                       app:                 str   = 'wordcount',
-                       ready_queue:         Queue = None,
-                       go_queue:            Queue = None,
-                       cores_per_worker:    int   = None):
+def _tag(worker_id, phase):
+    return f'[Worker {worker_id}][{phase}]'
+
+
+def _reassign_pass(spark, partition_path: str, global_centres: list,
+                   worker_id: int) -> dict:
     """
-    MPJ Worker Process (Paper §IV.A) with JVM pre-warm and fair-core support.
+    Option 2 re-assignment pass.
 
-    Parameters
-    ----------
-    worker_id        : unique worker identifier
-    partition_metadata: partition path + line counts from Root
-    result_queue     : send computed results back to Root
-    timing_queue     : send timing breakdown back to Root
-    app              : application key ('wordcount', ...)
-    ready_queue      : signal Root when JVM is warmed (None = legacy)
-    go_queue         : receive start signal from Root (None = legacy)
-    cores_per_worker : cores for local[N]; None = auto via build_spark_session
+    Loads the partition, assigns every point to the nearest centroid
+    in `global_centres` (no model training), then returns per-cluster
+    (weighted_sum, count) for exact centroid recomputation at root.
     """
+    import numpy as _np
+    from pyspark.ml.feature import VectorAssembler
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import IntegerType, DoubleType
+    from pyspark.sql.functions import udf, col
+
+    centres_bc = spark.sparkContext.broadcast(_np.array(global_centres))
+    k          = len(global_centres)
+    dims       = len(global_centres[0])
+
+    df_raw       = spark.read.csv(partition_path, inferSchema=True, header=False)
+    feature_cols = df_raw.columns
+    df           = df_raw.dropna()
+
+    assembler = VectorAssembler(
+        inputCols=feature_cols, outputCol='features', handleInvalid='skip')
+    df_vec = assembler.transform(df).select('features')
+
+    def assign_cluster(features):
+        arr   = _np.array(features.toArray())
+        dists = _np.linalg.norm(centres_bc.value - arr, axis=1)
+        return int(_np.argmin(dists))
+
+    assign_udf  = udf(assign_cluster, IntegerType())
+    df_assigned = df_vec.withColumn('cluster', assign_udf(col('features')))
+
+    def expand_to_cols(df_a, dims_):
+        for d in range(dims_):
+            df_a = df_a.withColumn(
+                f'f{d}',
+                udf(lambda v, _d=d: float(v[_d]), DoubleType())(col('features'))
+            )
+        return df_a.drop('features')
+
+    df_expanded = expand_to_cols(df_assigned, dims)
+    agg_exprs   = [F.sum(f'f{d}').alias(f's{d}') for d in range(dims)] + \
+                  [F.count('*').alias('cnt')]
+    df_agg      = df_expanded.groupBy('cluster').agg(*agg_exprs).collect()
+
+    cluster_sums   = [[0.0] * dims for _ in range(k)]
+    cluster_counts = [0] * k
+    total_rows     = 0
+    for row in df_agg:
+        c   = row['cluster']
+        cnt = row['cnt']
+        cluster_counts[c] = cnt
+        cluster_sums[c]   = [row[f's{d}'] for d in range(dims)]
+        total_rows       += cnt
+
+    centres_bc.unpersist()
+    print(f'{_tag(worker_id, "REASSIGN")} Done — {total_rows:,} rows assigned to {k} clusters')
+    return {
+        'cluster_sums'  : cluster_sums,
+        'cluster_counts': cluster_counts,
+        'row_count'     : total_rows,
+    }
+
+
+def worker_process(
+    worker_id:      int,
+    partition_path: str,
+    result_queue:   Queue,
+    go_signal,
+    ready_signal,
+    timing_queue:   Queue,
+    worker_config:  dict = None,
+    gossip_queue:   Queue = None,
+    reassign_queue: Queue = None,
+):
+    if worker_config is None:
+        worker_config = {}
+
+    app_name       = worker_config.get('app',             'wordcount')
+    cores_override = worker_config.get('cores_override',   None)
+    kmeans_k       = int(worker_config.get('kmeans_k',         3))
+    kmeans_iter    = int(worker_config.get('kmeans_max_iter',  20))
+    num_workers    = worker_config.get('num_workers',  1)
+    seed_centres   = worker_config.get('seed_centres',     None)
+
+    logger = DevLogger(worker_id=worker_id)
+
     try:
-        # ── PHASE A: JVM INIT (not timed as computation) ──────────────────
-        t_spawn = time.time()
-
+        # ── INIT ──────────────────────────────────────────────────────
+        print(f'{_tag(worker_id, "INIT")} Starting SparkSession (app={app_name}) ...')
+        t_init_start = time.perf_counter()
         spark = build_spark_session(
-            app_name=f'MPJ-Worker-{worker_id}',
-            cores_override=cores_per_worker,
+            app_name=f'MPJ-Worker-{worker_id}-{app_name}',
+            cores_override=cores_override,
+            num_workers=num_workers,
         )
-        sc = spark.sparkContext
+        init_time = time.perf_counter() - t_init_start
+        print(f'{_tag(worker_id, "INIT")} SparkSession ready  ({init_time:.3f}s)')
 
-        t_init_done   = time.time()
-        jvm_init_time = t_init_done - t_spawn
+        # ── BARRIER ───────────────────────────────────────────────────
+        ready_signal.set()
+        print(f'{_tag(worker_id, "WAIT")} Waiting for go-signal ...')
+        go_signal.wait()
 
-        if ready_queue is not None:
-            ready_queue.put({'worker_id': worker_id, 'init_time': jvm_init_time})
-            go_queue.get()   # block until Root fires go-signal
+        # ── LOAD ──────────────────────────────────────────────────────
+        print(f'{_tag(worker_id, "LOAD")} Loading partition ...')
+        t_load_start = time.perf_counter()
 
-        # ── PHASE B: COMPUTATION (pure T_Proc) ─────────────────────────
-        t_compute_start = time.time()
+        if app_name == 'wordcount':
+            text_rdd  = spark.sparkContext.textFile(partition_path)
+            text_rdd.cache()
+            row_count = text_rdd.count()
+            load_time = time.perf_counter() - t_load_start
+            print(f'{_tag(worker_id, "LOAD")} {row_count:,} rows  ({load_time:.3f}s)')
+        else:
+            load_time = 0.0
 
-        partition_path = partition_metadata['partition_path']
-        text_rdd = sc.textFile(partition_path)
-        results  = _run_application(sc, text_rdd, app)
+        # ── PROC ──────────────────────────────────────────────────────
+        print(f'{_tag(worker_id, "PROC")} Running {app_name} ...')
+        t_proc_start = time.perf_counter()
 
-        t_compute_end = time.time()
-        compute_time  = t_compute_end - t_compute_start
+        if app_name == 'wordcount':
+            from mpj_spark.applications import wordcount
+            app_result = wordcount.run(text_rdd)
 
-        kv = KeyValueStructure().from_rdd_collect(results)
+        elif app_name == 'kmeans':
+            from mpj_spark.applications import kmeans
+            app_result = kmeans.run(
+                partition_path,
+                k=kmeans_k,
+                max_iter=kmeans_iter,
+                seed_centres=seed_centres,
+            )
+            if gossip_queue is not None:
+                gossip_queue.put({
+                    'worker_id' : worker_id,
+                    'centres'   : app_result['centres'],
+                    'wcss'      : app_result['wcss'],
+                    'row_count' : app_result['row_count'],
+                })
+                print(f'{_tag(worker_id, "PROC")} Centroid state → gossip_queue')
 
-        result_queue.put({
-            'worker_id':       worker_id,
-            'results':         kv.to_serializable(),
-            'num_items':       len(kv.data),
-            'partition_lines': partition_metadata['num_lines'],
-        })
+        else:
+            raise ValueError(f"Unknown app '{app_name}'. Valid: 'wordcount', 'kmeans'")
+
+        proc_time = time.perf_counter() - t_proc_start
+        print(f'{_tag(worker_id, "DONE")} {app_name} complete  ({proc_time:.3f}s)')
+
+        # ── EMIT RESULT (MUST happen before reassign_queue.get) ───────
+        #
+        # CRITICAL ordering: result_queue and timing_queue MUST be
+        # populated here, before any reassign_queue.get() call.
+        #
+        # If we blocked on reassign_queue first, root's Phase 4
+        # result_queue.get() would wait forever — root never reaches
+        # Phase 5 gossip, never calls reassign_queue.put(), and both
+        # sides deadlock until the 120 s timeout fires.
+        #
+        # Correct lifecycle:
+        #   worker: gossip_queue.put → result_queue.put → reassign_queue.get
+        #   root:   Phase4 result_queue.get → Phase5 gossip → reassign_queue.put
+        # ─────────────────────────────────────────────────────────────
+        result_queue.put({'worker_id': worker_id, 'result': app_result, 'status': 'success'})
         timing_queue.put({
-            'worker_id':   worker_id,
-            'driver_init': jvm_init_time,
-            'processing':  compute_time,
-            'total':       t_compute_end - t_spawn,
+            'worker_id'      : worker_id,
+            'init_time'      : init_time,
+            'load_time'      : load_time,
+            'processing_time': proc_time,
+            'total_time'     : init_time + load_time + proc_time,
         })
+        logger.log_worker_timing(worker_id=worker_id, init_time=init_time,
+                                 load_time=load_time, proc_time=proc_time)
 
-        spark.stop()
+        # ── OPTION 2: Re-assignment pass ──────────────────────────────
+        #
+        # Now safe to block: root has already received the result above
+        # and will proceed through Phase 5 gossip, then call
+        # reassign_queue.put() for every worker. Timeout raised to 300 s
+        # to accommodate gossip convergence time on large datasets.
+        # ─────────────────────────────────────────────────────────────
+        if reassign_queue is not None and app_name == 'kmeans':
+            print(f'{_tag(worker_id, "REASSIGN")} Waiting for global centroids ...')
+            msg = reassign_queue.get(timeout=300)
+            if msg.get('type') == 'reassign':
+                global_centres = msg['centres']
+                reassign_stats = _reassign_pass(
+                    spark, partition_path, global_centres, worker_id)
+                reassign_queue.put({
+                    'type'          : 'stats',
+                    'worker_id'     : worker_id,
+                    'cluster_sums'  : reassign_stats['cluster_sums'],
+                    'cluster_counts': reassign_stats['cluster_counts'],
+                    'row_count'     : reassign_stats['row_count'],
+                })
 
     except Exception as exc:
-        result_queue.put({'worker_id': worker_id, 'error': str(exc)})
-        timing_queue.put({'worker_id': worker_id, 'error': str(exc)})
+        print(f'{_tag(worker_id, "ERROR")} {exc}')
+        traceback.print_exc()
+        result_queue.put({'worker_id': worker_id, 'result': None,
+                          'status': 'error', 'error': str(exc)})
+        timing_queue.put({'worker_id': worker_id, 'init_time': 0.0,
+                          'load_time': 0.0, 'processing_time': 0.0, 'total_time': 0.0})
 
-
-def _run_application(sc, text_rdd, app: str):
-    if app == 'wordcount':
-        from mpj_spark.applications.wordcount import run as wc_run
-        return wc_run(text_rdd)
-    raise ValueError(f'Unknown application: {app!r}. Available: wordcount')
+    finally:
+        try:
+            spark.stop()
+            print(f'{_tag(worker_id, "STOP")} SparkSession stopped.')
+        except Exception:
+            pass

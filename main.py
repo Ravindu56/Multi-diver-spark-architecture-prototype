@@ -1,115 +1,157 @@
-#!/usr/bin/env python3
-# ============================================================
-# main.py — CLI entry point for MPJ-SPARK prototype
-# ============================================================
-import os
-os.environ['JAVA_TOOL_OPTIONS'] = '-Djava.security.manager=allow'
-
+# ================================================================
+# main.py  —  MPJ-Spark Multi-Driver Prototype
+#
+# Changes from feature/ml-kmeans-workload:
+#
+#   GOSSIP EXTENSION (feature/adaptive-gossip-aggregation):
+#     Added three new CLI flags:
+#       --gossip              enable adaptive gossip aggregation
+#       --gossip-threshold F  convergence drift criterion (default 0.001)
+#       --gossip-max-rounds N hard cap on rounds (default 10)
+#       --gossip-fanout N     initial peer fan-out (default 2, then adaptive)
+#
+# Usage examples:
+# ---------------
+# Standard (unchanged):
+#   python main.py --app kmeans --workers 4 --generate 200 --compare \
+#                  --kmeans-k 5 --kmeans-iter 30
+#
+# Gossip mode:
+#   python main.py --app kmeans --workers 4 --generate 200 --gossip \
+#                  --kmeans-k 5 --kmeans-iter 30
+#
+# Gossip tuned:
+#   python main.py --app kmeans --workers 8 --generate 500 --gossip \
+#                  --gossip-threshold 0.0005 --gossip-max-rounds 15 \
+#                  --gossip-fanout 3 --kmeans-k 5 --kmeans-iter 30 --compare
+#
+# Log history:
+#   python main.py --log-history
+# ================================================================
 import argparse
-from mpj_spark.core.root_process           import mpj_root_process
-from mpj_spark.applications.baseline_spark import run_baseline
-from mpj_spark.benchmarks.reporter         import print_comparison
-from mpj_spark.benchmarks.dev_logger        import DevLogger
-from mpj_spark.utils.dataset_generator     import generate_test_dataset
-from mpj_spark.config                      import (
-    DEFAULT_DATASET_PATH, DEFAULT_DATASET_SIZE_MB,
-    DEFAULT_NUM_WORKERS, TOTAL_CORES,
-)
+import os
+import sys
 
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description='MPJ-SPARK Multi-Driver Prototype  v2.0'
+        description='MPJ-Spark Multi-Driver Prototype',
+        formatter_class=argparse.RawTextHelpFormatter,
     )
-    p.add_argument('--workers',  type=int, default=DEFAULT_NUM_WORKERS,
-                   help=f'Number of MPJ workers (default: {DEFAULT_NUM_WORKERS})')
-    p.add_argument('--input',    type=str, default=None,
-                   help='Path to an existing input text file')
-    p.add_argument('--generate', type=int, default=DEFAULT_DATASET_SIZE_MB,
-                   help=f'Generate a synthetic dataset of N MB (default: {DEFAULT_DATASET_SIZE_MB})')
-    p.add_argument('--compare',  action='store_true',
-                   help='Run standard single-driver Spark baseline for comparison')
-    p.add_argument('--app',      type=str, default='wordcount',
-                   choices=['wordcount'],
-                   help='Application to run (default: wordcount)')
-    p.add_argument('--no-prewarm', dest='prewarm', action='store_false',
-                   help='Disable JVM pre-warm barrier (cold-start mode)')
-    p.add_argument('--cores',    type=int, default=None,
-                   help=(
-                       'Override cores per worker (and baseline). '
-                       f'Default: auto = {TOTAL_CORES} total ÷ --workers. '
-                       'Use 0 to restore unconstrained local[*] behaviour.'
-                   ))
-    p.add_argument('--no-log',   dest='log', action='store_false',
-                   help='Disable dev run logging (skip writing to logs/dev/)')
+    p.add_argument('--workers',     type=int,  default=2,
+                   help='Number of parallel worker processes (default: 2)')
+    p.add_argument('--app',         type=str,  default='wordcount',
+                   choices=['wordcount', 'kmeans'],
+                   help='Application workload to run (default: wordcount)')
+    p.add_argument('--generate',    type=int,  default=None, metavar='MB',
+                   help='Generate a synthetic dataset of this size in MB before running')
+    p.add_argument('--input',       type=str,  default=None,
+                   help='Path to existing input file (overrides --generate)')
+    p.add_argument('--compare',     action='store_true',
+                   help='Also run single-driver baseline and print comparison table')
+    p.add_argument('--cores',       type=int,  default=None,
+                   help='Override per-worker core count (default: TOTAL_CORES // workers)')
+    p.add_argument('--no-prewarm',  action='store_true',
+                   help='Disable JVM pre-warm (cold-start mode)')
+    p.add_argument('--kmeans-k',    type=int,  default=3,
+                   help='Number of K-Means clusters (default: 3)')
+    p.add_argument('--kmeans-iter', type=int,  default=20,
+                   help='Maximum K-Means iterations (default: 20)')
+    p.add_argument('--baseline-threads', type=int, default=None,
+                   help='Override thread count for the baseline Spark session.\n'
+                        'Use this for a fair comparison by giving the baseline\n'
+                        'the same total threads as all MPJ workers combined.\n'
+                        'Example: --workers 4 --baseline-threads 20\n'
+                        '(default: same per-worker budget as each MPJ worker)')
     p.add_argument('--log-history', action='store_true',
-                   help='Print summary table of all past dev runs and exit')
-    p.set_defaults(prewarm=True, log=True)
+                   help='Print all previous run logs and exit')
+
+    # ── GOSSIP FLAGS (new) ────────────────────────────────────────
+    p.add_argument('--gossip', action='store_true',
+                   help='Enable adaptive gossip protocol for centroid aggregation.\n'
+                        'Only active when --app kmeans.\n'
+                        'Replaces batch Hungarian aggregation with O(log N) peer rounds.')
+    p.add_argument('--gossip-threshold', type=float, default=1e-3,
+                   help='Gossip convergence threshold: stop when max centroid drift\n'
+                        'drops below this value. (default: 0.001)')
+    p.add_argument('--gossip-max-rounds', type=int, default=10,
+                   help='Hard cap on number of gossip rounds. (default: 10)')
+    p.add_argument('--gossip-fanout', type=int, default=2,
+                   help='Initial number of peers contacted per worker per round.\n'
+                        'Adapted automatically after round 1. (default: 2)')
+    # ─────────────────────────────────────────────────────────────
+
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    # ── Print run history and exit ───────────────────────────────────
     if args.log_history:
-        DevLogger().print_summary_table()
-        return
+        from mpj_spark.utils.dev_logger import DevLogger
+        DevLogger.print_history()
+        sys.exit(0)
 
-    cores_per_entity = None
-    if args.cores is not None:
-        cores_per_entity = args.cores if args.cores > 0 else None
+    from mpj_spark.config import DATA_DIR
+    os.makedirs(DATA_DIR, exist_ok=True)
 
-    cores_display = (
-        cores_per_entity if cores_per_entity
-        else max(1, TOTAL_CORES // args.workers)
-    )
-    print(f'[CONFIG] Machine cores: {TOTAL_CORES}  |  '
-          f'Workers: {args.workers}  |  '
-          f'Cores/entity: {cores_display}  |  '
-          f'JVM mode: {"pre-warmed" if args.prewarm else "cold-start"}')
-
-    # ── Resolve input file ─────────────────────────────────────────────
-    if args.input and os.path.exists(args.input):
-        input_file = args.input
+    # ── Resolve dataset path ──────────────────────────────────────────
+    if args.generate is not None:
+        if args.app == 'kmeans':
+            from mpj_spark.utils.dataset_generator import generate_numeric_dataset
+            dataset_path = os.path.join(DATA_DIR, 'numeric_dataset.csv')
+            generate_numeric_dataset(dataset_path, args.generate)
+        else:
+            from mpj_spark.utils.dataset_generator import generate_text_dataset
+            dataset_path = os.path.join(DATA_DIR, 'text_dataset.txt')
+            generate_text_dataset(dataset_path, args.generate)
+    elif args.input is not None:
+        dataset_path = args.input
     else:
-        input_file = generate_test_dataset(DEFAULT_DATASET_PATH, args.generate)
+        dataset_path = os.path.join(
+            DATA_DIR,
+            'numeric_dataset.csv' if args.app == 'kmeans' else 'text_dataset.txt'
+        )
 
-    # ── Multi-Driver run ───────────────────────────────────────────────
-    _, multi_timing = mpj_root_process(
-        input_file,
-        args.workers,
-        app=args.app,
-        prewarm=args.prewarm,
-        cores_per_worker=cores_per_entity,
+    if not os.path.exists(dataset_path):
+        print(f"[main] ERROR: Dataset not found: {dataset_path}")
+        print(f"[main] Tip:   Use --generate <MB> to create one first.")
+        sys.exit(1)
+
+    print(f'\n[main] Dataset          : {dataset_path}')
+    print(f'[main] App              : {args.app}')
+    print(f'[main] Workers          : {args.workers}')
+    print(f'[main] Compare          : {args.compare}')
+    print(f'[main] Pre-warm         : {not args.no_prewarm}')
+    if args.app == 'kmeans':
+        print(f'[main] K-Means k        : {args.kmeans_k}')
+        print(f'[main] K-Means iter     : {args.kmeans_iter}')
+    if args.baseline_threads:
+        print(f'[main] Baseline threads : {args.baseline_threads}  [fair comparison mode]')
+    if args.gossip:
+        print(f'[main] Gossip mode      : ON  '
+              f'(threshold={args.gossip_threshold}, '
+              f'max_rounds={args.gossip_max_rounds}, '
+              f'fanout={args.gossip_fanout})')
+
+    # ── Run Root process ──────────────────────────────────────────────
+    from mpj_spark.core.root_process import run_root
+
+    run_root(
+        input_file        = dataset_path,
+        num_workers       = args.workers,
+        compare           = args.compare,
+        prewarm           = not args.no_prewarm,
+        cores_override    = args.cores,
+        app               = args.app,
+        kmeans_k          = args.kmeans_k,
+        kmeans_iter       = args.kmeans_iter,
+        baseline_threads  = args.baseline_threads,
+        use_gossip        = args.gossip,
+        gossip_threshold  = args.gossip_threshold,
+        gossip_max_rounds = args.gossip_max_rounds,
+        gossip_fanout     = args.gossip_fanout,
     )
-
-    # ── Baseline comparison ────────────────────────────────────────────
-    std_timing = None
-    if args.compare:
-        _, std_timing = run_baseline(
-            input_file,
-            num_workers=args.workers,
-            cores_override=cores_per_entity,
-        )
-        print_comparison(multi_timing, std_timing)
-
-    # ── Dev logging ─────────────────────────────────────────────────
-    if args.log:
-        logger = DevLogger()
-        run_id = logger.log_run(
-            run_config={
-                'workers':          args.workers,
-                'generate':         args.generate,
-                'input_file':       input_file,
-                'app':              args.app,
-                'prewarm':          args.prewarm,
-                'cores_per_entity': cores_display,
-            },
-            multi_timing=multi_timing,
-            std_timing=std_timing,
-        )
-        print(f'\n[LOG] Run saved → {logger.text_path}  (run_id: {run_id})')
 
 
 if __name__ == '__main__':
