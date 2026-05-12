@@ -10,9 +10,10 @@
 #     - This feeds the GossipAggregator in root_process.py.
 #     - wordcount and non-gossip kmeans paths are completely unchanged.
 #
-# Original changes (kept from feature/ml-kmeans-workload):
-#   Phase 3/4: kmeans receives partition_path (str) directly,
-#   not a pre-built text_rdd. Required for Fix 1 (native spark.read.csv).
+#   LOGGING REFACTOR:
+#     - [Worker N] phase labels now use INIT/LOAD/PROC/DONE/ERROR/STOP
+#     - DevLogger.log_worker_timing() writes silently to file only
+#       (no [DevLogger] stdout noise)
 # ================================================================
 import time
 import traceback
@@ -20,6 +21,12 @@ from multiprocessing import Queue
 
 from mpj_spark.workers.spark_session import build_spark_session
 from mpj_spark.utils.dev_logger import DevLogger
+
+_W = '[Worker {id}]'
+
+
+def _tag(worker_id, phase):
+    return f'[Worker {worker_id}][{phase}]'
 
 
 def worker_process(
@@ -30,21 +37,8 @@ def worker_process(
     ready_signal,
     timing_queue:   Queue,
     worker_config:  dict = None,
-    gossip_queue:   Queue = None,   # NEW: optional gossip participation
+    gossip_queue:   Queue = None,
 ):
-    """
-    Worker process: builds a local SparkSession, runs the assigned
-    application on its data partition, and returns results.
-
-    gossip_queue (optional):
-        If provided AND app == 'kmeans', the worker pushes its raw
-        KMeans result dict into gossip_queue immediately after fit(),
-        before sending to result_queue. The GossipAggregator in
-        root_process.py drains this queue to run peer-exchange rounds.
-
-        If None (default), behaviour is identical to the original
-        feature/ml-kmeans-workload implementation.
-    """
     if worker_config is None:
         worker_config = {}
 
@@ -52,46 +46,42 @@ def worker_process(
     cores_override = worker_config.get('cores_override',  None)
     kmeans_k       = int(worker_config.get('kmeans_k',        3))
     kmeans_iter    = int(worker_config.get('kmeans_max_iter', 20))
+    num_workers    = worker_config.get('num_workers', 1)
 
     logger = DevLogger(worker_id=worker_id)
 
     try:
-        # ── Phase 1: Build SparkSession ───────────────────────────────
-        print(f"[Worker {worker_id}] Starting SparkSession (app={app_name}) ...")
+        # ── INIT ──────────────────────────────────────────────────────
+        print(f'{_tag(worker_id, "INIT")} Starting SparkSession (app={app_name}) ...')
         t_init_start = time.perf_counter()
-
-        num_workers = worker_config.get('num_workers', 1)
         spark = build_spark_session(
             app_name=f'MPJ-Worker-{worker_id}-{app_name}',
             cores_override=cores_override,
             num_workers=num_workers,
         )
+        init_time = time.perf_counter() - t_init_start
+        print(f'{_tag(worker_id, "INIT")} SparkSession ready  ({init_time:.3f}s)')
 
-        t_init_end = time.perf_counter()
-        init_time  = t_init_end - t_init_start
-        print(f"[Worker {worker_id}] SparkSession ready in {init_time:.3f}s")
-
-        # ── Phase 2: Barrier ─────────────────────────────────────────
+        # ── BARRIER ───────────────────────────────────────────────────
         ready_signal.set()
-        print(f"[Worker {worker_id}] Waiting for go-signal ...")
+        print(f'{_tag(worker_id, "WAIT")} Waiting for go-signal ...')
         go_signal.wait()
-        print(f"[Worker {worker_id}] Go! Loading partition ...")
 
-        # ── Phase 3: Load (wordcount only — kmeans loads inside app) ─
+        # ── LOAD ──────────────────────────────────────────────────────
+        print(f'{_tag(worker_id, "LOAD")} Loading partition ...')
         t_load_start = time.perf_counter()
 
         if app_name == 'wordcount':
             text_rdd  = spark.sparkContext.textFile(partition_path)
             text_rdd.cache()
             row_count = text_rdd.count()
-            t_load_end = time.perf_counter()
-            load_time  = t_load_end - t_load_start
-            print(f"[Worker {worker_id}] Loaded {row_count:,} rows in {load_time:.3f}s")
+            load_time = time.perf_counter() - t_load_start
+            print(f'{_tag(worker_id, "LOAD")} {row_count:,} rows  ({load_time:.3f}s)')
         else:
-            t_load_end = t_load_start
-            load_time  = 0.0
+            load_time = 0.0
 
-        # ── Phase 4: Application dispatch ────────────────────────────
+        # ── PROC ──────────────────────────────────────────────────────
+        print(f'{_tag(worker_id, "PROC")} Running {app_name} ...')
         t_proc_start = time.perf_counter()
 
         if app_name == 'wordcount':
@@ -105,12 +95,6 @@ def worker_process(
                 k=kmeans_k,
                 max_iter=kmeans_iter,
             )
-
-            # ── GOSSIP HOOK ───────────────────────────────────────────
-            # Push raw centroid state into gossip_queue so the
-            # GossipAggregator can run peer-exchange rounds.
-            # This is a non-blocking put() — queue is large enough
-            # (maxsize=0 by default in multiprocessing.Queue).
             if gossip_queue is not None:
                 gossip_queue.put({
                     'worker_id' : worker_id,
@@ -118,25 +102,16 @@ def worker_process(
                     'wcss'      : app_result['wcss'],
                     'row_count' : app_result['row_count'],
                 })
-                print(f"[Worker {worker_id}] Centroid state pushed to gossip_queue.")
-            # ── END GOSSIP HOOK ───────────────────────────────────────
+                print(f'{_tag(worker_id, "PROC")} Centroid state → gossip_queue')
 
         else:
-            raise ValueError(
-                f"[Worker {worker_id}] Unknown app '{app_name}'. "
-                f"Valid choices: 'wordcount', 'kmeans'"
-            )
+            raise ValueError(f"Unknown app '{app_name}'. Valid: 'wordcount', 'kmeans'")
 
-        t_proc_end = time.perf_counter()
-        proc_time  = t_proc_end - t_proc_start
-        print(f"[Worker {worker_id}] Processing done in {proc_time:.3f}s")
+        proc_time = time.perf_counter() - t_proc_start
+        print(f'{_tag(worker_id, "DONE")} {app_name} complete  ({proc_time:.3f}s)')
 
-        # ── Phase 5: Put results ──────────────────────────────────────
-        result_queue.put({
-            'worker_id': worker_id,
-            'result'   : app_result,
-            'status'   : 'success',
-        })
+        # ── QUEUE RESULTS ────────────────────────────────────────────
+        result_queue.put({'worker_id': worker_id, 'result': app_result, 'status': 'success'})
         timing_queue.put({
             'worker_id'      : worker_id,
             'init_time'      : init_time,
@@ -144,33 +119,21 @@ def worker_process(
             'processing_time': proc_time,
             'total_time'     : init_time + load_time + proc_time,
         })
-        logger.log_worker_timing(
-            worker_id=worker_id,
-            init_time=init_time,
-            load_time=load_time,
-            proc_time=proc_time,
-        )
+        # Silent file write — no console output
+        logger.log_worker_timing(worker_id=worker_id, init_time=init_time,
+                                 load_time=load_time, proc_time=proc_time)
 
     except Exception as exc:
-        print(f"[Worker {worker_id}] ERROR: {exc}")
+        print(f'{_tag(worker_id, "ERROR")} {exc}')
         traceback.print_exc()
-        result_queue.put({
-            'worker_id': worker_id,
-            'result'   : None,
-            'status'   : 'error',
-            'error'    : str(exc),
-        })
-        timing_queue.put({
-            'worker_id'      : worker_id,
-            'init_time'      : 0.0,
-            'load_time'      : 0.0,
-            'processing_time': 0.0,
-            'total_time'     : 0.0,
-        })
+        result_queue.put({'worker_id': worker_id, 'result': None,
+                          'status': 'error', 'error': str(exc)})
+        timing_queue.put({'worker_id': worker_id, 'init_time': 0.0,
+                          'load_time': 0.0, 'processing_time': 0.0, 'total_time': 0.0})
 
     finally:
         try:
             spark.stop()
-            print(f"[Worker {worker_id}] SparkSession stopped.")
+            print(f'{_tag(worker_id, "STOP")} SparkSession stopped.')
         except Exception:
             pass
