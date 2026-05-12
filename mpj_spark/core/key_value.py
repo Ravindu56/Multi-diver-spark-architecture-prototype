@@ -4,6 +4,8 @@
 # Paper Reference: Section IV.D — Data Conversion
 # ============================================================
 
+from collections import defaultdict
+
 
 class KeyValueStructure:
     """
@@ -31,3 +33,26 @@ class KeyValueStructure:
         kv = KeyValueStructure()
         kv.data = [(str(k), int(v)) for k, v in serialized]
         return kv
+
+    def merge(self, other) -> 'KeyValueStructure':
+        """
+        Merge another KeyValueStructure or a raw serializable list into
+        this instance by summing counts for matching keys.
+
+        Accepts both KeyValueStructure objects and plain lists (the output
+        of to_serializable()) so that root_process.py can call merge()
+        directly on Queue-received worker results without explicit
+        deserialization.
+        """
+        combined = defaultdict(int)
+        for k, v in self.data:
+            combined[k] += v
+        other_data = other.data if isinstance(other, KeyValueStructure) else other
+        for k, v in other_data:
+            combined[k] += v
+        self.data = list(combined.items())
+        return self
+
+    def get_top_n(self, n: int) -> list:
+        """Return the top-N (key, value) pairs sorted by count descending."""
+        return sorted(self.data, key=lambda x: x[1], reverse=True)[:n]
