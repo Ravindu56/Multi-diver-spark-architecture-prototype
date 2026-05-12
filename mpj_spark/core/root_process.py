@@ -1,30 +1,5 @@
 # ================================================================
 # mpj_spark/core/root_process.py
-#
-# FIX: JVM isolation for Phase 1b global seeding.
-#
-#   PROBLEM: compute_global_seed_centres() previously ran a
-#   SparkSession directly in the root process, then called
-#   spark.stop(). PySpark's Py4J gateway does not terminate the
-#   underlying JVM synchronously — the JVM thread lingers on its
-#   port. When multiprocessing workers were then forked, they
-#   inherited a half-dead Py4J state, causing:
-#     - KeyError: 'c'
-#     - SparkConf does not exist in the JVM
-#     - Method lower([]) does not exist
-#
-#   FIX: _seeding_worker() runs the entire Spark seeding session
-#   inside an isolated subprocess (multiprocessing.Process). That
-#   subprocess gets its own OS-level JVM. The root blocks on
-#   p.join() before any computation worker is ever forked, so the
-#   seeding JVM is fully reclaimed before workers call SparkConf().
-#
-#   OPTION 1 — Global Seeding (Phase 1b):
-#     Seed centroids broadcast to workers via worker_cfg['seed_centres'].
-#
-#   OPTION 2 — Re-assignment Pass (Phase 5b):
-#     After gossip converges, exact weighted global centroids are
-#     recomputed from per-worker assign-only passes.
 # ================================================================
 import math
 import os
@@ -43,22 +18,19 @@ DASH = '─' * 70
 def _hdr(title):
     print(f'\n{SEP}\n  {title}\n{SEP}')
 
-
 def _phase(n, label):
     print(f'\n── Phase {n}: {label}')
 
-
 def _ok(msg):
     print(f'  ✓  {msg}')
-
 
 def _info(msg):
     print(f'     {msg}')
 
 
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 # Isolated seeding subprocess
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 
 def _seeding_worker(
     result_q: Queue,
@@ -68,13 +40,6 @@ def _seeding_worker(
     sample_fraction: float,
     seed: int,
 ):
-    """
-    Runs entirely inside a dedicated subprocess.
-
-    Starts its own JVM, performs the seeding Spark job, puts
-    {'status': 'ok', 'centres': [...]} or {'status': 'error', 'msg': ...}
-    onto result_q, then exits. The OS reclaims the JVM on process exit.
-    """
     try:
         from pyspark.sql import SparkSession
         from pyspark.ml.clustering import KMeans
@@ -105,7 +70,7 @@ def _seeding_worker(
         spark.stop()
         result_q.put({'status': 'ok', 'centres': centres})
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         result_q.put({'status': 'error', 'msg': str(exc)})
 
 
@@ -116,15 +81,6 @@ def compute_global_seed_centres(
     sample_fraction: float = 0.05,
     seed: int = 42,
 ) -> list:
-    """
-    Option 1 — Phase 1b: compute k global seed centroids.
-
-    Spawns an isolated subprocess so the seeding JVM is completely
-    dead (OS-reclaimed) before any computation worker is forked.
-    Blocks until the subprocess exits, then returns the centroids.
-
-    Returns list[list[float]] of shape (k, dims).
-    """
     print(f'  [Seeding] Sampling {sample_fraction*100:.0f}% of dataset '
           f'for global seed centroids (isolated subprocess) ...')
     t0 = time.perf_counter()
@@ -133,15 +89,14 @@ def compute_global_seed_centres(
     p = Process(
         target=_seeding_worker,
         args=(result_q, input_file, k, total_cores, sample_fraction, seed),
-        daemon=False,   # must NOT be daemon — we need p.join() to block
+        daemon=False,
     )
     p.start()
-    p.join()           # ← root blocks here; seeding JVM fully reclaimed before returning
+    p.join()
 
     if p.exitcode != 0:
         raise RuntimeError(
-            f'[Seeding] subprocess exited with code {p.exitcode}. '
-            f'Check logs above for traceback.')
+            f'[Seeding] subprocess exited with code {p.exitcode}.')
 
     result = result_q.get_nowait()
     if result['status'] != 'ok':
@@ -158,9 +113,9 @@ def compute_global_seed_centres(
     return centres
 
 
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 # Helpers
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 
 def dynamic_partition(input_path, num_partitions, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -230,13 +185,6 @@ def reassign_pass_root(
     k: int,
     dims: int,
 ) -> list:
-    """
-    Option 2 — Phase 5b: send gossip-final centroids to all workers,
-    collect per-cluster (sum, count) stats, recompute exact weighted
-    global centroids.
-
-    Returns list[list[float]] — corrected global centroids.
-    """
     import numpy as np
 
     print(f'  [Reassign] Broadcasting gossip-final centroids to {num_workers} workers ...')
@@ -271,27 +219,54 @@ def reassign_pass_root(
     return corrected
 
 
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 # Output helpers
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 
-def _print_comparison(multi_timing, baseline_timing, num_workers, app, baseline_threads=None):
+def _print_comparison(
+    multi_timing, baseline_timing, num_workers, app, baseline_threads=None
+):
+    """
+    Fix 2: Show a dedicated Re-assign Pass row so 'Proc Time' remains
+    a pure ML-computation comparison (worker fit time only) while the
+    re-assignment overhead is transparent in its own line.
+
+    Rows printed:
+      Load Time     — partitioned I/O (multi) vs single-driver I/O (base)
+      Proc Time     — avg worker k-means fit vs single-driver k-means fit
+      Re-assign (s) — Option 2 pass (multi only; baseline has no equivalent)
+      Total Time    — full wall-clock both sides
+    """
     note = f'  [baseline-threads={baseline_threads}]' if baseline_threads else ''
     print(f'\n{SEP}')
     print(f'  Multi-Driver vs Baseline  |  app={app}  |  workers={num_workers}{note}')
     print(SEP)
-    print(f'  {"Metric":<26} {"Multi-Driver":>13} {"Baseline":>13} {"Speedup":>9}')
-    print(f'  {"-"*26} {"-"*13} {"-"*13} {"-"*9}')
-    for key, label in [
+    print(f'  {"Metric":<28} {"Multi-Driver":>13} {"Baseline":>13} {"Speedup":>9}')
+    print(f'  {"-"*28} {"-"*13} {"-"*13} {"-"*9}')
+
+    rows = [
         ('load_time',       'Load Time (s)'),
-        ('processing_time', 'Proc Time (s)'),
-        ('total_time',      'Total Time (s)'),
-    ]:
+        ('processing_time', 'Proc Time — fit only (s)'),
+    ]
+
+    # Re-assign row: multi has a value; baseline has none (show N/A)
+    reassign_val = multi_timing.get('reassign_time')
+    if reassign_val is not None:
+        rows.append(('_reassign', 'Re-assign Pass (s)'))
+
+    rows.append(('total_time', 'Total Time (s)'))
+
+    for key, label in rows:
+        if key == '_reassign':
+            m  = reassign_val
+            print(f'  {label:<28} {m:>12.4f}s {"N/A":>13} {"—":>9}')
+            continue
         m  = multi_timing[key]
         b  = baseline_timing[key]
         sp = b / m if m > 0 else 0.0
         flag = '  ⚡' if sp >= 1.5 else ('  ⚠' if sp < 1.0 else '')
-        print(f'  {label:<26} {m:>12.4f}s {b:>12.4f}s {sp:>8.2f}x{flag}')
+        print(f'  {label:<28} {m:>12.4f}s {b:>12.4f}s {sp:>8.2f}x{flag}')
+
     print(SEP)
 
 
@@ -318,9 +293,9 @@ def _print_timing_summary(load_time, avg_proc, agg_time, t_wall,
     print(DASH)
 
 
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 # Main entry point
-# ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 
 def run_root(
     input_file,
@@ -373,7 +348,7 @@ def run_root(
     seed_centres = None
     seed_time    = None
 
-    # ── Phase 1b: Global Seeding — isolated subprocess (Option 1) ──
+    # ── Phase 1b: Global Seeding ───────────────────────────────────
     if do_seed:
         _phase('1b', 'Computing global seed centroids (Option 1 — isolated subprocess)')
         t_seed = time.perf_counter()
@@ -406,11 +381,11 @@ def run_root(
 
     # ── Phase 2: Launch workers ────────────────────────────────────
     _phase(2, f'Launching {num_workers} workers')
-    result_queue  = Queue()
-    timing_queue  = Queue()
-    go_signals    = [Event() for _ in range(num_workers)]
-    ready_signals = [Event() for _ in range(num_workers)]
-    processes     = []
+    result_queue   = Queue()
+    timing_queue   = Queue()
+    go_signals     = [Event() for _ in range(num_workers)]
+    ready_signals  = [Event() for _ in range(num_workers)]
+    processes      = []
     gossip_queue   = Queue() if (use_gossip and app == 'kmeans') else None
     reassign_queue = Queue() if do_reassign else None
 
@@ -451,9 +426,9 @@ def run_root(
     for _ in range(num_workers):
         worker_timings.append(timing_queue.get(timeout=60))
     proc_time = time.perf_counter() - t_proc_start
-    for p in processes:
-        p.join(timeout=30)
     if errors:
+        for p in processes:
+            p.join(timeout=5)
         print(f'  {len(errors)} worker(s) failed. Aborting.')
         return
     _ok(f'All {num_workers} workers completed')
@@ -467,7 +442,7 @@ def run_root(
     if app == 'wordcount':
         kv = KeyValueStructure()
         for r in worker_results:
-            kv.merge(r)
+            kv.merge(KeyValueStructure.from_serializable(r))
         top = kv.get_top_n(20)
         print('\n  Top-20 words:')
         for word, count in top:
@@ -484,7 +459,12 @@ def run_root(
                 initial_fanout=gossip_fanout,
                 verbose=True,
             )
-            agg         = gagg.aggregate(gossip_queue, timeout_per_worker=120.0)
+            # Fix 1: pass seed_centres as alignment reference
+            agg = gagg.aggregate(
+                gossip_queue,
+                timeout_per_worker=120.0,
+                seed_centres=seed_centres,   # None when global seeding is OFF
+            )
             gossip_info = agg
             _ok(f'Gossip done  rounds={agg["rounds_run"]}  converged={agg["converged"]}')
         else:
@@ -496,7 +476,7 @@ def run_root(
     agg_time      = time.perf_counter() - t_agg_start
     reassign_time = None
 
-    # ── Phase 5b: Re-assignment Pass (Option 2) ────────────────────
+    # ── Phase 5b: Re-assignment Pass ───────────────────────────────
     if do_reassign and agg is not None and app == 'kmeans':
         _phase('5b', 'Re-assignment pass (Option 2) — exact global centroid correction')
         t_reassign     = time.perf_counter()
@@ -522,6 +502,10 @@ def run_root(
             _info(f'C{i}: [{preview}{"..." if d_val > 4 else ""}]')
         print(DASH)
         _ok(f'Re-assignment done  ({reassign_time:.3f}s)')
+
+    # Workers can now fully exit
+    for p in processes:
+        p.join(timeout=30)
 
     t_wall   = load_time + proc_time + agg_time + (reassign_time or 0.0)
     avg_proc = sum(t['processing_time'] for t in worker_timings) / num_workers
@@ -550,9 +534,12 @@ def run_root(
             _, baseline_timing = run_baseline_kmeans(
                 input_file, num_workers, cores_override,
                 kmeans_k, kmeans_iter, baseline_threads=baseline_threads)
+
+        # Fix 2: include reassign_time in multi_timing for dedicated table row
         multi_timing = {
             'load_time'       : load_time,
             'processing_time' : avg_proc,
+            'reassign_time'   : reassign_time,   # None if reassign OFF
             'total_time'      : t_wall,
         }
         _print_comparison(multi_timing, baseline_timing, num_workers, app,

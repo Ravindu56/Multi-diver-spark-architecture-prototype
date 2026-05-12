@@ -3,46 +3,20 @@
 #
 # Adaptive Gossip Protocol for distributed centroid aggregation.
 #
-# Research Objective 1b / 2:
-#   Cross-driver parameter synchronisation via gossip-style
-#   peer exchange, reducing aggregation from O(N) root-gather
-#   to O(log N) rounds as worker count scales.
+# Fix 1 (this commit):
+#   _global_merge now accepts an optional seed_reference centroid
+#   list. When provided (global seeding ON), all post-gossip worker
+#   states are aligned to seed_reference instead of states[0].
 #
-# ── Phase Boundary Note (IMPORTANT) ─────────────────────────────
-# Phase 1 (this file): single-machine multiprocessing prototype.
-#   Gossip "exchange" is SIMULATED in the root coordinator:
-#   worker states are held in a shared in-memory dict and the
-#   root iterates over pairs, merging centroids on their behalf.
-#   The gossip_queue is used only as a one-shot collection channel
-#   (workers push once; root drains once at Round 0).
+#   Rationale: states[0] is a gossip-blended mix whose ordering is
+#   arbitrary when k > true cluster count. The global seed centroids
+#   (computed from a 5% stratified sample in Phase 1b) are the
+#   authoritative, stable ordering. Aligning to them ensures the
+#   final weighted average sums corresponding physical clusters
+#   rather than phantom averaged positions.
 #
-# Phase 3 (mpi4py, future): each worker will participate directly.
-#   The root will broadcast peer assignments; workers will call
-#   MPI Send/Recv to exchange centroid vectors per round; the
-#   root will only check convergence and issue stop/continue.
-#   The _weighted_avg / _hungarian_align helpers are transport-
-#   agnostic and will be reused unchanged in Phase 3.
-# ────────────────────────────────────────────────────────────────
-#
-# How it works (Phase 1 simulation)
-# ----------------------------------
-# Round 0  — drain gossip_queue, build state table
-#             { worker_id: {centres, wcss, row_count,
-#                           original_row_count} }
-# Round 1+ — shuffle worker list; for each worker pick F random
-#             peers; merge (weighted average with Hungarian align)
-#             into worker's centroid vector; row_count accumulates
-#             as blend weight (original_row_count stays fixed)
-# Convergence — stop when max per-worker centroid drift
-#             < convergence_threshold, OR max_rounds reached
-# Final merge — weighted average of all post-gossip states using
-#             original_row_count (not accumulated blend weight)
-#
-# Adaptive fan-out
-# ----------------
-# Fan-out F (peers contacted per worker per round) self-tunes:
-#   drift dropped > 50% vs prev round → shrink F  (less comms)
-#   drift dropped < 10% or increased  → grow  F  (push harder)
+#   When seed_centres=None the fallback is states[0] — unchanged
+#   from previous behaviour for runs without global seeding.
 # ================================================================
 
 import time
@@ -62,10 +36,10 @@ def _hungarian_align(
     Re-order candidate centroids to best match reference ordering
     using the Hungarian algorithm (O(k^3), negligible for k<=50).
     """
-    ref  = np.array(reference)                              # (k, d)
-    cand = np.array(candidate)                              # (k, d)
-    diff = ref[:, np.newaxis, :] - cand[np.newaxis, :, :]  # (k, k, d)
-    cost = np.linalg.norm(diff, axis=2)                     # (k, k)
+    ref  = np.array(reference)
+    cand = np.array(candidate)
+    diff = ref[:, np.newaxis, :] - cand[np.newaxis, :, :]
+    cost = np.linalg.norm(diff, axis=2)
     _, col_ind = linear_sum_assignment(cost)
     return [candidate[i] for i in col_ind.tolist()]
 
@@ -91,30 +65,13 @@ def _per_worker_drift(
     old_centres: List[List[List[float]]],
     new_centres: List[List[List[float]]],
 ) -> List[float]:
-    """
-    Compute per-worker centroid drift.
-
-    Both old[i] and new[i] are aligned against the same reference
-    (old[0]) before computing Euclidean distance, so each
-    (aligned_old[i], aligned_new[i]) pair corresponds to the same
-    physical centroid ordering.
-
-    Parameters
-    ----------
-    old_centres : list of (k, d) centroid lists — one per worker, pre-round
-    new_centres : list of (k, d) centroid lists — one per worker, post-round
-
-    Returns
-    -------
-    list[float] — max centroid displacement per worker
-    """
-    reference = old_centres[0]   # fixed alignment target for this round
+    reference = old_centres[0]
     drifts = []
     for old_w, new_w in zip(old_centres, new_centres):
         aligned_old = _hungarian_align(reference, old_w)
         aligned_new = _hungarian_align(reference, new_w)
-        a = np.array(aligned_old)   # (k, d)
-        b = np.array(aligned_new)   # (k, d)
+        a = np.array(aligned_old)
+        b = np.array(aligned_new)
         drifts.append(float(np.max(np.linalg.norm(a - b, axis=1))))
     return drifts
 
@@ -131,7 +88,6 @@ class GossipAggregator:
     convergence_threshold : stop when max centroid drift < this
     max_rounds            : hard cap on gossip rounds
     initial_fanout        : peers contacted per worker per round
-                            (adaptive after round 1)
     seed                  : RNG seed for reproducible peer selection
     verbose               : print per-round diagnostics
     """
@@ -158,11 +114,22 @@ class GossipAggregator:
     def aggregate(
         self,
         gossip_queue,
-        timeout_per_worker: float = 60.0,
+        timeout_per_worker : float = 60.0,
+        seed_centres       : Optional[List[List[float]]] = None,
     ) -> Dict[str, Any]:
         """
         Collect worker states, run adaptive gossip rounds, return
         global centroid result.
+
+        Parameters
+        ----------
+        gossip_queue       : multiprocessing.Queue — workers push centroid states
+        timeout_per_worker : seconds to wait per worker message
+        seed_centres       : optional list[list[float]] from Phase 1b global
+                             seeding. When provided, used as the alignment
+                             reference in _global_merge so the final weighted
+                             average combines corresponding physical clusters.
+                             When None, falls back to states[0] (old behaviour).
 
         Returns
         -------
@@ -189,22 +156,15 @@ class GossipAggregator:
         for rnd in range(1, self.max_rounds + 1):
             rounds_run = rnd
 
-            # Snapshot centroid vectors BEFORE this round for drift calc
             old_centres = [list(states[wid]['centres'])
                            for wid in sorted(states.keys())]
 
-            # ── Peer exchange (Phase 1: root-simulated) ───────────
-            # In Phase 3 (mpi4py) this loop body becomes MPI Send/Recv
-            # calls issued by each worker process directly.
             worker_ids = list(states.keys())
             self.rng.shuffle(worker_ids)
 
             for wid in worker_ids:
                 peers = self._pick_peers(wid, worker_ids)
                 for pid in peers:
-                    # Merge wid ← average(wid, pid)
-                    # row_count is the mutable blend weight;
-                    # original_row_count is never modified (Fix 1)
                     states[wid]['centres'] = _weighted_avg(
                         states[wid]['centres'], states[wid]['row_count'],
                         states[pid]['centres'], states[pid]['row_count'],
@@ -213,18 +173,15 @@ class GossipAggregator:
                         states[wid]['row_count'] + states[pid]['row_count']
                     )
 
-            # ── Drift measurement (Fix 2) ─────────────────────────
-            # Both old[i] and new[i] aligned to old[0] before distance
-            # so pairs correspond to the same physical centroid ordering.
             new_centres = [list(states[wid]['centres'])
                            for wid in sorted(states.keys())]
             drifts    = _per_worker_drift(old_centres, new_centres)
             max_drift = max(drifts)
 
             round_info = {
-                'round'    : rnd,
-                'fanout'   : self.fanout,
-                'max_drift': round(max_drift, 6),
+                'round'           : rnd,
+                'fanout'          : self.fanout,
+                'max_drift'       : round(max_drift, 6),
                 'per_worker_drift': [round(d, 6) for d in drifts],
             }
             self.round_log.append(round_info)
@@ -245,10 +202,10 @@ class GossipAggregator:
             self.fanout = self._adapt_fanout(max_drift, prev_drift, self.fanout)
             prev_drift  = max_drift
 
-        # ── Final global merge (Fix 3) ────────────────────────────
-        # Uses original_row_count — not the accumulated blend weight —
-        # to prevent double-mixing of already-merged centroid vectors.
-        final = self._global_merge(states)
+        # ── Final global merge ────────────────────────────────────
+        # Uses seed_centres as alignment reference when available
+        # (Fix 1), otherwise falls back to states[0].
+        final = self._global_merge(states, seed_reference=seed_centres)
 
         agg_time = time.perf_counter() - t_start
         self._print_summary(final, rounds_run, converged, agg_time)
@@ -271,11 +228,6 @@ class GossipAggregator:
         gossip_queue,
         timeout: float,
     ) -> Dict[int, Dict]:
-        """
-        Drain gossip_queue into a state table.
-        Stores original_row_count separately from the mutable
-        row_count that accumulates as blend weight during exchange.
-        """
         states = {}
         for _ in range(self.num_workers):
             item = gossip_queue.get(timeout=timeout)
@@ -284,8 +236,8 @@ class GossipAggregator:
                 'worker_id'          : wid,
                 'centres'            : [list(c) for c in item['centres']],
                 'wcss'               : item['wcss'],
-                'row_count'          : item['row_count'],   # mutable blend weight
-                'original_row_count' : item['row_count'],   # immutable — never written after this
+                'row_count'          : item['row_count'],
+                'original_row_count' : item['row_count'],
             }
         return states
 
@@ -304,13 +256,6 @@ class GossipAggregator:
         prev_drift    : Optional[float],
         fanout        : int,
     ) -> int:
-        """
-        Adaptive fan-out:
-          ratio < 0.5  (big improvement) → shrink F
-          ratio > 0.9  (slow/no improve) → grow  F
-          otherwise                      → keep  F
-        Clamped to [1, num_workers-1].
-        """
         if prev_drift is None or prev_drift == 0.0:
             return fanout
         ratio = current_drift / prev_drift
@@ -324,15 +269,38 @@ class GossipAggregator:
             self._log(f'Adaptive fanout: {fanout} → {new_f}  (drift_ratio={ratio:.3f})')
         return new_f
 
-    def _global_merge(self, states: Dict[int, Dict]) -> Dict[str, Any]:
+    def _global_merge(
+        self,
+        states         : Dict[int, Dict],
+        seed_reference : Optional[List[List[float]]] = None,
+    ) -> Dict[str, Any]:
         """
         Final weighted average of all post-gossip states.
 
-        Uses original_row_count (Fix 3) — not the accumulated
-        row_count blend weight — so that workers that participated
-        in more exchanges are not artificially over-weighted.
+        Alignment reference priority:
+          1. seed_reference (Phase 1b global seed centroids) — authoritative
+             ordering computed from a 5% stratified sample before workers fork.
+             Using this prevents phantom centroids when k > true cluster count
+             because every worker's sub-cluster labels are resolved against the
+             same stable reference.
+          2. states[0]['centres'] — fallback when global seeding is off.
+
+        Uses original_row_count (not accumulated blend weight) so workers that
+        participated in more exchanges are not artificially over-weighted.
         """
-        reference  = states[sorted(states.keys())[0]]['centres']
+        sorted_ids = sorted(states.keys())
+
+        # Choose alignment reference
+        if seed_reference is not None:
+            reference = seed_reference
+            self._log(
+                f'_global_merge: aligning to seed_reference '
+                f'({len(reference)} centroids from Phase 1b)'
+            )
+        else:
+            reference = states[sorted_ids[0]]['centres']
+            self._log('_global_merge: aligning to states[0] (no seed reference)')
+
         k          = len(reference)
         d          = len(reference[0])
         total_rows = sum(s['original_row_count'] for s in states.values())
