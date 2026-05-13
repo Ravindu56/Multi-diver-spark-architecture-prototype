@@ -83,28 +83,29 @@ def _reassign_pass(spark, partition_path: str, global_centres: list,
 
 
 def worker_process(
-    worker_id:      int,
-    partition_path: str,
-    result_queue:   Queue,
+    worker_id:              int,
+    partition_path:         str,
+    result_queue:           Queue,
     go_signal,
     ready_signal,
-    timing_queue:   Queue,
-    worker_config:  dict = None,
-    gossip_queue:   Queue = None,
-    reassign_queue: Queue = None,
+    timing_queue:           Queue,
+    worker_config:          dict  = None,
+    gossip_queue:           Queue = None,   # kmeans gossip  OR  logreg allreduce-UP
+    reassign_queue:         Queue = None,
+    allreduce_down_queue:   Queue = None,   # logreg allreduce-DOWN  (root → workers)
 ):
     if worker_config is None:
         worker_config = {}
 
-    app_name        = worker_config.get('app',              'wordcount')
-    cores_override  = worker_config.get('cores_override',    None)
-    kmeans_k        = int(worker_config.get('kmeans_k',          3))
-    kmeans_iter     = int(worker_config.get('kmeans_max_iter',   20))
-    num_workers     = worker_config.get('num_workers',   1)
-    seed_centres    = worker_config.get('seed_centres',      None)
-    logreg_iter     = int(worker_config.get('logreg_iter',       10))
+    app_name         = worker_config.get('app',              'wordcount')
+    cores_override   = worker_config.get('cores_override',    None)
+    kmeans_k         = int(worker_config.get('kmeans_k',          3))
+    kmeans_iter      = int(worker_config.get('kmeans_max_iter',   20))
+    num_workers      = worker_config.get('num_workers',   1)
+    seed_centres     = worker_config.get('seed_centres',      None)
+    logreg_iter      = int(worker_config.get('logreg_iter',       10))
     logreg_reg_param = float(worker_config.get('logreg_reg_param', 0.01))
-    logreg_features = int(worker_config.get('logreg_features',  10))
+    logreg_features  = int(worker_config.get('logreg_features',  10))
 
     logger = DevLogger(worker_id=worker_id)
 
@@ -165,18 +166,17 @@ def worker_process(
 
         elif app_name == 'logreg':
             from mpj_spark.applications import logreg
-            # gossip_queue doubles as the allreduce_queue channel for logreg.
-            # The root process drives per-iteration averaging via the same
-            # Queue used for k-means gossip — root reads N weight vectors
-            # per iteration, averages them, and pushes N 'avg_weights' messages.
+            # gossip_queue is repurposed as allreduce_up_queue (workers → root).
+            # allreduce_down_queue carries averaged weights from root → workers.
             app_result = logreg.run(
                 partition_path,
-                max_iter        = logreg_iter,
-                reg_param       = logreg_reg_param,
-                num_features    = logreg_features,
-                worker_id       = worker_id,
-                allreduce_queue = gossip_queue,
-                num_workers     = num_workers,
+                max_iter             = logreg_iter,
+                reg_param            = logreg_reg_param,
+                num_features         = logreg_features,
+                worker_id            = worker_id,
+                allreduce_up_queue   = gossip_queue,
+                allreduce_down_queue = allreduce_down_queue,
+                num_workers          = num_workers,
             )
             print(f'{_tag(worker_id, "PROC")} LogReg done  '
                   f'acc={app_result["train_accuracy"]:.4f}  '
@@ -190,10 +190,6 @@ def worker_process(
         print(f'{_tag(worker_id, "DONE")} {app_name} complete  ({proc_time:.3f}s)')
 
         # ── EMIT RESULT ───────────────────────────────────────────────
-        #
-        # CRITICAL ordering: result_queue and timing_queue MUST be
-        # populated here, before any reassign_queue.get() call.
-        # ─────────────────────────────────────────────────────────────
         result_queue.put({'worker_id': worker_id, 'result': app_result, 'status': 'success'})
         timing_queue.put({
             'worker_id'      : worker_id,

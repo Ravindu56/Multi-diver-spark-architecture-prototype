@@ -3,28 +3,25 @@
 #
 # Logistic Regression MLlib pipeline — per-worker ML workload
 #
-# ALLREDUCE STRATEGY (simulated Queue-based)
-# ──────────────────────────────────────────
-# Supervised equivalent of k-means centroid gossip:
-#   each iteration → worker pushes weight vector → root averages
-#   across all workers → broadcasts averaged weights back → worker
-#   uses averaged weights as warm start for next iteration.
+# ALLREDUCE STRATEGY (simulated Queue-based, TWO-QUEUE design)
+# ─────────────────────────────────────────────────────────────
+# Uses TWO separate queues to avoid deadlock:
+#   allreduce_up_queue   — this worker → root  (local weight vectors)
+#   allreduce_down_queue — root → this worker  (averaged weights)
 #
-# This implements synchronous Allreduce (FedAvg-style) over the
-# shared multiprocessing Queue channel, matching Phase 2 scope.
+# Per iteration:
+#   1. Worker fits one LR pass (maxIter=1)
+#   2. Pushes {'type':'weights', ...} onto allreduce_up_queue
+#   3. Blocks on allreduce_down_queue.get() for averaged weights
+#   4. Uses averaged weights as starting point for next iteration
 #
 # NOTE ON CSV READING
 # ───────────────────
 # file_manager.dynamic_partition() streams the source CSV line-by-line
-# using round-robin assignment.  The source CSV has a header row
+# using round-robin assignment. The source CSV has a header row
 # (f0,f1,...,label) which lands in whichever partition gets line 0.
-# To handle this robustly across all partitions:
-#   1. Provide an explicit StructType schema (all DoubleType) so Spark
-#      never infers StringType from a stray header value.
-#   2. Read with header=False and schema= (inferSchema disabled).
-#      When the header string "f0" is parsed as Double it becomes NULL.
-#   3. Filter WHERE f0 IS NOT NULL to silently drop the one stray row.
-#   4. Cast the label column to IntegerType for MLlib compatibility.
+# Fix: explicit StructType schema (all DoubleType) so Spark never
+# infers StringType; filter WHERE f0 IS NULL to drop the stray header.
 # ================================================================
 
 import time
@@ -37,9 +34,6 @@ from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
 
 
 def _build_schema(num_features: int) -> StructType:
-    """Return an explicit schema: f0..f{n-1} as Double, label as Double.
-    Label is Double here so the CSV parser never sees a type mismatch;
-    we cast to Integer after loading."""
     fields = [StructField(f'f{i}', DoubleType(), nullable=True)
               for i in range(num_features)]
     fields.append(StructField('label', DoubleType(), nullable=True))
@@ -53,6 +47,10 @@ def run(
     num_features: int = 10,
     seed: int = 42,
     worker_id: int = 0,
+    allreduce_up_queue=None,    # worker → root
+    allreduce_down_queue=None,  # root  → worker
+    # Legacy single-queue param kept for backwards compat — ignored when
+    # up/down queues are provided.
     allreduce_queue=None,
     num_workers: int = 1,
 ) -> dict:
@@ -63,49 +61,26 @@ def run(
     possibly containing one stray header line from the source CSV):
         <f0>,<f1>,...,<f{num_features-1}>,<label>
     where label ∈ {0, 1}.
-
-    Parameters
-    ----------
-    partition_path  : str              — absolute path to worker CSV partition
-    max_iter        : int              — number of Allreduce iterations (default 10)
-    reg_param       : float            — L2 regularisation parameter (default 0.01)
-    num_features    : int              — number of feature columns (default 10)
-    seed            : int              — random seed (default 42)
-    worker_id       : int              — used for logging only
-    allreduce_queue : Queue | None     — shared Queue for weight Allreduce;
-                                         None → local-only training (no sync)
-    num_workers     : int              — total workers sharing allreduce_queue
-
-    Returns
-    -------
-    dict:
-        weight_vector   : list[float]   — final averaged model coefficients
-        intercept       : float         — final model intercept
-        train_accuracy  : float         — accuracy on worker's own partition
-        row_count       : int           — labelled rows processed
-        iterations_done : int           — actual Allreduce rounds completed
-        partition_path  : str
     """
     spark = SparkSession.getActiveSession()
     if spark is None:
         raise RuntimeError('[LogReg] No active SparkSession found in worker.')
 
+    # Resolve queue handles: prefer explicit up/down; fall back to legacy
+    # single-queue mode (up == down) for any caller that hasn't migrated.
+    _up   = allreduce_up_queue   if allreduce_up_queue   is not None else allreduce_queue
+    _down = allreduce_down_queue if allreduce_down_queue is not None else allreduce_queue
+    use_allreduce = _up is not None and _down is not None
+
     # ─ 1. Load CSV with explicit schema ──────────────────────────────────
-    # Use an explicit StructType so Spark never infers StringType when a
-    # stray header row is present. Header strings (e.g. "f0") parse as
-    # NULL under DoubleType; we filter them out immediately after load.
     schema = _build_schema(num_features)
+    df_raw = spark.read.csv(partition_path, schema=schema, header=False)
 
-    df_raw = spark.read.csv(
-        partition_path,
-        schema=schema,       # explicit — no inferSchema
-        header=False,        # partitions are headerless (or have one stray row)
-    )
-
-    # Drop the stray header row (parsed as NULLs) and any other nulls
-    df = df_raw.filter(F.col('f0').isNotNull()) \
-               .dropna() \
-               .withColumn('label', F.col('label').cast(IntegerType()))
+    # Drop stray header row (parses as NULLs) and cast label to int
+    df = (df_raw
+          .filter(F.col('f0').isNotNull())
+          .dropna()
+          .withColumn('label', F.col('label').cast(IntegerType())))
 
     feature_cols = [f'f{i}' for i in range(num_features)]
     row_count    = df.count()
@@ -113,12 +88,11 @@ def run(
     if row_count == 0:
         raise RuntimeError(
             f'[LogReg Worker {worker_id}] Partition is empty after cleaning. '
-            f'Check --logreg-features matches the dataset (expected {num_features} features).'
-        )
+            f'Check --logreg-features matches the dataset (expected {num_features} features).')
 
     print(f'[LogReg Worker {worker_id}] reg_param={reg_param} | '
           f'max_iter={max_iter} | rows={row_count:,} | '
-          f'features={len(feature_cols)} | allreduce={allreduce_queue is not None}')
+          f'features={len(feature_cols)} | allreduce={use_allreduce}')
 
     # ─ 2. Assemble feature vector ─────────────────────────────────────────
     assembler = VectorAssembler(
@@ -148,9 +122,9 @@ def run(
         local_weights   = model.coefficients.toArray().tolist()
         local_intercept = float(model.intercept)
 
-        # ─ 3a. Allreduce: push local weights ──────────────────────────
-        if allreduce_queue is not None:
-            allreduce_queue.put({
+        if use_allreduce:
+            # Push to root via UP queue
+            _up.put({
                 'type'     : 'weights',
                 'worker_id': worker_id,
                 'iteration': iteration,
@@ -159,8 +133,8 @@ def run(
                 'row_count': row_count,
             })
 
-            # ─ 3b. Receive averaged weights from root ─────────────────
-            msg = allreduce_queue.get(timeout=180)
+            # Block on DOWN queue — root writes exactly one msg per worker per iter
+            msg = _down.get(timeout=180)
             if msg.get('type') == 'avg_weights':
                 current_weights   = msg['weights']
                 current_intercept = msg['intercept']
@@ -177,7 +151,7 @@ def run(
               f'({iter_time:.3f}s)  '
               f'|w|={sum(w**2 for w in current_weights)**0.5:.4f}')
 
-    # ─ 4. Final accuracy on local partition ───────────────────────────────
+    # ─ 4. Final accuracy on local partition ──────────────────────────────
     lr_final = LogisticRegression(
         featuresCol='features',
         labelCol='label',

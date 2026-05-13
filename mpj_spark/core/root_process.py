@@ -178,25 +178,34 @@ def aggregate_kmeans_results(worker_results):
 
 
 # ──────────────────────────────────────────────────────────────────
-# LogReg Allreduce coordinator  (root side)
+# LogReg Allreduce coordinator  (root side)  — TWO-QUEUE design
 # ──────────────────────────────────────────────────────────────────
 
 def run_logreg_allreduce(
-    allreduce_queue: Queue,
-    num_workers: int,
+    up_queue:       Queue,   # workers → root  (weight vectors)
+    down_queue:     Queue,   # root → workers  (averaged weights)
+    num_workers:    int,
     num_iterations: int,
-    num_features: int,
+    num_features:   int,
 ) -> dict:
     """
     Root-side coordinator for per-iteration weight-vector Allreduce.
 
-    Protocol per iteration:
-      1. Collect N 'weights' messages (one per worker, any order).
-      2. Compute weighted average weight vector and average intercept
-         (weights proportional to each worker's row_count).
-      3. Broadcast N 'avg_weights' messages back — one to each worker.
+    TWO-QUEUE DESIGN
+    ────────────────
+    up_queue   — workers push {'type':'weights', ...} here.
+    down_queue — root pushes {'type':'avg_weights', ...} here;
+                 each worker reads exactly one message per iteration.
 
-    After all iterations returns the final averaged weight vector.
+    Because writes and reads are on separate queues, there is no
+    possibility of the coordinator reading back its own broadcast
+    messages, eliminating the re-queue livelock of the single-queue
+    design.
+
+    Protocol per iteration:
+      1. Collect N 'weights' messages from up_queue (any order).
+      2. Compute FedAvg: weighted mean of weight vectors.
+      3. Put N 'avg_weights' messages onto down_queue.
     """
     import numpy as np
 
@@ -208,19 +217,15 @@ def run_logreg_allreduce(
 
     for iteration in range(num_iterations):
         t_iter = time.perf_counter()
-        msgs   = []
 
-        # Collect weight vectors from all workers
+        # Collect weight vectors from all workers via UP queue
+        msgs = []
         while len(msgs) < num_workers:
-            msg = allreduce_queue.get(timeout=300)
-            if msg.get('type') == 'weights' and msg.get('iteration') == iteration:
-                msgs.append(msg)
-            else:
-                # Message from a different iteration or wrong type — re-queue
-                allreduce_queue.put(msg)
-                time.sleep(0.01)
+            msg = up_queue.get(timeout=300)
+            # UP queue only ever receives 'weights' messages — no re-queue needed
+            msgs.append(msg)
 
-        # Weighted average (FedAvg: weight ∝ local partition size)
+        # FedAvg: weighted mean proportional to partition size
         total_rows    = sum(m['row_count'] for m in msgs)
         avg_w         = np.zeros(num_features)
         avg_intercept = 0.0
@@ -232,9 +237,9 @@ def run_logreg_allreduce(
         final_weights   = avg_w.tolist()
         final_intercept = float(avg_intercept)
 
-        # Broadcast averaged weights back to all workers
+        # Broadcast averaged weights to all workers via DOWN queue
         for _ in range(num_workers):
-            allreduce_queue.put({
+            down_queue.put({
                 'type'     : 'avg_weights',
                 'iteration': iteration,
                 'weights'  : final_weights,
@@ -257,10 +262,6 @@ def run_logreg_allreduce(
 def aggregate_logreg_results(worker_results, allreduce_result=None):
     """
     Aggregate per-worker LogisticRegression results.
-
-    If allreduce_result is available (Allreduce mode), the final
-    weight vector comes from the coordinated average; otherwise we
-    compute a row-weighted mean of per-worker weight vectors.
     """
     import numpy as np
 
@@ -275,9 +276,8 @@ def aggregate_logreg_results(worker_results, allreduce_result=None):
         final_intercept = allreduce_result['intercept']
         agg_mode        = 'Allreduce (FedAvg)'
     else:
-        # Fallback: row-weighted mean of worker weight vectors
-        num_features = len(worker_results[0]['weight_vector'])
-        avg_w        = np.zeros(num_features)
+        num_features  = len(worker_results[0]['weight_vector'])
+        avg_w         = np.zeros(num_features)
         avg_intercept = 0.0
         for r in worker_results:
             frac           = r['row_count'] / total_rows
@@ -442,9 +442,8 @@ def run_root(
     from mpj_spark.config import TOTAL_CORES, DATA_DIR
     logger = DevLogger(worker_id='root')
 
-    do_seed     = use_global_seed and use_gossip and app == 'kmeans'
-    do_reassign = use_reassign    and use_gossip and app == 'kmeans'
-    # LogReg always uses the allreduce channel (gossip_queue) for per-iteration sync
+    do_seed             = use_global_seed and use_gossip and app == 'kmeans'
+    do_reassign         = use_reassign    and use_gossip and app == 'kmeans'
     do_logreg_allreduce = (app == 'logreg')
 
     agg_mode = (
@@ -486,7 +485,6 @@ def run_root(
     seed_centres = None
     seed_time    = None
 
-    # ── Phase 1b: Global Seeding (kmeans only) ─────────────────────
     if do_seed:
         _phase('1b', 'Computing global seed centroids (Option 1 — isolated subprocess)')
         t_seed = time.perf_counter()
@@ -527,16 +525,29 @@ def run_root(
     go_signals     = [Event() for _ in range(num_workers)]
     ready_signals  = [Event() for _ in range(num_workers)]
     processes      = []
-    # gossip_queue is shared for both kmeans gossip and logreg allreduce
-    gossip_queue   = Queue() if (use_gossip and app == 'kmeans') or do_logreg_allreduce else None
+
+    # k-means gossip uses a single shared queue (unchanged)
+    gossip_queue   = Queue() if (use_gossip and app == 'kmeans') else None
     reassign_queue = Queue() if do_reassign else None
+
+    # LogReg Allreduce: TWO separate queues — up (workers→root) and down (root→workers)
+    # gossip_queue is repurposed as the UP queue when app == 'logreg'
+    allreduce_up_queue   = None
+    allreduce_down_queue = None
+    if do_logreg_allreduce:
+        allreduce_up_queue   = Queue()   # workers push weight vectors here
+        allreduce_down_queue = Queue()   # root pushes averaged weights here
 
     for i in range(num_workers):
         p = Process(
             target=worker_process,
             args=(i, partition_paths[i], result_queue,
                   go_signals[i], ready_signals[i], timing_queue, worker_cfg,
-                  gossip_queue, reassign_queue),
+                  # gossip_queue slot: k-means uses gossip_queue;
+                  # logreg repurposes it as allreduce_up_queue
+                  gossip_queue if app == 'kmeans' else allreduce_up_queue,
+                  reassign_queue),
+            kwargs={'allreduce_down_queue': allreduce_down_queue},
             daemon=True)
         p.start()
         processes.append(p)
@@ -553,23 +564,21 @@ def run_root(
     for sig in go_signals:
         sig.set()
 
-    # ── Phase 3b: LogReg Allreduce coordinator (root-side) ─────────
-    # For logreg, root drives per-iteration Allreduce in a background
-    # thread so it does not block the result_queue.get() in Phase 4.
-    # The allreduce loop runs concurrently with worker training.
-    allreduce_result  = None
-    allreduce_thread  = None
+    # ── Phase 3b: LogReg Allreduce coordinator (background thread) ─
+    allreduce_result = None
+    allreduce_thread = None
 
-    if do_logreg_allreduce and gossip_queue is not None:
+    if do_logreg_allreduce:
         import threading
         _allreduce_container = []
 
         def _allreduce_thread_fn():
             res = run_logreg_allreduce(
-                allreduce_queue = gossip_queue,
-                num_workers     = num_workers,
-                num_iterations  = logreg_iter,
-                num_features    = logreg_features,
+                up_queue       = allreduce_up_queue,
+                down_queue     = allreduce_down_queue,
+                num_workers    = num_workers,
+                num_iterations = logreg_iter,
+                num_features   = logreg_features,
             )
             _allreduce_container.append(res)
 
@@ -599,7 +608,6 @@ def run_root(
         return
     _ok(f'All {num_workers} workers completed')
 
-    # Join allreduce thread if running
     if allreduce_thread is not None:
         allreduce_thread.join(timeout=60)
         if _allreduce_container:
@@ -657,7 +665,6 @@ def run_root(
     agg_time      = time.perf_counter() - t_agg_start
     reassign_time = None
 
-    # ── Phase 5b: Re-assignment Pass (kmeans only) ─────────────────
     if do_reassign and agg is not None and app == 'kmeans':
         _phase('5b', 'Re-assignment pass (Option 2) — exact global centroid correction')
         t_reassign     = time.perf_counter()
@@ -684,7 +691,6 @@ def run_root(
         print(DASH)
         _ok(f'Re-assignment done  ({reassign_time:.3f}s)')
 
-    # Workers can now fully exit
     for p in processes:
         p.join(timeout=30)
 
@@ -704,7 +710,6 @@ def run_root(
                    load_time=load_time, proc_time=avg_proc,
                    agg_time=agg_time, total_time=t_wall)
 
-    # ── Baseline comparison ────────────────────────────────────────
     if compare:
         _phase('B', f'Running {app} baseline for comparison')
         if app == 'wordcount':
