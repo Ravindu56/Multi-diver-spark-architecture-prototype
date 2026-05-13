@@ -4,7 +4,7 @@
 # Logistic Regression MLlib pipeline — per-worker ML workload
 #
 # ALLREDUCE STRATEGY (simulated Queue-based)
-# ────────────────────────────────────────
+# ──────────────────────────────────────────
 # Supervised equivalent of k-means centroid gossip:
 #   each iteration → worker pushes weight vector → root averages
 #   across all workers → broadcasts averaged weights back → worker
@@ -13,26 +13,18 @@
 # This implements synchronous Allreduce (FedAvg-style) over the
 # shared multiprocessing Queue channel, matching Phase 2 scope.
 #
-# MLlib LogisticRegression does not expose setInitialWeights() in
-# PySpark public bindings; instead we use maxIter=1 and loop:
-#   for iteration in range(logreg_iter):
-#       fit one iteration starting from previous weightCol
-#       push weights to allreduce_queue
-#       receive averaged weights from allreduce_queue
-#
-# Because PySpark LR does not accept an initial weights vector
-# directly, we approximate warm-start via regParam and a single-
-# iteration solver pass (L-BFGS). The aggregation signal is the
-# mean weight vector — mathematically identical to FedAvg when
-# partitions are equal-size.
-#
 # NOTE ON CSV READING
 # ───────────────────
-# The file_manager produces headerless .txt partitions via round-robin
-# line streaming (no header row is written). We therefore read with
-# header=False and rename columns explicitly to f0..f{n-1} + label
-# so that VectorAssembler and LogisticRegression receive correctly
-# named columns regardless of the raw Spark _c0, _c1, ... defaults.
+# file_manager.dynamic_partition() streams the source CSV line-by-line
+# using round-robin assignment.  The source CSV has a header row
+# (f0,f1,...,label) which lands in whichever partition gets line 0.
+# To handle this robustly across all partitions:
+#   1. Provide an explicit StructType schema (all DoubleType) so Spark
+#      never infers StringType from a stray header value.
+#   2. Read with header=False and schema= (inferSchema disabled).
+#      When the header string "f0" is parsed as Double it becomes NULL.
+#   3. Filter WHERE f0 IS NOT NULL to silently drop the one stray row.
+#   4. Cast the label column to IntegerType for MLlib compatibility.
 # ================================================================
 
 import time
@@ -41,6 +33,17 @@ from pyspark.ml.classification import LogisticRegression
 from pyspark.ml.feature import VectorAssembler
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
+
+
+def _build_schema(num_features: int) -> StructType:
+    """Return an explicit schema: f0..f{n-1} as Double, label as Double.
+    Label is Double here so the CSV parser never sees a type mismatch;
+    we cast to Integer after loading."""
+    fields = [StructField(f'f{i}', DoubleType(), nullable=True)
+              for i in range(num_features)]
+    fields.append(StructField('label', DoubleType(), nullable=True))
+    return StructType(fields)
 
 
 def run(
@@ -56,9 +59,10 @@ def run(
     """
     Logistic Regression pipeline on a labelled binary-classification CSV.
 
-    Partition format (headerless, produced by MPJSparkFileManager):
+    Partition format (headerless lines produced by MPJSparkFileManager,
+    possibly containing one stray header line from the source CSV):
         <f0>,<f1>,...,<f{num_features-1}>,<label>
-    where label ∈ {0, 1} and each row is a raw CSV line.
+    where label ∈ {0, 1}.
 
     Parameters
     ----------
@@ -86,47 +90,42 @@ def run(
     if spark is None:
         raise RuntimeError('[LogReg] No active SparkSession found in worker.')
 
-    # ─ 1. Load CSV (headerless partition) ---------------------------------
-    # file_manager writes plain .txt partitions with no header row.
-    # Read with header=False; Spark assigns _c0, _c1, ... by default.
-    # Rename to f0..f{num_features-1} and 'label' so the rest of the
-    # pipeline uses stable, predictable column names.
+    # ─ 1. Load CSV with explicit schema ──────────────────────────────────
+    # Use an explicit StructType so Spark never infers StringType when a
+    # stray header row is present. Header strings (e.g. "f0") parse as
+    # NULL under DoubleType; we filter them out immediately after load.
+    schema = _build_schema(num_features)
+
     df_raw = spark.read.csv(
         partition_path,
-        inferSchema=True,
-        header=False,
+        schema=schema,       # explicit — no inferSchema
+        header=False,        # partitions are headerless (or have one stray row)
     )
 
-    # Build rename mapping: _c0->f0, _c1->f1, ..., _c{n-1}->f{n-1}, _c{n}->label
-    expected_total_cols = num_features + 1
-    actual_cols = df_raw.columns  # ['_c0', '_c1', ...]
-
-    if len(actual_cols) != expected_total_cols:
-        raise RuntimeError(
-            f'[LogReg Worker {worker_id}] Expected {expected_total_cols} columns '
-            f'(features={num_features} + label), got {len(actual_cols)}. '
-            f'Check --logreg-features matches the dataset.'
-        )
-
-    rename_exprs = (
-        [F.col(actual_cols[i]).alias(f'f{i}') for i in range(num_features)]
-        + [F.col(actual_cols[num_features]).alias('label')]
-    )
-    df = df_raw.select(*rename_exprs).dropna()
+    # Drop the stray header row (parsed as NULLs) and any other nulls
+    df = df_raw.filter(F.col('f0').isNotNull()) \
+               .dropna() \
+               .withColumn('label', F.col('label').cast(IntegerType()))
 
     feature_cols = [f'f{i}' for i in range(num_features)]
     row_count    = df.count()
+
+    if row_count == 0:
+        raise RuntimeError(
+            f'[LogReg Worker {worker_id}] Partition is empty after cleaning. '
+            f'Check --logreg-features matches the dataset (expected {num_features} features).'
+        )
 
     print(f'[LogReg Worker {worker_id}] reg_param={reg_param} | '
           f'max_iter={max_iter} | rows={row_count:,} | '
           f'features={len(feature_cols)} | allreduce={allreduce_queue is not None}')
 
-    # ─ 2. Assemble feature vector -----------------------------------------
+    # ─ 2. Assemble feature vector ─────────────────────────────────────────
     assembler = VectorAssembler(
         inputCols=feature_cols, outputCol='features', handleInvalid='skip')
     df_vec = assembler.transform(df).select('features', 'label').cache()
 
-    # ─ 3. Iterative Allreduce training ------------------------------------
+    # ─ 3. Iterative Allreduce training ────────────────────────────────────
     current_weights   = None
     current_intercept = 0.0
     iterations_done   = 0
@@ -134,7 +133,6 @@ def run(
     for iteration in range(max_iter):
         t_iter = time.perf_counter()
 
-        # Single-pass LR fit (maxIter=1 per Allreduce round)
         lr = LogisticRegression(
             featuresCol='features',
             labelCol='label',
@@ -150,7 +148,7 @@ def run(
         local_weights   = model.coefficients.toArray().tolist()
         local_intercept = float(model.intercept)
 
-        # ─ 3a. Allreduce: push local weights ────────────────────
+        # ─ 3a. Allreduce: push local weights ──────────────────────────
         if allreduce_queue is not None:
             allreduce_queue.put({
                 'type'     : 'weights',
@@ -161,17 +159,15 @@ def run(
                 'row_count': row_count,
             })
 
-            # ─ 3b. Receive averaged weights from root ─────────────
+            # ─ 3b. Receive averaged weights from root ─────────────────
             msg = allreduce_queue.get(timeout=180)
             if msg.get('type') == 'avg_weights':
                 current_weights   = msg['weights']
                 current_intercept = msg['intercept']
             else:
-                # Unexpected message type — fall back to local weights
                 current_weights   = local_weights
                 current_intercept = local_intercept
         else:
-            # No Allreduce — plain local training
             current_weights   = local_weights
             current_intercept = local_intercept
 
@@ -181,7 +177,7 @@ def run(
               f'({iter_time:.3f}s)  '
               f'|w|={sum(w**2 for w in current_weights)**0.5:.4f}')
 
-    # ─ 4. Final accuracy on local partition ──────────────────────
+    # ─ 4. Final accuracy on local partition ───────────────────────────────
     lr_final = LogisticRegression(
         featuresCol='features',
         labelCol='label',
