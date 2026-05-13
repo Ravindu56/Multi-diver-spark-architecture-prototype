@@ -15,12 +15,25 @@ def run_baseline_logreg(
     reg_param: float = 0.01,
     num_features: int = 10,
     baseline_threads: int = None,
+    parity_iter: int = None,
 ):
     """
     Single-driver Spark LogisticRegression baseline.
 
     Fits on the full dataset in a single Spark session.
     Returns (model_result, timing_dict) to match baseline_kmeans API.
+
+    parity_iter
+    -----------
+    When provided, overrides max_iter so the baseline performs the same
+    total number of gradient steps as the multi-driver framework:
+
+        parity_iter = num_workers × logreg_iter
+
+    This ensures the comparison is fair on compute: the multi-driver run
+    distributes (num_workers × logreg_iter) gradient steps across workers
+    (one per Allreduce round on a 1/num_workers data shard), so the
+    baseline must also perform that many steps on the full dataset.
 
     IMPORTANT: all JVM-backed model attributes (coefficients, intercept)
     must be materialised as plain Python objects BEFORE spark.stop().
@@ -40,8 +53,16 @@ def run_baseline_logreg(
     else:
         thread_count = max(1, math.ceil(TOTAL_CORES / num_workers))
 
+    # Parity-adjusted iteration count: use parity_iter when provided so
+    # the baseline matches the total gradient steps of the multi-driver run.
+    effective_iter = parity_iter if parity_iter is not None else max_iter
+    parity_label   = (
+        f'  [parity: {num_workers}×{max_iter}={parity_iter}]'
+        if parity_iter is not None else ''
+    )
+
     print(f'  [Baseline-LogReg] local[{thread_count}]  '
-          f'max_iter={max_iter}  reg_param={reg_param}')
+          f'max_iter={effective_iter}  reg_param={reg_param}{parity_label}')
 
     t_load_start = time.perf_counter()
     spark = (
@@ -70,7 +91,7 @@ def run_baseline_logreg(
     lr = LogisticRegression(
         featuresCol='features',
         labelCol='label',
-        maxIter=max_iter,
+        maxIter=effective_iter,
         regParam=reg_param,
         elasticNetParam=0.0,
         family='binomial',
@@ -99,6 +120,8 @@ def run_baseline_logreg(
         'load_time'       : load_time,
         'processing_time' : proc_time,
         'total_time'      : total_time,
+        'effective_iter'  : effective_iter,
+        'parity_iter'     : parity_iter,
     }
     result = {
         'weight_vector' : weight_vector,

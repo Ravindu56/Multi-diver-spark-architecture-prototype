@@ -355,9 +355,16 @@ def reassign_pass_root(
 # ──────────────────────────────────────────────────────────────────
 
 def _print_comparison(
-    multi_timing, baseline_timing, num_workers, app, baseline_threads=None
+    multi_timing, baseline_timing, num_workers, app,
+    baseline_threads=None, parity_iter=None
 ):
-    note = f'  [baseline-threads={baseline_threads}]' if baseline_threads else ''
+    note_parts = []
+    if baseline_threads:
+        note_parts.append(f'baseline-threads={baseline_threads}')
+    if parity_iter is not None:
+        note_parts.append(f'baseline-iter={parity_iter} (parity)')
+    note = f'  [{" | ".join(note_parts)}]' if note_parts else ''
+
     print(f'\n{SEP}')
     print(f'  Multi-Driver vs Baseline  |  app={app}  |  workers={num_workers}{note}')
     print(SEP)
@@ -711,7 +718,19 @@ def run_root(
                    agg_time=agg_time, total_time=t_wall)
 
     if compare:
-        _phase('B', f'Running {app} baseline for comparison')
+        # Parity-adjusted baseline iteration count:
+        # multi-driver performs num_workers × logreg_iter total gradient steps
+        # (one step per worker per Allreduce round, across logreg_iter rounds).
+        # The single-driver baseline must use the same total to be a fair comparison.
+        logreg_parity_iter = num_workers * logreg_iter if app == 'logreg' else None
+
+        _phase('B', (
+            f'Running {app} baseline for comparison'
+            + (f'  [parity maxIter={logreg_parity_iter} '
+               f'= {num_workers} workers × {logreg_iter} iters]'
+               if logreg_parity_iter is not None else '')
+        ))
+
         if app == 'wordcount':
             from mpj_spark.applications.baseline_spark import run_baseline
             _, baseline_timing = run_baseline(input_file, num_workers, cores_override)
@@ -725,7 +744,9 @@ def run_root(
             _, baseline_timing = run_baseline_logreg(
                 input_file, num_workers, cores_override,
                 logreg_iter, logreg_reg_param, logreg_features,
-                baseline_threads=baseline_threads)
+                baseline_threads=baseline_threads,
+                parity_iter=logreg_parity_iter,
+            )
 
         multi_timing = {
             'load_time'       : load_time,
@@ -733,8 +754,11 @@ def run_root(
             'reassign_time'   : reassign_time,
             'total_time'      : t_wall,
         }
-        _print_comparison(multi_timing, baseline_timing, num_workers, app,
-                          baseline_threads=baseline_threads)
+        _print_comparison(
+            multi_timing, baseline_timing, num_workers, app,
+            baseline_threads=baseline_threads,
+            parity_iter=logreg_parity_iter,
+        )
 
 
 mpj_root_process = run_root
