@@ -222,7 +222,6 @@ def run_logreg_allreduce(
         msgs = []
         while len(msgs) < num_workers:
             msg = up_queue.get(timeout=300)
-            # UP queue only ever receives 'weights' messages — no re-queue needed
             msgs.append(msg)
 
         # FedAvg: weighted mean proportional to partition size
@@ -259,11 +258,74 @@ def run_logreg_allreduce(
     }
 
 
-def aggregate_logreg_results(worker_results, allreduce_result=None):
+def _write_merged_iter_metrics(
+    worker_results: list,
+    results_dir: str,
+    run_id: str,
+    num_workers: int,
+    reg_param: float,
+    num_features: int,
+) -> str:
     """
-    Aggregate per-worker LogisticRegression results.
+    Merge per-iteration records from all workers into a single CSV.
+
+    Output: results/logreg_iter_metrics.csv  (append mode)
+    Columns added by root (beyond worker columns):
+        run_id        — ISO-8601 timestamp for multi-sweep identification
+        num_workers   — parallelism level
+        reg_param     — regularisation strength
+        num_features  — feature dimensionality
+
+    Append mode means successive experiment sweeps accumulate in one file,
+    which is the dataset format needed for Objective 2a profiling.
+    """
+    import csv as _csv
+
+    os.makedirs(results_dir, exist_ok=True)
+    out_path = os.path.join(results_dir, 'logreg_iter_metrics.csv')
+    file_exists = os.path.isfile(out_path)
+
+    fieldnames = [
+        'run_id', 'num_workers', 'reg_param', 'num_features',
+        'worker_id', 'iteration', 'iter_time_s',
+        'weight_norm', 'weight_delta', 'local_weight_norm',
+        'intercept', 'row_count',
+    ]
+
+    rows_written = 0
+    with open(out_path, 'a', newline='') as f:
+        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        for r in worker_results:
+            for rec in r.get('iter_metrics', []):
+                writer.writerow({
+                    'run_id'      : run_id,
+                    'num_workers' : num_workers,
+                    'reg_param'   : reg_param,
+                    'num_features': num_features,
+                    **rec,
+                })
+                rows_written += 1
+
+    return out_path, rows_written
+
+
+def aggregate_logreg_results(
+    worker_results,
+    allreduce_result=None,
+    results_dir: str = 'results',
+    run_id: str = None,
+    num_workers: int = None,
+    reg_param: float = None,
+    num_features: int = None,
+):
+    """
+    Aggregate per-worker LogisticRegression results and write
+    results/logreg_iter_metrics.csv (Objective 2a profiling dataset).
     """
     import numpy as np
+    from datetime import datetime, timezone
 
     total_rows   = sum(r['row_count'] for r in worker_results)
     avg_accuracy = sum(
@@ -276,8 +338,8 @@ def aggregate_logreg_results(worker_results, allreduce_result=None):
         final_intercept = allreduce_result['intercept']
         agg_mode        = 'Allreduce (FedAvg)'
     else:
-        num_features  = len(worker_results[0]['weight_vector'])
-        avg_w         = np.zeros(num_features)
+        num_feat      = len(worker_results[0]['weight_vector'])
+        avg_w         = np.zeros(num_feat)
         avg_intercept = 0.0
         for r in worker_results:
             frac           = r['row_count'] / total_rows
@@ -297,12 +359,31 @@ def aggregate_logreg_results(worker_results, allreduce_result=None):
     w_preview = ', '.join(f'{v:.4f}' for v in final_weights[:5])
     _info(f'Weight preview   : [{w_preview}{"..." if len(final_weights) > 5 else ""}]')
 
+    # ── Write merged per-iteration metrics CSV (Objective 2a) ───────────
+    _run_id = run_id or datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    _nw     = num_workers   or len(worker_results)
+    _rp     = reg_param     or 0.0
+    _nf     = num_features  or (len(final_weights) if final_weights else 0)
+
+    try:
+        csv_path, rows_written = _write_merged_iter_metrics(
+            worker_results = worker_results,
+            results_dir    = results_dir,
+            run_id         = _run_id,
+            num_workers    = _nw,
+            reg_param      = _rp,
+            num_features   = _nf,
+        )
+        _info(f'Iter metrics CSV : {csv_path}  ({rows_written} rows appended)')
+    except Exception as exc:
+        print(f'  [WARN] Could not write iter metrics CSV: {exc}')
+
     return {
         'weight_vector'  : final_weights,
         'intercept'      : final_intercept,
         'avg_accuracy'   : avg_accuracy,
         'total_rows'     : total_rows,
-        'num_workers'    : len(worker_results),
+        'num_workers'    : _nw,
         'weight_norm'    : weight_norm,
         'agg_mode'       : agg_mode,
     }
@@ -445,6 +526,7 @@ def run_root(
     logreg_iter=10,
     logreg_reg_param=0.01,
     logreg_features=10,
+    results_dir='results',
 ):
     from mpj_spark.config import TOTAL_CORES, DATA_DIR
     logger = DevLogger(worker_id='root')
@@ -516,6 +598,7 @@ def run_root(
         'logreg_iter'     : logreg_iter,
         'logreg_reg_param': logreg_reg_param,
         'logreg_features' : logreg_features,
+        'results_dir'     : results_dir,
     }
 
     # ── Phase 1: Partition ─────────────────────────────────────────
@@ -533,25 +616,20 @@ def run_root(
     ready_signals  = [Event() for _ in range(num_workers)]
     processes      = []
 
-    # k-means gossip uses a single shared queue (unchanged)
     gossip_queue   = Queue() if (use_gossip and app == 'kmeans') else None
     reassign_queue = Queue() if do_reassign else None
 
-    # LogReg Allreduce: TWO separate queues — up (workers→root) and down (root→workers)
-    # gossip_queue is repurposed as the UP queue when app == 'logreg'
     allreduce_up_queue   = None
     allreduce_down_queue = None
     if do_logreg_allreduce:
-        allreduce_up_queue   = Queue()   # workers push weight vectors here
-        allreduce_down_queue = Queue()   # root pushes averaged weights here
+        allreduce_up_queue   = Queue()
+        allreduce_down_queue = Queue()
 
     for i in range(num_workers):
         p = Process(
             target=worker_process,
             args=(i, partition_paths[i], result_queue,
                   go_signals[i], ready_signals[i], timing_queue, worker_cfg,
-                  # gossip_queue slot: k-means uses gossip_queue;
-                  # logreg repurposes it as allreduce_up_queue
                   gossip_queue if app == 'kmeans' else allreduce_up_queue,
                   reassign_queue),
             kwargs={'allreduce_down_queue': allreduce_down_queue},
@@ -660,10 +738,19 @@ def run_root(
         _info(f'Total WCSS : {agg["total_wcss"]:.4f}')
 
     elif app == 'logreg':
-        agg = aggregate_logreg_results(worker_results, allreduce_result=allreduce_result)
+        from datetime import datetime, timezone
+        _run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        agg = aggregate_logreg_results(
+            worker_results,
+            allreduce_result = allreduce_result,
+            results_dir      = results_dir,
+            run_id           = _run_id,
+            num_workers      = num_workers,
+            reg_param        = logreg_reg_param,
+            num_features     = logreg_features,
+        )
         gossip_info = {
-            'iterations_done': agg['iterations_done'] if 'iterations_done' in agg
-                               else logreg_iter,
+            'iterations_done': agg.get('iterations_done', logreg_iter),
         }
         _info(f'Total rows       : {agg["total_rows"]:,}')
         _info(f'Weighted accuracy: {agg["avg_accuracy"]:.4f}')
@@ -718,10 +805,6 @@ def run_root(
                    agg_time=agg_time, total_time=t_wall)
 
     if compare:
-        # Parity-adjusted baseline iteration count:
-        # multi-driver performs num_workers × logreg_iter total gradient steps
-        # (one step per worker per Allreduce round, across logreg_iter rounds).
-        # The single-driver baseline must use the same total to be a fair comparison.
         logreg_parity_iter = num_workers * logreg_iter if app == 'logreg' else None
 
         _phase('B', (
