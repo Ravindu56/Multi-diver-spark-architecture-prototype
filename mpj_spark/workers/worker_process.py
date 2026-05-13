@@ -83,25 +83,29 @@ def _reassign_pass(spark, partition_path: str, global_centres: list,
 
 
 def worker_process(
-    worker_id:      int,
-    partition_path: str,
-    result_queue:   Queue,
+    worker_id:              int,
+    partition_path:         str,
+    result_queue:           Queue,
     go_signal,
     ready_signal,
-    timing_queue:   Queue,
-    worker_config:  dict = None,
-    gossip_queue:   Queue = None,
-    reassign_queue: Queue = None,
+    timing_queue:           Queue,
+    worker_config:          dict  = None,
+    gossip_queue:           Queue = None,   # kmeans gossip  OR  logreg allreduce-UP
+    reassign_queue:         Queue = None,
+    allreduce_down_queue:   Queue = None,   # logreg allreduce-DOWN  (root → workers)
 ):
     if worker_config is None:
         worker_config = {}
 
-    app_name       = worker_config.get('app',             'wordcount')
-    cores_override = worker_config.get('cores_override',   None)
-    kmeans_k       = int(worker_config.get('kmeans_k',         3))
-    kmeans_iter    = int(worker_config.get('kmeans_max_iter',  20))
-    num_workers    = worker_config.get('num_workers',  1)
-    seed_centres   = worker_config.get('seed_centres',     None)
+    app_name         = worker_config.get('app',              'wordcount')
+    cores_override   = worker_config.get('cores_override',    None)
+    kmeans_k         = int(worker_config.get('kmeans_k',          3))
+    kmeans_iter      = int(worker_config.get('kmeans_max_iter',   20))
+    num_workers      = worker_config.get('num_workers',   1)
+    seed_centres     = worker_config.get('seed_centres',      None)
+    logreg_iter      = int(worker_config.get('logreg_iter',       10))
+    logreg_reg_param = float(worker_config.get('logreg_reg_param', 0.01))
+    logreg_features  = int(worker_config.get('logreg_features',  10))
 
     logger = DevLogger(worker_id=worker_id)
 
@@ -160,26 +164,32 @@ def worker_process(
                 })
                 print(f'{_tag(worker_id, "PROC")} Centroid state → gossip_queue')
 
+        elif app_name == 'logreg':
+            from mpj_spark.applications import logreg
+            # gossip_queue is repurposed as allreduce_up_queue (workers → root).
+            # allreduce_down_queue carries averaged weights from root → workers.
+            app_result = logreg.run(
+                partition_path,
+                max_iter             = logreg_iter,
+                reg_param            = logreg_reg_param,
+                num_features         = logreg_features,
+                worker_id            = worker_id,
+                allreduce_up_queue   = gossip_queue,
+                allreduce_down_queue = allreduce_down_queue,
+                num_workers          = num_workers,
+            )
+            print(f'{_tag(worker_id, "PROC")} LogReg done  '
+                  f'acc={app_result["train_accuracy"]:.4f}  '
+                  f'iters={app_result["iterations_done"]}')
+
         else:
-            raise ValueError(f"Unknown app '{app_name}'. Valid: 'wordcount', 'kmeans'")
+            raise ValueError(
+                f"Unknown app '{app_name}'. Valid: 'wordcount', 'kmeans', 'logreg'")
 
         proc_time = time.perf_counter() - t_proc_start
         print(f'{_tag(worker_id, "DONE")} {app_name} complete  ({proc_time:.3f}s)')
 
-        # ── EMIT RESULT (MUST happen before reassign_queue.get) ───────
-        #
-        # CRITICAL ordering: result_queue and timing_queue MUST be
-        # populated here, before any reassign_queue.get() call.
-        #
-        # If we blocked on reassign_queue first, root's Phase 4
-        # result_queue.get() would wait forever — root never reaches
-        # Phase 5 gossip, never calls reassign_queue.put(), and both
-        # sides deadlock until the 120 s timeout fires.
-        #
-        # Correct lifecycle:
-        #   worker: gossip_queue.put → result_queue.put → reassign_queue.get
-        #   root:   Phase4 result_queue.get → Phase5 gossip → reassign_queue.put
-        # ─────────────────────────────────────────────────────────────
+        # ── EMIT RESULT ───────────────────────────────────────────────
         result_queue.put({'worker_id': worker_id, 'result': app_result, 'status': 'success'})
         timing_queue.put({
             'worker_id'      : worker_id,
@@ -191,13 +201,7 @@ def worker_process(
         logger.log_worker_timing(worker_id=worker_id, init_time=init_time,
                                  load_time=load_time, proc_time=proc_time)
 
-        # ── OPTION 2: Re-assignment pass ──────────────────────────────
-        #
-        # Now safe to block: root has already received the result above
-        # and will proceed through Phase 5 gossip, then call
-        # reassign_queue.put() for every worker. Timeout raised to 300 s
-        # to accommodate gossip convergence time on large datasets.
-        # ─────────────────────────────────────────────────────────────
+        # ── OPTION 2: Re-assignment pass (kmeans only) ────────────────
         if reassign_queue is not None and app_name == 'kmeans':
             print(f'{_tag(worker_id, "REASSIGN")} Waiting for global centroids ...')
             msg = reassign_queue.get(timeout=300)

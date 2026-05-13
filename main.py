@@ -10,6 +10,15 @@
 #       --gossip-max-rounds N hard cap on rounds (default 10)
 #       --gossip-fanout N     initial peer fan-out (default 2, then adaptive)
 #
+#   LOGREG EXTENSION (feature/ml-logreg-workload):
+#     Added three new CLI flags:
+#       --logreg-iter N       per-Allreduce-iteration count (default 10)
+#       --logreg-reg-param F  L2 regularisation (default 0.01)
+#       --logreg-features N   number of feature columns in dataset (default 10)
+#     Dataset generator:
+#       --generate with --app logreg emits a labelled binary classification
+#       CSV via generate_classification_dataset()
+#
 # Usage examples:
 # ---------------
 # Standard (unchanged):
@@ -20,10 +29,13 @@
 #   python main.py --app kmeans --workers 4 --generate 200 --gossip \
 #                  --kmeans-k 5 --kmeans-iter 30
 #
-# Gossip tuned:
-#   python main.py --app kmeans --workers 8 --generate 500 --gossip \
-#                  --gossip-threshold 0.0005 --gossip-max-rounds 15 \
-#                  --gossip-fanout 3 --kmeans-k 5 --kmeans-iter 30 --compare
+# LogReg (basic):
+#   python main.py --app logreg --workers 4 --generate 100 \
+#                  --logreg-iter 10 --logreg-reg-param 0.01 --logreg-features 10
+#
+# LogReg with comparison:
+#   python main.py --app logreg --workers 4 --generate 200 --compare \
+#                  --logreg-iter 15 --logreg-reg-param 0.001 --logreg-features 20
 #
 # Log history:
 #   python main.py --log-history
@@ -41,7 +53,7 @@ def parse_args():
     p.add_argument('--workers',     type=int,  default=2,
                    help='Number of parallel worker processes (default: 2)')
     p.add_argument('--app',         type=str,  default='wordcount',
-                   choices=['wordcount', 'kmeans'],
+                   choices=['wordcount', 'kmeans', 'logreg'],
                    help='Application workload to run (default: wordcount)')
     p.add_argument('--generate',    type=int,  default=None, metavar='MB',
                    help='Generate a synthetic dataset of this size in MB before running')
@@ -53,10 +65,13 @@ def parse_args():
                    help='Override per-worker core count (default: TOTAL_CORES // workers)')
     p.add_argument('--no-prewarm',  action='store_true',
                    help='Disable JVM pre-warm (cold-start mode)')
+
+    # ── K-Means FLAGS ─────────────────────────────────────────────
     p.add_argument('--kmeans-k',    type=int,  default=3,
                    help='Number of K-Means clusters (default: 3)')
     p.add_argument('--kmeans-iter', type=int,  default=20,
                    help='Maximum K-Means iterations (default: 20)')
+
     p.add_argument('--baseline-threads', type=int, default=None,
                    help='Override thread count for the baseline Spark session.\n'
                         'Use this for a fair comparison by giving the baseline\n'
@@ -66,7 +81,7 @@ def parse_args():
     p.add_argument('--log-history', action='store_true',
                    help='Print all previous run logs and exit')
 
-    # ── GOSSIP FLAGS (new) ────────────────────────────────────────
+    # ── GOSSIP FLAGS ──────────────────────────────────────────────
     p.add_argument('--gossip', action='store_true',
                    help='Enable adaptive gossip protocol for centroid aggregation.\n'
                         'Only active when --app kmeans.\n'
@@ -79,6 +94,19 @@ def parse_args():
     p.add_argument('--gossip-fanout', type=int, default=2,
                    help='Initial number of peers contacted per worker per round.\n'
                         'Adapted automatically after round 1. (default: 2)')
+
+    # ── LOGREG FLAGS ──────────────────────────────────────────────
+    p.add_argument('--logreg-iter', type=int, default=10,
+                   help='Number of Allreduce iterations for LogisticRegression.\n'
+                        'Each iteration: worker fits one LR pass → pushes weights\n'
+                        '→ root averages across workers → broadcasts back.\n'
+                        '(default: 10)')
+    p.add_argument('--logreg-reg-param', type=float, default=0.01,
+                   help='L2 regularisation parameter for LogisticRegression.\n'
+                        '(default: 0.01)')
+    p.add_argument('--logreg-features', type=int, default=10,
+                   help='Number of feature columns in the classification dataset.\n'
+                        'Must match the dataset used (default: 10)')
     # ─────────────────────────────────────────────────────────────
 
     return p.parse_args()
@@ -101,6 +129,13 @@ def main():
             from mpj_spark.utils.dataset_generator import generate_numeric_dataset
             dataset_path = os.path.join(DATA_DIR, 'numeric_dataset.csv')
             generate_numeric_dataset(dataset_path, args.generate)
+        elif args.app == 'logreg':
+            from mpj_spark.utils.dataset_generator import generate_classification_dataset
+            dataset_path = os.path.join(DATA_DIR, 'classification_dataset.csv')
+            generate_classification_dataset(
+                dataset_path, args.generate,
+                num_features=args.logreg_features,
+            )
         else:
             from mpj_spark.utils.dataset_generator import generate_text_dataset
             dataset_path = os.path.join(DATA_DIR, 'text_dataset.txt')
@@ -108,10 +143,12 @@ def main():
     elif args.input is not None:
         dataset_path = args.input
     else:
-        dataset_path = os.path.join(
-            DATA_DIR,
-            'numeric_dataset.csv' if args.app == 'kmeans' else 'text_dataset.txt'
-        )
+        if args.app == 'kmeans':
+            dataset_path = os.path.join(DATA_DIR, 'numeric_dataset.csv')
+        elif args.app == 'logreg':
+            dataset_path = os.path.join(DATA_DIR, 'classification_dataset.csv')
+        else:
+            dataset_path = os.path.join(DATA_DIR, 'text_dataset.txt')
 
     if not os.path.exists(dataset_path):
         print(f"[main] ERROR: Dataset not found: {dataset_path}")
@@ -126,6 +163,10 @@ def main():
     if args.app == 'kmeans':
         print(f'[main] K-Means k        : {args.kmeans_k}')
         print(f'[main] K-Means iter     : {args.kmeans_iter}')
+    if args.app == 'logreg':
+        print(f'[main] LogReg iter      : {args.logreg_iter}')
+        print(f'[main] LogReg reg_param : {args.logreg_reg_param}')
+        print(f'[main] LogReg features  : {args.logreg_features}')
     if args.baseline_threads:
         print(f'[main] Baseline threads : {args.baseline_threads}  [fair comparison mode]')
     if args.gossip:
@@ -151,6 +192,9 @@ def main():
         gossip_threshold  = args.gossip_threshold,
         gossip_max_rounds = args.gossip_max_rounds,
         gossip_fanout     = args.gossip_fanout,
+        logreg_iter       = args.logreg_iter,
+        logreg_reg_param  = args.logreg_reg_param,
+        logreg_features   = args.logreg_features,
     )
 
 
