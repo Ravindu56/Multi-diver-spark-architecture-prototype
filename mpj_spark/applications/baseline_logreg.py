@@ -21,6 +21,11 @@ def run_baseline_logreg(
 
     Fits on the full dataset in a single Spark session.
     Returns (model_result, timing_dict) to match baseline_kmeans API.
+
+    IMPORTANT: all JVM-backed model attributes (coefficients, intercept)
+    must be materialised as plain Python objects BEFORE spark.stop().
+    Calling model.coefficients after stop() destroys the SparkContext and
+    raises AssertionError inside _call_java().
     """
     import math
     from pyspark.sql import SparkSession
@@ -72,13 +77,19 @@ def run_baseline_logreg(
         fitIntercept=True,
         standardization=True,
     )
-    model        = lr.fit(df_vec)
-    proc_time    = time.perf_counter() - t_proc_start
-    accuracy     = float(model.summary.accuracy)
-    weight_norm  = float(model.coefficients.norm(2))
+    model       = lr.fit(df_vec)
+    proc_time   = time.perf_counter() - t_proc_start
+    accuracy    = float(model.summary.accuracy)
+    weight_norm = float(model.coefficients.norm(2))
 
     print(f'  [Baseline-LogReg] Accuracy={accuracy:.4f}  |w|={weight_norm:.4f}  '
           f'({proc_time:.3f}s)')
+
+    # Materialise JVM-backed values into plain Python BEFORE stopping Spark.
+    # Any call to model.coefficients / model.intercept after spark.stop()
+    # goes through _call_java() which asserts sc is not None — and fails.
+    weight_vector = model.coefficients.toArray().tolist()   # list[float]
+    intercept_val = float(model.intercept)                  # plain float
 
     df_vec.unpersist()
     spark.stop()
@@ -90,8 +101,8 @@ def run_baseline_logreg(
         'total_time'      : total_time,
     }
     result = {
-        'weight_vector' : model.coefficients.toArray().tolist(),
-        'intercept'     : float(model.intercept),
+        'weight_vector' : weight_vector,
+        'intercept'     : intercept_val,
         'accuracy'      : accuracy,
         'row_count'     : row_count,
     }
