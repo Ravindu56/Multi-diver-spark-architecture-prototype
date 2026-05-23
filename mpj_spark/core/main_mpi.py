@@ -5,28 +5,11 @@
 #
 # PURPOSE
 # -------
-# This is the *modular* MPI entry point that lives inside the package
-# hierarchy so the framework can be launched as a proper Python module:
+# Thin rank-dispatch shim.  Zero application logic lives here.
+# All coordination logic lives in:
 #
-#   mpirun -n <1+N> python -m mpj_spark.core.main_mpi [options]
-#
-# It is intentionally a thin rank-dispatch shim — zero application
-# logic lives here.  All MPI transport adapters (MpiQueue, MpiEvent,
-# MpiRootFanoutQueue) and all coordination logic live in:
-#
-#   mpj_spark_mpi.py          -> root_main() / worker_main()
-#   mpj_spark/core/root_process.py  -> run_root()
-#   mpj_spark/workers/worker_process.py -> worker_process()
-#
-# RELATIONSHIP TO mpj_spark_mpi.py
-# ---------------------------------
-# mpj_spark_mpi.py  (repo root)  - flat-root launcher; kept for
-#                                   backwards-compatibility and for
-#                                   Phase 2 → Phase 3 parity testing.
-# mpj_spark/core/main_mpi.py     - package-internal launcher; the
-#                                   canonical Phase 3+ entry point.
-# Both launchers delegate to the *same* root_main() / worker_main()
-# functions, so they are always functionally identical.
+#   mpj_spark/core/root_mpi.py       -> run_root_mpi()  [rank 0]
+#   mpj_spark/workers/worker_mpi.py  -> run_worker_mpi() [ranks 1..N]
 #
 # LAUNCH
 # ------
@@ -39,8 +22,15 @@
 #
 # RANK ROLES
 # ----------
-#   Rank 0  = root coordinator  (MPI_COMM_WORLD replaces multiprocessing.Process)
-#   Rank 1+ = independent Spark driver workers
+#   Rank 0  = root coordinator  (calls run_root_mpi)
+#   Rank 1+ = Spark driver workers  (call run_worker_mpi)
+#
+# BACKWARDS COMPATIBILITY
+# -----------------------
+# mpj_spark_mpi.py (repo root) is the Phase-2 / Phase-3 parity launcher.
+# It delegates through MpiQueue / MpiEvent adapters into run_root() and
+# worker_process().  That path is preserved for regression testing but is
+# NO LONGER used by this canonical Phase-3+ entry point.
 #
 # P3-02 ACCEPTANCE CRITERION
 # ---------------------------
@@ -73,14 +63,14 @@ size = comm.Get_size()   # total ranks = 1 root + N workers
 
 
 # ================================================================
-# RANK DISPATCH
+# ARGUMENT PARSER  (rank 0 only)
 # ================================================================
 
 def _build_arg_parser():
     """
-    Construct the argument parser shared by both launchers.
-    Kept as a factory function so the parser can be imported and
-    reused by test helpers without triggering a full MPI run.
+    Construct the CLI argument parser.
+    Kept as a factory so test helpers can inspect it without
+    triggering a full MPI run.
     """
     import argparse
     p = argparse.ArgumentParser(
@@ -100,13 +90,13 @@ def _build_arg_parser():
     )
     p.add_argument(
         "--generate", type=int, default=50, metavar="MB",
-        help="Generate a synthetic dataset of this size (MB) if --input is not found.",
+        help="Auto-generate a synthetic dataset of this size (MB) if --input not found.",
     )
 
     # ── Parallelism ───────────────────────────────────────────────
     p.add_argument(
         "--workers", type=int, default=None,
-        help="Number of worker ranks to use. Defaults to MPI size - 1.",
+        help="Informational only — actual worker count is always MPI size - 1.",
     )
     p.add_argument(
         "--cores", type=int, default=None,
@@ -119,21 +109,21 @@ def _build_arg_parser():
         choices=["wordcount", "kmeans", "logreg"],
         help="Workload to run on each Spark driver.",
     )
-    p.add_argument("--compare",     action="store_true",
-                   help="Run a single-driver baseline and print a speedup comparison table.")
-    p.add_argument("--no-prewarm",  action="store_true",
-                   help="Skip JVM pre-warm phase (faster cold start, higher variance).")
+    p.add_argument("--compare",      action="store_true",
+                   help="Run a single-driver baseline and print a speedup table.")
+    p.add_argument("--no-prewarm",   action="store_true",
+                   help="Skip JVM pre-warm barrier (faster cold start, higher variance).")
 
     # ── K-Means options ───────────────────────────────────────────
-    p.add_argument("--kmeans-k",        type=int,   default=3)
-    p.add_argument("--kmeans-iter",     type=int,   default=20)
-    p.add_argument("--baseline-threads",type=int,   default=None)
-    p.add_argument("--gossip",          action="store_true")
-    p.add_argument("--gossip-threshold",type=float, default=1e-3)
-    p.add_argument("--gossip-max-rounds",type=int,  default=10)
-    p.add_argument("--gossip-fanout",   type=int,   default=2)
-    p.add_argument("--global-seed",     action="store_true")
-    p.add_argument("--reassign",        action="store_true")
+    p.add_argument("--kmeans-k",         type=int,   default=3)
+    p.add_argument("--kmeans-iter",      type=int,   default=20)
+    p.add_argument("--baseline-threads", type=int,   default=None)
+    p.add_argument("--gossip",           action="store_true")
+    p.add_argument("--gossip-threshold", type=float, default=1e-3)
+    p.add_argument("--gossip-max-rounds",type=int,   default=10)
+    p.add_argument("--gossip-fanout",    type=int,   default=2)
+    p.add_argument("--global-seed",      action="store_true")
+    p.add_argument("--reassign",         action="store_true")
 
     # ── Logistic Regression options ───────────────────────────────
     p.add_argument("--logreg-iter",      type=int,   default=10)
@@ -142,20 +132,21 @@ def _build_arg_parser():
 
     # ── Output ───────────────────────────────────────────────────
     p.add_argument("--results-dir", default="results",
-                   help="Directory where profiling CSVs and results are written.")
+                   help="Directory for profiling CSVs and result files.")
 
     return p
 
 
+# ================================================================
+# RANK 0  —  Root coordinator
+# ================================================================
+
 def _run_root(args):
     """
     Root coordinator path (rank 0).
+    Delegates directly to run_root_mpi() in mpj_spark/core/root_mpi.py.
 
-    Validates rank, then delegates to root_main() in mpj_spark_mpi.py
-    which injects MPI transport adapters into run_root().
-
-    P3-02: rank 0 is the root; MPI_COMM_WORLD provides process identity.
-    No multiprocessing.Process is created here.
+    P3-02: rank 0 is the root; no multiprocessing.Process is created.
     """
     assert rank == 0, (
         f"_run_root() called on rank {rank} — must only be called by rank 0."
@@ -165,43 +156,69 @@ def _run_root(args):
         "Launch with: mpirun -np <1+N> python -m mpj_spark.core.main_mpi"
     )
 
-    # Resolve worker count: CLI arg or MPI-derived
+    # Warn if --workers conflicts with the MPI-derived count
     if args.workers is not None and args.workers != size - 1:
         print(
             f"[main_mpi] WARNING: --workers={args.workers} ignored; "
-            f"using MPI-derived worker count = {size - 1} "
+            f"actual worker count = {size - 1} "
             f"(change -np in your mpirun command to adjust parallelism)."
         )
-    args.workers = size - 1
+    num_workers = size - 1
 
     print(
         f"\n[main_mpi] MPI_COMM_WORLD size={size}  "
         f"root=rank-0  workers=ranks-1..{size-1}"
     )
 
-    # Auto-generate dataset if the input file does not exist
+    # Auto-generate dataset if the input file does not exist (rank 0 only)
     if not os.path.exists(args.input):
         print(
             f"[main_mpi] Input file '{args.input}' not found. "
-            f"Auto-generating {args.generate} MB synthetic dataset..."
+            f"Auto-generating {args.generate} MB synthetic dataset ..."
         )
-        # Import from repo-root prototype script (kept for data generation)
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+        _repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
         from mpj_spark_prototype_v2 import generate_test_dataset  # noqa
         args.input = generate_test_dataset(args.input, args.generate)
 
-    # Delegate to transport-layer root_main()
-    from mpj_spark_mpi import root_main  # noqa (repo root, on sys.path)
-    root_main(args)
+    # ── Delegate to the Phase-3 MPI root coordinator ──────────────
+    from mpj_spark.core.root_mpi import run_root_mpi
+    run_root_mpi(
+        comm             = comm,
+        input_file       = args.input,
+        num_workers      = num_workers,
+        compare          = args.compare,
+        prewarm          = not args.no_prewarm,
+        cores_override   = args.cores,
+        app              = args.app,
+        kmeans_k         = args.kmeans_k,
+        kmeans_iter      = args.kmeans_iter,
+        baseline_threads = args.baseline_threads,
+        use_gossip       = args.gossip,
+        gossip_threshold  = args.gossip_threshold,
+        gossip_max_rounds = args.gossip_max_rounds,
+        gossip_fanout     = args.gossip_fanout,
+        use_global_seed  = args.global_seed,
+        use_reassign     = args.reassign,
+        logreg_iter      = args.logreg_iter,
+        logreg_reg_param = args.logreg_reg_param,
+        logreg_features  = args.logreg_features,
+        results_dir      = args.results_dir,
+    )
 
+
+# ================================================================
+# RANKS 1..N  —  Spark driver workers
+# ================================================================
 
 def _run_worker():
     """
     Worker path (ranks 1..N).
-
-    Workers have no CLI args to parse.  They go straight to work by
-    delegating to worker_main() in mpj_spark_mpi.py, which injects MPI
-    transport adapters into worker_process().
+    Workers do not parse CLI args.  They delegate directly to
+    run_worker_mpi() in mpj_spark/workers/worker_mpi.py.
 
     P3-02: each worker rank is an independent Spark driver process;
     no multiprocessing.Process is created here.
@@ -210,8 +227,8 @@ def _run_worker():
         f"_run_worker() called on rank {rank} — must only be called by rank >= 1."
     )
 
-    from mpj_spark_mpi import worker_main  # noqa (repo root, on sys.path)
-    worker_main()
+    from mpj_spark.workers.worker_mpi import run_worker_mpi
+    run_worker_mpi(comm)
 
 
 # ================================================================
@@ -219,8 +236,8 @@ def _run_worker():
 # ================================================================
 
 if __name__ == "__main__":
-    # Ensure the repo root is on sys.path so mpj_spark_mpi.py is importable
-    # when launched as `python -m mpj_spark.core.main_mpi`.
+    # Ensure the repo root is on sys.path (needed for data-generation
+    # helper and backwards-compat parity imports).
     _repo_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..")
     )
@@ -228,14 +245,13 @@ if __name__ == "__main__":
         sys.path.insert(0, _repo_root)
 
     if rank == 0:
-        # ── Root: parse CLI and run ───────────────────────────────
-        # Only rank 0 parses arguments.  Worker ranks must NOT call
-        # argparse — doing so would cause a deadlock if argument
-        # parsing raises SystemExit on any rank while others are
-        # already blocked on comm.recv().
+        # ── Root: parse CLI, then run ─────────────────────────────
+        # IMPORTANT: Only rank 0 calls argparse.parse_args().
+        # Worker ranks must NOT call argparse — a SystemExit on any
+        # rank while others are blocked on comm.recv() causes a deadlock.
         parser = _build_arg_parser()
         args   = parser.parse_args()
         _run_root(args)
     else:
-        # ── Workers: no CLI parsing, go straight to work ─────────
+        # ── Workers: no CLI parsing, receive config from root ─────
         _run_worker()
