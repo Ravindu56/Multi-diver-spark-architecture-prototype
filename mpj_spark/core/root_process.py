@@ -444,7 +444,7 @@ def _print_comparison(
         note_parts.append(f'baseline-threads={baseline_threads}')
     if parity_iter is not None:
         note_parts.append(f'baseline-iter={parity_iter} (parity)')
-    note = f'  [{" | ".join(note_parts)}]' if note_parts else ''
+    note = f'  [{"  |  ".join(note_parts)}]' if note_parts else ''
 
     print(f'\n{SEP}')
     print(f'  Multi-Driver vs Baseline  |  app={app}  |  workers={num_workers}{note}')
@@ -527,9 +527,17 @@ def run_root(
     logreg_reg_param=0.01,
     logreg_features=10,
     results_dir='results',
+    # ── MPI transport layer passes these via **kwargs; absorbed here
+    # so the multiprocessing path ignores them without TypeError.
+    **_mpi_kwargs,
 ):
     from mpj_spark.config import TOTAL_CORES, DATA_DIR
     logger = DevLogger(worker_id='root')
+
+    # Log any MPI-layer kwargs that were passed but are unused here
+    if _mpi_kwargs:
+        ignored = ', '.join(_mpi_kwargs.keys())
+        print(f'  [run_root] MPI-layer kwargs ignored in multiprocessing path: {ignored}')
 
     do_seed             = use_global_seed and use_gossip and app == 'kmeans'
     do_reassign         = use_reassign    and use_gossip and app == 'kmeans'
