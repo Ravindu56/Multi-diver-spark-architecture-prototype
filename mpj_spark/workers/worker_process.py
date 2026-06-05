@@ -1,6 +1,27 @@
 # ================================================================
 # mpj_spark/workers/worker_process.py
 # ================================================================
+# Transport-agnostic worker core + Phase-2 multiprocessing wrapper.
+#
+# PUBLIC API
+# ----------
+# run_worker_core(worker_id, partition_path, spark, worker_config,
+#                up_queue, down_queue, reassign_adapter)
+#     Pure Spark / application logic.  Zero multiprocessing or MPI
+#     imports.  Called by both worker_process() (Phase 2) and
+#     run_worker_mpi() (Phase 3).
+#
+# worker_process(worker_id, partition_path, result_queue, go_signal,
+#                ready_signal, timing_queue, worker_config,
+#                gossip_queue, reassign_queue, allreduce_down_queue)
+#     Phase-2 multiprocessing wrapper.  Handles SparkSession init and
+#     the multiprocessing Event barrier, then delegates to
+#     run_worker_core().
+#
+# _reassign_pass(spark, partition_path, global_centres, worker_id)
+#     Pure Spark/NumPy re-assignment helper.  No transport dependency.
+#     Imported directly by worker_mpi.py to avoid duplication.
+# ================================================================
 import time
 import traceback
 from multiprocessing import Queue
@@ -14,6 +35,10 @@ from mpj_spark.utils.dev_logger import DevLogger
 def _tag(worker_id, phase):
     return f'[Worker {worker_id}][{phase}]'
 
+
+# ================================================================
+# _reassign_pass  —  pure Spark/NumPy, no transport dependency
+# ================================================================
 
 def _reassign_pass(spark, partition_path: str, global_centres: list,
                    worker_id: int) -> dict:
@@ -82,23 +107,52 @@ def _reassign_pass(spark, partition_path: str, global_centres: list,
     }
 
 
-def worker_process(
-    worker_id:              int,
-    partition_path:         str,
-    result_queue:           Queue,
-    go_signal,
-    ready_signal,
-    timing_queue:           Queue,
-    worker_config:          dict  = None,
-    gossip_queue:           Queue = None,   # kmeans gossip  OR  logreg allreduce-UP
-    reassign_queue:         Queue = None,
-    allreduce_down_queue:   Queue = None,   # logreg allreduce-DOWN  (root → workers)
-):
-    if worker_config is None:
-        worker_config = {}
+# ================================================================
+# run_worker_core  —  transport-agnostic Spark logic
+# ================================================================
 
+def run_worker_core(
+    worker_id:        int,
+    partition_path:   str,
+    spark,                        # active SparkSession, already initialised
+    worker_config:    dict,
+    up_queue          = None,     # Queue-like: worker → root  (gossip / allreduce-UP)
+    down_queue        = None,     # Queue-like: root → worker  (allreduce-DOWN)
+    reassign_adapter  = None,     # Queue-like or None: for kmeans re-assignment pass
+) -> dict:
+    """
+    Transport-agnostic worker Spark logic.
+
+    Executes load → proc → emit result/timing → optional reassign pass
+    for the assigned application.  Has NO knowledge of whether the
+    transport layer is multiprocessing.Queue, MPI, or anything else —
+    callers pass Queue-compatible objects (anything with .put() / .get()).
+
+    Parameters
+    ----------
+    worker_id        : 0-indexed worker identifier.
+    partition_path   : Path to the local data partition file.
+    spark            : An already-initialised SparkSession.
+    worker_config    : Dict of application parameters (app, k, iter, etc.).
+    up_queue         : Queue-like used by kmeans (centroid gossip) and
+                       logreg (allreduce-UP weights). May be None.
+    down_queue       : Queue-like used by logreg (allreduce-DOWN averaged
+                       weights, root → worker). May be None.
+    reassign_adapter : Queue-like used for the optional K-Means re-assignment
+                       pass (recv global centroids, send cluster stats).
+                       May be None — pass None to skip the reassign pass.
+
+    Returns
+    -------
+    dict with keys:
+        result   — application result dict  (or None on error)
+        timing   — {'worker_id', 'init_time', 'load_time',
+                     'processing_time', 'total_time'}
+        status   — 'success' or 'error'
+        error    — str (present only on error)
+    """
     app_name         = worker_config.get('app',              'wordcount')
-    cores_override   = worker_config.get('cores_override',    None)
+    cores_override   = worker_config.get('cores_override',    None)  # already applied
     kmeans_k         = int(worker_config.get('kmeans_k',          3))
     kmeans_iter      = int(worker_config.get('kmeans_max_iter',   20))
     num_workers      = worker_config.get('num_workers',   1)
@@ -107,26 +161,12 @@ def worker_process(
     logreg_reg_param = float(worker_config.get('logreg_reg_param', 0.01))
     logreg_features  = int(worker_config.get('logreg_features',  10))
 
-    logger = DevLogger(worker_id=worker_id)
+    logger    = DevLogger(worker_id=worker_id)
+    load_time = 0.0
+    proc_time = 0.0
 
     try:
-        # ── INIT ──────────────────────────────────────────────────────
-        print(f'{_tag(worker_id, "INIT")} Starting SparkSession (app={app_name}) ...')
-        t_init_start = time.perf_counter()
-        spark = build_spark_session(
-            app_name=f'MPJ-Worker-{worker_id}-{app_name}',
-            cores_override=cores_override,
-            num_workers=num_workers,
-        )
-        init_time = time.perf_counter() - t_init_start
-        print(f'{_tag(worker_id, "INIT")} SparkSession ready  ({init_time:.3f}s)')
-
-        # ── BARRIER ───────────────────────────────────────────────────
-        ready_signal.set()
-        print(f'{_tag(worker_id, "WAIT")} Waiting for go-signal ...')
-        go_signal.wait()
-
-        # ── LOAD ──────────────────────────────────────────────────────
+        # ── LOAD ────────────────────────────────────────────────────────
         print(f'{_tag(worker_id, "LOAD")} Loading partition ...')
         t_load_start = time.perf_counter()
 
@@ -136,10 +176,9 @@ def worker_process(
             row_count = text_rdd.count()
             load_time = time.perf_counter() - t_load_start
             print(f'{_tag(worker_id, "LOAD")} {row_count:,} rows  ({load_time:.3f}s)')
-        else:
-            load_time = 0.0
+        # kmeans and logreg load inside their run() calls
 
-        # ── PROC ──────────────────────────────────────────────────────
+        # ── PROC ────────────────────────────────────────────────────────
         print(f'{_tag(worker_id, "PROC")} Running {app_name} ...')
         t_proc_start = time.perf_counter()
 
@@ -151,31 +190,29 @@ def worker_process(
             from mpj_spark.applications import kmeans
             app_result = kmeans.run(
                 partition_path,
-                k=kmeans_k,
-                max_iter=kmeans_iter,
-                seed_centres=seed_centres,
+                k            = kmeans_k,
+                max_iter     = kmeans_iter,
+                seed_centres = seed_centres,
             )
-            if gossip_queue is not None:
-                gossip_queue.put({
+            if up_queue is not None:
+                up_queue.put({
                     'worker_id' : worker_id,
                     'centres'   : app_result['centres'],
                     'wcss'      : app_result['wcss'],
                     'row_count' : app_result['row_count'],
                 })
-                print(f'{_tag(worker_id, "PROC")} Centroid state → gossip_queue')
+                print(f'{_tag(worker_id, "PROC")} Centroid state → up_queue')
 
         elif app_name == 'logreg':
             from mpj_spark.applications import logreg
-            # gossip_queue is repurposed as allreduce_up_queue (workers → root).
-            # allreduce_down_queue carries averaged weights from root → workers.
             app_result = logreg.run(
                 partition_path,
                 max_iter             = logreg_iter,
                 reg_param            = logreg_reg_param,
                 num_features         = logreg_features,
                 worker_id            = worker_id,
-                allreduce_up_queue   = gossip_queue,
-                allreduce_down_queue = allreduce_down_queue,
+                allreduce_up_queue   = up_queue,
+                allreduce_down_queue = down_queue,
                 num_workers          = num_workers,
             )
             print(f'{_tag(worker_id, "PROC")} LogReg done  '
@@ -189,33 +226,138 @@ def worker_process(
         proc_time = time.perf_counter() - t_proc_start
         print(f'{_tag(worker_id, "DONE")} {app_name} complete  ({proc_time:.3f}s)')
 
-        # ── EMIT RESULT ───────────────────────────────────────────────
-        result_queue.put({'worker_id': worker_id, 'result': app_result, 'status': 'success'})
-        timing_queue.put({
+        # ── TIMING ────────────────────────────────────────────────────
+        # init_time is not known here (SparkSession was built by caller);
+        # callers must inject it into the returned timing dict if needed.
+        timing = {
             'worker_id'      : worker_id,
-            'init_time'      : init_time,
+            'init_time'      : 0.0,   # filled in by caller (knows init_time)
             'load_time'      : load_time,
             'processing_time': proc_time,
-            'total_time'     : init_time + load_time + proc_time,
-        })
-        logger.log_worker_timing(worker_id=worker_id, init_time=init_time,
-                                 load_time=load_time, proc_time=proc_time)
+            'total_time'     : load_time + proc_time,
+        }
+        logger.log_worker_timing(
+            worker_id = worker_id,
+            init_time = 0.0,
+            load_time = load_time,
+            proc_time = proc_time,
+        )
 
-        # ── OPTION 2: Re-assignment pass (kmeans only) ────────────────
-        if reassign_queue is not None and app_name == 'kmeans':
+        # ── REASSIGN PASS (kmeans only, optional) ────────────────────
+        if reassign_adapter is not None and app_name == 'kmeans':
             print(f'{_tag(worker_id, "REASSIGN")} Waiting for global centroids ...')
-            msg = reassign_queue.get(timeout=300)
+            msg = reassign_adapter.get(timeout=300)
             if msg.get('type') == 'reassign':
                 global_centres = msg['centres']
                 reassign_stats = _reassign_pass(
                     spark, partition_path, global_centres, worker_id)
-                reassign_queue.put({
+                reassign_adapter.put({
                     'type'          : 'stats',
                     'worker_id'     : worker_id,
                     'cluster_sums'  : reassign_stats['cluster_sums'],
                     'cluster_counts': reassign_stats['cluster_counts'],
                     'row_count'     : reassign_stats['row_count'],
                 })
+
+        return {'result': app_result, 'timing': timing, 'status': 'success'}
+
+    except Exception as exc:
+        print(f'{_tag(worker_id, "ERROR")} {exc}')
+        traceback.print_exc()
+        return {
+            'result': None,
+            'timing': {
+                'worker_id'      : worker_id,
+                'init_time'      : 0.0,
+                'load_time'      : 0.0,
+                'processing_time': 0.0,
+                'total_time'     : 0.0,
+            },
+            'status': 'error',
+            'error' : str(exc),
+        }
+
+
+# ================================================================
+# worker_process  —  Phase-2 multiprocessing wrapper (unchanged API)
+# ================================================================
+
+def worker_process(
+    worker_id:              int,
+    partition_path:         str,
+    result_queue:           Queue,
+    go_signal,
+    ready_signal,
+    timing_queue:           Queue,
+    worker_config:          dict  = None,
+    gossip_queue:           Queue = None,   # kmeans gossip  OR  logreg allreduce-UP
+    reassign_queue:         Queue = None,
+    allreduce_down_queue:   Queue = None,   # logreg allreduce-DOWN  (root → workers)
+):
+    """
+    Phase-2 multiprocessing wrapper.  Public API is unchanged.
+
+    Handles SparkSession init and the multiprocessing Event barrier
+    (ready_signal / go_signal), then delegates all Spark logic to
+    run_worker_core().
+    """
+    if worker_config is None:
+        worker_config = {}
+
+    app_name       = worker_config.get('app', 'wordcount')
+    cores_override = worker_config.get('cores_override', None)
+    num_workers    = worker_config.get('num_workers', 1)
+    logger         = DevLogger(worker_id=worker_id)
+
+    try:
+        # ── INIT ────────────────────────────────────────────────────────
+        print(f'{_tag(worker_id, "INIT")} Starting SparkSession (app={app_name}) ...')
+        t_init_start = time.perf_counter()
+        spark = build_spark_session(
+            app_name       = f'MPJ-Worker-{worker_id}-{app_name}',
+            cores_override = cores_override,
+            num_workers    = num_workers,
+        )
+        init_time = time.perf_counter() - t_init_start
+        print(f'{_tag(worker_id, "INIT")} SparkSession ready  ({init_time:.3f}s)')
+
+        # ── BARRIER ───────────────────────────────────────────────────
+        ready_signal.set()
+        print(f'{_tag(worker_id, "WAIT")} Waiting for go-signal ...')
+        go_signal.wait()
+
+        # ── DELEGATE to transport-agnostic core ──────────────────────
+        outcome = run_worker_core(
+            worker_id       = worker_id,
+            partition_path  = partition_path,
+            spark           = spark,
+            worker_config   = worker_config,
+            up_queue        = gossip_queue,
+            down_queue      = allreduce_down_queue,
+            reassign_adapter= reassign_queue,
+        )
+
+        # Patch init_time into the timing dict (core doesn’t know it)
+        outcome['timing']['init_time']  = init_time
+        outcome['timing']['total_time'] = init_time + outcome['timing']['load_time'] + \
+                                          outcome['timing']['processing_time']
+
+        # Re-log with correct init_time
+        logger.log_worker_timing(
+            worker_id = worker_id,
+            init_time = init_time,
+            load_time = outcome['timing']['load_time'],
+            proc_time = outcome['timing']['processing_time'],
+        )
+
+        # ── EMIT via multiprocessing Queues ───────────────────────────
+        result_queue.put({
+            'worker_id': worker_id,
+            'result'   : outcome['result'],
+            'status'   : outcome['status'],
+            **({'error': outcome['error']} if outcome['status'] == 'error' else {}),
+        })
+        timing_queue.put(outcome['timing'])
 
     except Exception as exc:
         print(f'{_tag(worker_id, "ERROR")} {exc}')
