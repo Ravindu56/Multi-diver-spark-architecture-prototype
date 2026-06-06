@@ -1,0 +1,39 @@
+name: Close linked issues on dev merge
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [closed]
+
+jobs:
+  close-issues:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Close issues linked in PR body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const pattern = /(?:closes?|fixes?|resolves?)\s+#(\d+)/gi;
+            let match;
+            const closed = [];
+            while ((match = pattern.exec(body)) !== null) {
+              const issueNumber = parseInt(match[1]);
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                state: 'closed',
+                state_reason: 'completed'
+              });
+              closed.push(`#${issueNumber}`);
+              console.log(`Closed issue #${issueNumber}`);
+            }
+            if (closed.length === 0) {
+              console.log('No linked issues found in PR body.');
+            } else {
+              console.log(`Closed: ${closed.join(', ')}`);
+            }
