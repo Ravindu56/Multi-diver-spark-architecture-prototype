@@ -183,9 +183,10 @@ class TestRunLogregAllreduce:
     Workers are simulated by pushing messages directly onto the
     up_queue — no real subprocess spawning needed.
 
-    IMPORTANT: every test creates its OWN fresh Queue pair.
-    Never share queue state between test methods — a test that
-    drains a queue will leave nothing for the next test to read.
+    IMPORTANT: every test creates its OWN fresh Queue pair and calls
+    _simulate_workers BEFORE run_logreg_allreduce so that the
+    coordinator finds all messages already waiting on up_q.
+    Never share queue state between test methods.
     """
 
     def _simulate_workers(self, up_queue, num_workers, num_iterations,
@@ -266,15 +267,17 @@ class TestRunLogregAllreduce:
         """
         Each broadcast message must contain the required keys.
 
-        Uses its OWN fresh queue pair — never relies on state left
-        by test_down_queue_receives_broadcast_messages, which drains
-        its own down_q completely.
+        Uses its OWN fresh queue pair and pre-loads worker messages
+        onto up_q BEFORE calling run_logreg_allreduce — the coordinator
+        blocks on up_q.get() so messages must already be present.
+        Never relies on state left by any other test method.
         """
         up_q, down_q = Queue(), Queue()
         N, ITERS, FEAT = 2, 1, 3
+        # Pre-load all worker messages before the coordinator runs
         self._simulate_workers(up_q, N, ITERS, FEAT)
         run_logreg_allreduce(up_q, down_q, N, ITERS, FEAT)
-        # Collect all N broadcast messages and inspect the first one.
+        # Drain all N broadcast messages and inspect the first one
         messages = []
         while not down_q.empty():
             messages.append(down_q.get_nowait())

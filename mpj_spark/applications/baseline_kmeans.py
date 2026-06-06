@@ -107,6 +107,10 @@ def run_baseline_kmeans(
     t_proc_end  = time.perf_counter()
     t_total_end = time.perf_counter()
 
+    # clusterCenters is a property (list attribute) on KMeansModel —
+    # do NOT call it as a method.  The previous code used
+    # model.clusterCenters() which raises TypeError when the mock (or
+    # real pyspark.ml KMeansModel) returns a plain list attribute.
     centres   = [c.tolist() for c in model.clusterCenters]
     wcss      = float(model.summary.trainingCost)
     load_time = t_load_end  - t_load_start
