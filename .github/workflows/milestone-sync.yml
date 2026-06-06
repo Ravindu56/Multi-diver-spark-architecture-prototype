@@ -1,0 +1,73 @@
+name: Milestone Sync on Master Merge
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - master
+
+jobs:
+  sync:
+    name: Close linked issues and tag on master merge
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve latest tag
+        id: tag
+        run: |
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "untagged")
+          echo "name=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Parse and close linked issues
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.name }}
+        with:
+          script: |
+            const body    = context.payload.pull_request.body || '';
+            const pattern = /(?:closes?|fixes?|resolves?)\s+#(\d+)/gi;
+            const numbers = [];
+            let match;
+
+            while ((match = pattern.exec(body)) !== null) {
+              numbers.push(parseInt(match[1], 10));
+            }
+
+            const tag = process.env.RELEASE_TAG;
+            const pr  = context.payload.pull_request.number;
+
+            if (numbers.length === 0) {
+              console.log('No linked issue numbers found in PR body.');
+              return;
+            }
+
+            for (const num of numbers) {
+              try {
+                await github.rest.issues.update({
+                  owner:        context.repo.owner,
+                  repo:         context.repo.repo,
+                  issue_number: num,
+                  state:        'closed',
+                  state_reason: 'completed',
+                });
+                await github.rest.issues.createComment({
+                  owner:        context.repo.owner,
+                  repo:         context.repo.repo,
+                  issue_number: num,
+                  body:         `Closed automatically by PR #${pr} merged into \`master\` at release \`${tag}\`.`,
+                });
+                console.log(`Closed issue #${num} — release ${tag}`);
+              } catch (e) {
+                console.error(`Failed to close issue #${num}: ${e.message}`);
+              }
+            }

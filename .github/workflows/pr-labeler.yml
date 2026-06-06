@@ -1,0 +1,72 @@
+name: PR Labeler
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  label:
+    name: Auto-label PR by branch name
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Label PR by branch prefix
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = context.payload.pull_request.head.ref;
+            const pr     = context.payload.pull_request.number;
+
+            const rules = [
+              { prefix: 'feature/',  label: 'feature'       },
+              { prefix: 'fix/',      label: 'bug'           },
+              { prefix: 'docs/',     label: 'documentation' },
+              { prefix: 'release/',  label: 'release'       },
+              { prefix: 'chore/',    label: 'chore'         },
+              { prefix: 'test/',     label: 'testing'       },
+              { prefix: 'ci/',       label: 'ci'            },
+            ];
+
+            const matched = rules
+              .filter(r => branch.startsWith(r.prefix))
+              .map(r => r.label);
+
+            if (matched.length === 0) {
+              console.log(`No label rule matched branch: ${branch}`);
+              return;
+            }
+
+            // Ensure all labels exist before applying
+            for (const label of matched) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  name:  label,
+                });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo:  context.repo.repo,
+                    name:  label,
+                    color: 'ededed',
+                  });
+                  console.log(`Created missing label: ${label}`);
+                }
+              }
+            }
+
+            await github.rest.issues.addLabels({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: pr,
+              labels:       matched,
+            });
+
+            console.log(`Applied labels [${matched.join(', ')}] to PR #${pr}`);
