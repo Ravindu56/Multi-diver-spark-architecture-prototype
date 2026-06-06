@@ -8,6 +8,15 @@ import math
 import os
 import time
 
+try:
+    from pyspark.sql import SparkSession
+    from pyspark.ml.classification import LogisticRegression
+    from pyspark.ml.feature import VectorAssembler
+except ImportError:  # pragma: no cover
+    SparkSession = None
+    LogisticRegression = None
+    VectorAssembler = None
+
 
 def _baseline_heap_gb(thread_count: int) -> int:
     """
@@ -79,9 +88,6 @@ def run_baseline_logreg(
     IMPORTANT: all JVM-backed model attributes (coefficients, intercept)
     must be materialised as plain Python objects BEFORE spark.stop().
     """
-    from pyspark.sql import SparkSession
-    from pyspark.ml.classification import LogisticRegression
-    from pyspark.ml.feature import VectorAssembler
     from mpj_spark.config import TOTAL_CORES
 
     if baseline_threads is not None:

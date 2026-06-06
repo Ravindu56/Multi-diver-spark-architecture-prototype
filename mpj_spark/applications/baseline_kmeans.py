@@ -4,6 +4,15 @@
 # ================================================================
 import time
 
+try:
+    from pyspark.ml.clustering import KMeans
+    from pyspark.ml.feature import VectorAssembler
+except ImportError:  # pragma: no cover
+    KMeans = None
+    VectorAssembler = None
+
+from mpj_spark.workers.spark_session import build_spark_session
+
 
 def run_baseline_kmeans(
     input_file_path:  str,
@@ -35,9 +44,6 @@ def run_baseline_kmeans(
         timing_dict : {'load_time': float, 'processing_time': float, 'total_time': float}
     """
     from mpj_spark.config import TOTAL_CORES
-    from mpj_spark.workers.spark_session import build_spark_session
-    from pyspark.ml.clustering import KMeans
-    from pyspark.ml.feature import VectorAssembler
 
     # Thread budget resolution (priority order):
     #   1. baseline_threads explicitly passed  →  fair comparison mode
@@ -51,7 +57,7 @@ def run_baseline_kmeans(
         budget_label = f'local[{cores}]  (cores_override)'
     else:
         cores = max(1, TOTAL_CORES // num_workers)
-        budget_label = f'local[{cores}]  ({TOTAL_CORES} total \u00f7 {num_workers} workers)'
+        budget_label = f'local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)'
 
     print('\n' + '=' * 70)
     print('  Standard Spark K-Means (Single Driver) — BASELINE')
