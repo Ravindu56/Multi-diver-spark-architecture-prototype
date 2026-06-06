@@ -22,6 +22,10 @@
 import os
 import math
 
+# Hoist TOTAL_CORES to module level so tests can patch
+# 'mpj_spark.workers.spark_session.TOTAL_CORES' directly.
+from mpj_spark.config import TOTAL_CORES
+
 
 def get_total_ram_mb() -> int:
     """Return total system RAM in MB."""
@@ -51,7 +55,6 @@ def build_spark_session(
     native BLAS, and G1GC configured for low-latency GC pauses.
     """
     from pyspark.sql import SparkSession
-    from mpj_spark.config import TOTAL_CORES
 
     # ── CPU allocation ────────────────────────────────────────────────
     cores = cores_override if cores_override else TOTAL_CORES

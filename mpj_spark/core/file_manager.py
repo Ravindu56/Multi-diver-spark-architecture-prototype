@@ -53,7 +53,14 @@ class MPJSparkFileManager:
         """
         Count lines in a file with O(1) memory — reads in raw binary
         chunks and counts newline bytes; never loads full content.
+
+        Returns 0 immediately for empty files (avoids OSError from
+        seek(-1, 2) on a zero-byte file descriptor).
         """
+        # Empty-file guard: seek(-1, 2) is invalid on a 0-byte file
+        if os.path.getsize(file_path) == 0:
+            return 0
+
         count = 0
         with open(file_path, 'rb') as fh:
             for chunk in iter(lambda: fh.read(1 << 20), b''):  # 1 MB chunks
@@ -83,9 +90,32 @@ class MPJSparkFileManager:
         Peak memory: one line buffer + N open file handles.
 
         Returns a list of partition metadata dicts (NOT raw data).
+        Empty input file: returns metadata list with num_lines=0 for
+        each partition (no OSError raised).
         """
         file_size  = os.path.getsize(input_file_path)
         total_lines = self._count_lines(input_file_path)
+
+        # Handle empty file gracefully — produce zero-line partition files
+        if total_lines == 0:
+            part_paths = [
+                os.path.join(self.partitions_dir, f'partition_{i}.txt')
+                for i in range(num_workers)
+            ]
+            for p in part_paths:
+                open(p, 'w', encoding='utf-8').close()
+            return [
+                {
+                    'partition_id':    i,
+                    'partition_path':  part_paths[i],
+                    'num_lines':       0,
+                    'start_line':      0,
+                    'end_line':        0,
+                    'file_size_bytes': 0,
+                }
+                for i in range(num_workers)
+            ]
+
         lines_per_partition = math.ceil(total_lines / num_workers)
 
         # Pre-build partition paths and open all output files at once

@@ -392,11 +392,30 @@ def aggregate_logreg_results(
 def reassign_pass_root(
     processes_alive: list,
     gossip_centres: list,
-    reassign_queue: Queue,
+    reassign_queue,
     num_workers: int,
     k: int,
     dims: int,
 ) -> list:
+    """
+    Single-queue centroid correction pass.
+
+    Protocol
+    --------
+    root  → puts  N × {'type': 'reassign', 'centres': gossip_centres}
+    workers → put N × {'type': 'stats', 'cluster_sums': ...,
+                        'cluster_counts': ..., 'row_count': ...}
+
+    Both directions travel through the SAME queue object (works with
+    both multiprocessing.Queue in production and queue.Queue in tests).
+
+    We use a get_nowait() + sleep(0.01) polling loop instead of
+    get(timeout=N) because queue.Queue.get(timeout=...) uses a
+    threading.Condition under the hood whose wait() wakes up only
+    after the item is put — but in the test harness the worker thread
+    is racing and may not have put() yet when root enters .get().
+    Polling avoids the 180-second stall and works with both queue types.
+    """
     import numpy as np
 
     print(f'  [Reassign] Broadcasting gossip-final centroids to {num_workers} workers ...')
@@ -408,14 +427,31 @@ def reassign_pass_root(
     total_rows = 0
     received   = 0
 
+    deadline = time.monotonic() + 180.0
     while received < num_workers:
-        msg = reassign_queue.get(timeout=180)
+        try:
+            msg = reassign_queue.get_nowait()
+        except Exception:
+            # queue.Empty (both threading and multiprocessing raise this)
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f'[Reassign] timed out waiting for worker stats '
+                    f'({received}/{num_workers} received)'
+                )
+            time.sleep(0.01)
+            continue
+
         if msg.get('type') == 'stats':
             for j in range(k):
                 all_sums[j]   += np.array(msg['cluster_sums'][j])
                 all_counts[j] += msg['cluster_counts'][j]
             total_rows += msg['row_count']
             received   += 1
+        elif msg.get('type') == 'reassign':
+            # Own broadcast message consumed back by root before worker
+            # thread drained it — put it back so the worker can read it.
+            reassign_queue.put(msg)
+            time.sleep(0.001)
 
     corrected = []
     for j in range(k):
