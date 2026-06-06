@@ -1,7 +1,6 @@
-pyspark>=3.3.0
-numpy>=1.21.0
-scipy>=1.9.0
-setuptools>=65.0
-mpi4py>=3.1
-pyspark>=3.3.0
-numpy>=1.24.0
+pyspark
+mpi4py
+pytest>=8.0
+pytest-cov>=5.0
+numpy>=1.24
+scipy>=1.11
