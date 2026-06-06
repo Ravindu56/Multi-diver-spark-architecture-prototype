@@ -107,7 +107,7 @@ def run_baseline_kmeans(
     t_proc_end  = time.perf_counter()
     t_total_end = time.perf_counter()
 
-    centres   = [c.tolist() for c in model.clusterCenters()]
+    centres   = [c.tolist() for c in model.clusterCenters]
     wcss      = float(model.summary.trainingCost)
     load_time = t_load_end  - t_load_start
     proc_time = t_proc_end  - t_proc_start
