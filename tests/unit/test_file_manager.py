@@ -53,6 +53,36 @@ class TestCountLines:
         path = _write_lines(tmp_path, [f"word{i} word{i+1}" for i in range(10_000)])
         assert MPJSparkFileManager._count_lines(path) == 10_000
 
+    def test_count_file_without_trailing_newline(self, tmp_path):
+        """
+        Lines 46-48: the 'if last byte != newline: count += 1' branch.
+        A file written WITHOUT a trailing newline must still count
+        its last line. This covers the branch that was previously
+        uncovered.
+        """
+        p = tmp_path / "no_newline.txt"
+        # Write 3 lines with NO trailing newline
+        p.write_bytes(b"line_one\nline_two\nline_three")
+        assert MPJSparkFileManager._count_lines(str(p)) == 3
+
+    def test_count_single_byte_no_newline(self, tmp_path):
+        """
+        Line 65: fh.seek(-1, 2) is executed even on a 1-byte file.
+        A single character with no newline must count as 1 line.
+        """
+        p = tmp_path / "one_byte.txt"
+        p.write_bytes(b"x")  # 1 byte, no newline
+        assert MPJSparkFileManager._count_lines(str(p)) == 1
+
+    def test_count_file_with_trailing_newline_unchanged(self, tmp_path):
+        """
+        Regression guard: files WITH a trailing newline must not
+        get an extra line counted (the else branch must not fire).
+        """
+        p = tmp_path / "trailing.txt"
+        p.write_bytes(b"alpha\nbeta\n")  # ends WITH \n
+        assert MPJSparkFileManager._count_lines(str(p)) == 2
+
 
 # =============================================================
 # Section 2: dynamic_partition() — partition count & metadata

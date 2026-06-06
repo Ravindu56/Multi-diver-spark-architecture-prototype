@@ -337,3 +337,80 @@ class TestGossipAggregatorConvergence:
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         assert result["agg_time_s"] > 0.0
+
+
+# =============================================================
+# Section 7: verbose=True coverage (lines 145, 264-267, 269, 323)
+# =============================================================
+
+class TestGossipAggregatorVerbose:
+    """
+    Exercises the verbose=True code paths to cover the 6 lines
+    that were previously unreachable with verbose=False.
+
+    Covered lines:
+      - 145  : self._log() body (the print statement inside _log)
+      - 264-267, 269 : _print_summary() body
+      - 323  : _log() call inside _global_merge with no seed_reference
+    """
+
+    def test_verbose_aggregate_does_not_raise(self, capsys):
+        """
+        Running with verbose=True must complete without error and
+        emit [Gossip] diagnostic output to stdout.
+        Covers line 145 (_log print) and lines 264-267, 269 (_print_summary).
+        """
+        q = _make_queue([
+            (0, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
+            (1, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
+        ])
+        agg = GossipAggregator(num_workers=2, verbose=True)
+        result = agg.aggregate(q)
+        captured = capsys.readouterr()
+        assert result["converged"] is True
+        assert "[Gossip]" in captured.out
+
+    def test_verbose_prints_summary_block(self, capsys):
+        """
+        _print_summary() must emit the 'Gossip Aggregation Summary'
+        header. Covers lines 264-267, 269 in full.
+        """
+        q = _make_queue([
+            (0, [[2.0, 2.0]], 50, 0.5),
+            (1, [[2.0, 2.0]], 50, 0.5),
+        ])
+        agg = GossipAggregator(num_workers=2, verbose=True)
+        agg.aggregate(q)
+        captured = capsys.readouterr()
+        assert "Gossip Aggregation Summary" in captured.out
+        assert "Rounds run" in captured.out
+        assert "Total WCSS" in captured.out
+
+    def test_verbose_no_seed_logs_fallback_message(self, capsys):
+        """
+        Line 323: _global_merge logs 'aligning to states[0]' when
+        seed_centres=None and verbose=True.
+        """
+        q = _make_queue([
+            (0, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+            (1, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+        ])
+        agg = GossipAggregator(num_workers=2, verbose=True)
+        agg.aggregate(q, seed_centres=None)
+        captured = capsys.readouterr()
+        assert "states[0]" in captured.out
+
+    def test_verbose_with_seed_logs_seed_reference_message(self, capsys):
+        """
+        When seed_centres is provided with verbose=True, the log
+        must mention 'seed_reference' (the other _global_merge branch).
+        """
+        seed = [[3.0, 3.0], [7.0, 7.0]]
+        q = _make_queue([
+            (0, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+            (1, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+        ])
+        agg = GossipAggregator(num_workers=2, verbose=True)
+        agg.aggregate(q, seed_centres=seed)
+        captured = capsys.readouterr()
+        assert "seed_reference" in captured.out
