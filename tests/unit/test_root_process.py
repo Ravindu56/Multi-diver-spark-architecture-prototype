@@ -182,6 +182,10 @@ class TestRunLogregAllreduce:
     Tests for the root-side FedAvg coordinator (two-queue design).
     Workers are simulated by pushing messages directly onto the
     up_queue — no real subprocess spawning needed.
+
+    IMPORTANT: every test creates its OWN fresh Queue pair.
+    Never share queue state between test methods — a test that
+    drains a queue will leave nothing for the next test to read.
     """
 
     def _simulate_workers(self, up_queue, num_workers, num_iterations,
@@ -259,12 +263,25 @@ class TestRunLogregAllreduce:
         assert msg_count == N * ITERS
 
     def test_down_queue_message_schema(self):
-        """Each broadcast message must contain required keys."""
+        """
+        Each broadcast message must contain the required keys.
+
+        Uses its OWN fresh queue pair — never relies on state left
+        by test_down_queue_receives_broadcast_messages, which drains
+        its own down_q completely.
+        """
         up_q, down_q = Queue(), Queue()
         N, ITERS, FEAT = 2, 1, 3
         self._simulate_workers(up_q, N, ITERS, FEAT)
         run_logreg_allreduce(up_q, down_q, N, ITERS, FEAT)
-        msg = down_q.get_nowait()
+        # Collect all N broadcast messages and inspect the first one.
+        messages = []
+        while not down_q.empty():
+            messages.append(down_q.get_nowait())
+        assert len(messages) == N, (
+            f"Expected {N} broadcast messages, got {len(messages)}"
+        )
+        msg = messages[0]
         assert {"type", "iteration", "weights", "intercept"}.issubset(msg.keys())
         assert msg["type"] == "avg_weights"
 
