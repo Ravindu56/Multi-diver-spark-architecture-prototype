@@ -20,10 +20,10 @@
 #   - Objective 1c: correctness on iterative ML workloads
 #   - Objective 2d: baseline validation helpers
 # =============================================================
+import queue as _threading_queue  # synchronous threading Queue for in-process tests
+
 import pytest
 import numpy as np
-from multiprocessing import Queue
-import queue as _threading_queue  # synchronous threading Queue for in-process tests
 
 from mpj_spark.core.root_process import (
     align_centres_hungarian,
