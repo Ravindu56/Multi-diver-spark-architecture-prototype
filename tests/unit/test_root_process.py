@@ -23,7 +23,6 @@
 import pytest
 import numpy as np
 from multiprocessing import Queue
-from unittest.mock import patch
 
 from mpj_spark.core.root_process import (
     align_centres_hungarian,

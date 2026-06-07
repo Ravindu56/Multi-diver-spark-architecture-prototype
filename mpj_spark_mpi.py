@@ -42,7 +42,6 @@ os.environ.setdefault(
 os.environ["PYSPARK_PYTHON"]        = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
-import time
 import argparse
 from mpi4py import MPI
 

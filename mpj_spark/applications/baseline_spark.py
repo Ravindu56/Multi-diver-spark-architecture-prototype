@@ -83,7 +83,7 @@ def run_baseline(input_file_path: str,
     total     = t_total_end - t_total_start
 
     print(f'  Unique words     : {len(sorted_results):,}')
-    print(f'  Top 10 words:')
+    print('  Top 10 words:')
     for word, cnt in sorted_results[:10]:
         print(f'    {word:20s} -> {cnt:,}')
     print(f'\n  Load Time        : {load_time:.4f} s')

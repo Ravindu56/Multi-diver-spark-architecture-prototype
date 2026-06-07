@@ -26,7 +26,6 @@ import time
 import traceback
 from multiprocessing import Queue
 
-import numpy as np
 
 from mpj_spark.workers.spark_session import build_spark_session
 from mpj_spark.utils.dev_logger import DevLogger

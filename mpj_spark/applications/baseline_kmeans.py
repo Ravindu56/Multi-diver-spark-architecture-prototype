@@ -119,7 +119,7 @@ def run_baseline_kmeans(
 
     print(f'\n  Rows processed : {row_count:,}')
     print(f'  WCSS (inertia) : {wcss:.4f}')
-    print(f'  Cluster centres:')
+    print('  Cluster centres:')
     for i, c in enumerate(centres):
         preview = ', '.join(f'{v:.3f}' for v in c[:4])
         print(f'    C{i}: [{preview}{"..." if len(c) > 4 else ""}]')

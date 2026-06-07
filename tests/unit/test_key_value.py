@@ -8,7 +8,6 @@
 #   - Objective 1c: correctness of WordCount batch analytics workload
 #   - Objective 1a: data conversion between Spark RDD and MPI buffer
 # =============================================================
-import pytest
 from mpj_spark.core.key_value import KeyValueStructure
 
 

@@ -34,9 +34,7 @@
 # Research alignment:
 #   Objective 2d — baseline validation for comparative evaluation
 # =============================================================
-import math
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 
 # =============================================================

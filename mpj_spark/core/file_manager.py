@@ -23,7 +23,7 @@
 import os
 import math
 import shutil
-from mpj_spark.config import SHARED_STORAGE_PATH, PARTITIONS_DIR
+from mpj_spark.config import SHARED_STORAGE_PATH
 
 
 class MPJSparkFileManager:
