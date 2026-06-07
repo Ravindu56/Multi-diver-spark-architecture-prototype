@@ -20,8 +20,7 @@ def run(text_rdd):
     list of (word: str, count: int) tuples
     """
     return (
-        text_rdd
-        .flatMap(lambda line: line.lower().split())
+        text_rdd.flatMap(lambda line: line.lower().split())
         .filter(lambda word: len(word) > 0)
         .map(lambda word: (word, 1))
         .reduceByKey(lambda a, b: a + b)

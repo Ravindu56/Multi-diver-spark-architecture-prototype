@@ -13,7 +13,6 @@ from mpj_spark.core.file_manager import MPJSparkFileManager
 
 
 class TestCountLinesEdgeCases:
-
     def test_empty_file_returns_zero(self, tmp_path):
         """A zero-byte file has 0 lines — no OSError."""
         f = tmp_path / "empty.txt"
@@ -52,7 +51,7 @@ class TestCountLinesEdgeCases:
             for meta in result:
                 assert meta["num_lines"] == 0
         except (ValueError, ZeroDivisionError):
-            pass   # acceptable — implementation may reject zero-line input
+            pass  # acceptable — implementation may reject zero-line input
         except OSError as exc:
             pytest.fail(
                 f"dynamic_partition raised unexpected OSError on empty input: {exc}"
@@ -66,9 +65,7 @@ class TestCountLinesEdgeCases:
         chunk = 1 << 20  # 1 MB
         # 2 embedded newlines + 1 line without trailing newline = 3 lines
         content = (
-            b"A" * (chunk // 2 - 1) + b"\n"
-            + b"B" * (chunk // 2 - 1) + b"\n"
-            + b"C"
+            b"A" * (chunk // 2 - 1) + b"\n" + b"B" * (chunk // 2 - 1) + b"\n" + b"C"
         )
         f = tmp_path / "boundary.txt"
         f.write_bytes(content)

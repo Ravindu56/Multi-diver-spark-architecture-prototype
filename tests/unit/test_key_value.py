@@ -15,6 +15,7 @@ from mpj_spark.core.key_value import KeyValueStructure
 # Section 1: Construction helpers
 # =============================================================
 
+
 class TestFromRddCollect:
     """Tests for from_rdd_collect() — RDD result ingestion."""
 
@@ -41,6 +42,7 @@ class TestFromRddCollect:
 # =============================================================
 # Section 2: Serialisation round-trip
 # =============================================================
+
 
 class TestSerialisationRoundTrip:
     """
@@ -78,6 +80,7 @@ class TestSerialisationRoundTrip:
 # =============================================================
 # Section 3: merge() — WordCount aggregation (Phase 1 core)
 # =============================================================
+
 
 class TestMerge:
     """
@@ -133,16 +136,16 @@ class TestMerge:
         """
         workers = [
             [("the", 10), ("is", 5)],
-            [("the", 8),  ("a", 3)],
-            [("is", 2),  ("a", 4)],
+            [("the", 8), ("a", 3)],
+            [("is", 2), ("a", 4)],
         ]
         root_kv = KeyValueStructure()
         for w in workers:
             root_kv.merge(KeyValueStructure().from_rdd_collect(w))
         result = dict(root_kv.data)
-        assert result["the"] == 18   # 10 + 8
-        assert result["is"]  == 7    # 5 + 2
-        assert result["a"]   == 7    # 3 + 4
+        assert result["the"] == 18  # 10 + 8
+        assert result["is"] == 7  # 5 + 2
+        assert result["a"] == 7  # 3 + 4
 
     def test_merge_returns_self(self):
         """merge() must return self for chaining support."""
@@ -162,6 +165,7 @@ class TestMerge:
 # =============================================================
 # Section 4: get_top_n()
 # =============================================================
+
 
 class TestGetTopN:
     """Tests for get_top_n() — top-N word result extraction."""
