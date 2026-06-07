@@ -172,9 +172,19 @@ def mpj_worker_process(worker_id, partition_metadata,
         # ── STEP 1: Create INDEPENDENT Spark Driver ─────────────────────
         # Paper: "Each MPJ Worker has its own copy of the spark driver,
         #         isolated from the other workers"
-        spark = SparkSession.builder             .master(f"local[{cores_per_worker}]")             .appName(f"MPJ-Worker-{worker_id}-SparkDriver")             .config("spark.ui.enabled",                  "false")             .config("spark.driver.host",                 "localhost")             .config("spark.sql.shuffle.partitions",      str(shuffle_parts))             .config("spark.default.parallelism",         str(cores_per_worker * 2))             .config("spark.driver.extraJavaOptions",
-                    "-Djava.security.manager=allow")             .config("spark.executor.extraJavaOptions",
-                    "-Djava.security.manager=allow")             .config("spark.pyspark.python",              sys.executable)             .getOrCreate()
+        spark = SparkSession.builder \
+            .master(f"local[{cores_per_worker}]") \
+            .appName(f"MPJ-Worker-{worker_id}-SparkDriver") \
+            .config("spark.ui.enabled",                  "false") \
+            .config("spark.driver.host",                 "localhost") \
+            .config("spark.sql.shuffle.partitions",      str(shuffle_parts)) \
+            .config("spark.default.parallelism",         str(cores_per_worker * 2)) \
+            .config("spark.driver.extraJavaOptions",
+                    "-Djava.security.manager=allow") \
+            .config("spark.executor.extraJavaOptions",
+                    "-Djava.security.manager=allow") \
+            .config("spark.pyspark.python",              sys.executable) \
+            .getOrCreate()
 
         sc = spark.sparkContext
         sc.setLogLevel("ERROR")
@@ -362,9 +372,9 @@ def mpj_root_process(input_file_path, num_workers):
     if worker_timings:
         avg_driver_init = sum(wt["driver_init_time"] for wt in worker_timings) / len(worker_timings)
         avg_actual_proc = sum(wt["processing_time"]  for wt in worker_timings) / len(worker_timings)
-        max_worker_time = max(wt["total_worker_time"] for wt in worker_timings)
     else:
-        avg_driver_init = avg_actual_proc = max_worker_time = 0
+        avg_driver_init = 0
+        avg_actual_proc = 0
 
     print(f"\n{'=' * 70}")
     print("  TIMING ANALYSIS  (Paper Metrics — v2.0 corrected)")
@@ -420,7 +430,14 @@ def standard_spark_wordcount(input_file_path):
 
     total_start = time.time()
 
-    spark = SparkSession.builder         .master("local[*]")         .appName("Standard-Spark-SingleDriver-Baseline")         .config("spark.ui.enabled",              "false")         .config("spark.driver.host",             "localhost")         .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")         .config("spark.pyspark.python",          sys.executable)         .getOrCreate()
+    spark = SparkSession.builder \
+        .master("local[*]") \
+        .appName("Standard-Spark-SingleDriver-Baseline") \
+        .config("spark.ui.enabled",              "false") \
+        .config("spark.driver.host",             "localhost") \
+        .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow") \
+        .config("spark.pyspark.python",          sys.executable) \
+        .getOrCreate()
 
     sc = spark.sparkContext
     sc.setLogLevel("ERROR")

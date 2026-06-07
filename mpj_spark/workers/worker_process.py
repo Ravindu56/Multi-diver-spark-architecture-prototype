@@ -151,7 +151,6 @@ def run_worker_core(
         error    — str (present only on error)
     """
     app_name         = worker_config.get('app',              'wordcount')
-    cores_override   = worker_config.get('cores_override',    None)  # already applied
     kmeans_k         = int(worker_config.get('kmeans_k',          3))
     kmeans_iter      = int(worker_config.get('kmeans_max_iter',   20))
     num_workers      = worker_config.get('num_workers',   1)
@@ -336,7 +335,7 @@ def worker_process(
             reassign_adapter= reassign_queue,
         )
 
-        # Patch init_time into the timing dict (core doesn’t know it)
+        # Patch init_time into the timing dict (core doesn't know it)
         outcome['timing']['init_time']  = init_time
         outcome['timing']['total_time'] = init_time + outcome['timing']['load_time'] + \
                                           outcome['timing']['processing_time']
