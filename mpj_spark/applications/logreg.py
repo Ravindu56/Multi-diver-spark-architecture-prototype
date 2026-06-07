@@ -120,7 +120,7 @@ def run(
         raise RuntimeError('[LogReg] No active SparkSession found in worker.')
 
     # Resolve queue handles: prefer explicit up/down; fall back to legacy
-    # single-queue mode (up == down) for any caller that hasn’t migrated.
+    # single-queue mode (up == down) for any caller that hasn't migrated.
     _up   = allreduce_up_queue   if allreduce_up_queue   is not None else allreduce_queue
     _down = allreduce_down_queue if allreduce_down_queue is not None else allreduce_queue
     use_allreduce = _up is not None and _down is not None
@@ -222,7 +222,7 @@ def run(
         print(f'[LogReg Worker {worker_id}] iter {iteration+1}/{max_iter}  '
               f'({iter_time:.3f}s)  '
               f'|w|={global_norm:.4f}  '
-              f'Δ={weight_delta:.6f}')
+              f'\u0394={weight_delta:.6f}')
 
     # ─ 4. Final accuracy on local partition ──────────────────────────────────
     lr_final = LogisticRegression(
@@ -234,10 +234,9 @@ def run(
         family='binomial',
         fitIntercept=True,
     )
-    model_final     = lr_final.fit(df_vec)
-    train_accuracy  = float(model_final.summary.accuracy)
-    weight_vector   = model_final.coefficients.toArray().tolist()
-    intercept_final = float(model_final.intercept)
+    model_final    = lr_final.fit(df_vec)
+    train_accuracy = float(model_final.summary.accuracy)
+    weight_vector  = model_final.coefficients.toArray().tolist()
 
     print(f'[LogReg Worker {worker_id}] Final train accuracy: {train_accuracy:.4f}')
     print(f'[LogReg Worker {worker_id}] Weight norm: '
@@ -247,7 +246,7 @@ def run(
 
     # ─ 5. Write per-worker metrics CSV ───────────────────────────────────────
     worker_csv_path = _write_worker_metrics(worker_id, iter_metrics, results_dir)
-    print(f'[LogReg Worker {worker_id}] Iter metrics → {worker_csv_path} '
+    print(f'[LogReg Worker {worker_id}] Iter metrics \u2192 {worker_csv_path} '
           f'({len(iter_metrics)} rows)')
 
     return {

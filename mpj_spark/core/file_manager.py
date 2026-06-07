@@ -93,7 +93,6 @@ class MPJSparkFileManager:
         Empty input file: returns metadata list with num_lines=0 for
         each partition (no OSError raised).
         """
-        file_size  = os.path.getsize(input_file_path)
         total_lines = self._count_lines(input_file_path)
 
         # Handle empty file gracefully — produce zero-line partition files
