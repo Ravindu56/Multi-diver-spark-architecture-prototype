@@ -42,8 +42,8 @@ os.environ.setdefault(
 os.environ["PYSPARK_PYTHON"]        = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
-import argparse
-from mpi4py import MPI
+import argparse  # noqa: E402
+from mpi4py import MPI  # noqa: E402
 
 # ── MPI communicator globals ──────────────────────────────────────────────
 comm = MPI.COMM_WORLD

@@ -1,4 +1,3 @@
-
 # ============================================================
 # MPJ-SPARK Multi-Driver Architecture Prototype
 # WordCount Implementation for BScEng Research
@@ -10,11 +9,11 @@
 import os
 os.environ["JAVA_TOOL_OPTIONS"] = "-Djava.security.manager=allow"
 
-import time
-import math
-import shutil
-from multiprocessing import Process, Queue
-from collections import defaultdict
+import time  # noqa: E402
+import math  # noqa: E402
+import shutil  # noqa: E402
+from multiprocessing import Process, Queue  # noqa: E402
+from collections import defaultdict  # noqa: E402
 
 # ============================================================
 # COMPONENT 1: MPJ-SPARK File Manager (Simulates HPC Shared Storage)
