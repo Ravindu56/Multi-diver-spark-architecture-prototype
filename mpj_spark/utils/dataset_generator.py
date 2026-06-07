@@ -1,6 +1,5 @@
 import os
 import random
-import math
 
 
 def generate_text_dataset(output_path: str, size_mb: int):

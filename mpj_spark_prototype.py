@@ -10,12 +10,10 @@
 import os
 os.environ["JAVA_TOOL_OPTIONS"] = "-Djava.security.manager=allow"
 
-import sys
 import time
-import json
 import math
 import shutil
-from multiprocessing import Process, Queue, current_process
+from multiprocessing import Process, Queue
 from collections import defaultdict
 
 # ============================================================
@@ -268,7 +266,7 @@ def mpj_root_process(input_file_path, num_workers):
     processing_time = process_end - process_start
 
     # === PHASE 4: Receive and Aggregate Results ===
-    print(f"\n[ROOT] Phase 4: Receiving results from all workers...")
+    print("\n[ROOT] Phase 4: Receiving results from all workers...")
 
     # Paper: "Receive-Results-from-All-Workers(Collected-Results, ...)"
     all_results = []
@@ -286,7 +284,7 @@ def mpj_root_process(input_file_path, num_workers):
         worker_timings.append(timing_queue.get())
 
     # === PHASE 5: Final Aggregation (Root Spark Driver) ===
-    print(f"\n[ROOT] Phase 5: Final aggregation using Root Spark Driver...")
+    print("\n[ROOT] Phase 5: Final aggregation using Root Spark Driver...")
 
     # Paper: "SparkContext.parallelize(Result-List) -> Collect the final results"
     aggregation_start = time.time()
@@ -311,7 +309,7 @@ def mpj_root_process(input_file_path, num_workers):
     print(f"{'=' * 70}")
     print(f"  Total unique words: {len(sorted_results)}")
     print(f"  Total word occurrences: {sum(v for _, v in sorted_results)}")
-    print(f"\n  Top 20 words:")
+    print("\n  Top 20 words:")
     for word, count in sorted_results[:20]:
         print(f"    {word:20s} -> {count}")
 
@@ -327,7 +325,7 @@ def mpj_root_process(input_file_path, num_workers):
     print(f"  Processing %% of Total:     {(processing_time/(total_end_time - total_start_time))*100:.1f}%%")
 
     if worker_timings:
-        print(f"\n  Per-Worker Timings:")
+        print("\n  Per-Worker Timings:")
         for wt in sorted(worker_timings, key=lambda x: x.get('worker_id', 0)):
             if 'error' not in wt:
                 print(f"    Worker {wt['worker_id']}: Driver Init={wt['driver_init_time']:.2f}s, "
@@ -388,7 +386,7 @@ def standard_spark_wordcount(input_file_path):
     total_end = time.time()
 
     print(f"  Total unique words: {len(sorted_results)}")
-    print(f"  Top 10 words:")
+    print("  Top 10 words:")
     for word, count in sorted_results[:10]:
         print(f"    {word:20s} -> {count}")
 

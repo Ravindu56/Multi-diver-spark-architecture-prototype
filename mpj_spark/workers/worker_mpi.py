@@ -44,7 +44,6 @@
 
 import time
 import traceback
-from mpi4py import MPI
 
 from mpj_spark.workers.spark_session import build_spark_session
 from mpj_spark.utils.dev_logger import DevLogger
@@ -151,7 +150,7 @@ def run_worker_mpi(comm):
     worker_id = rank - 1   # 0-indexed: rank 1 ⇒ worker 0, rank 2 ⇒ worker 1
 
     assert rank != 0, (
-        f'run_worker_mpi() must not be called by rank 0.'
+        'run_worker_mpi() must not be called by rank 0.'
     )
 
     # ================================================================

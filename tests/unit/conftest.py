@@ -2,7 +2,6 @@
 # tests/unit/conftest.py
 # Shared pytest fixtures for Phase 1 & Phase 2 unit tests.
 # =============================================================
-import os
 import pytest
 from multiprocessing import Queue
 from pyspark.sql import SparkSession

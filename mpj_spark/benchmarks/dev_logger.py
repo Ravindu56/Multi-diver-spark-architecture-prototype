@@ -131,14 +131,14 @@ class DevLogger:
                     f'({record["machine"]["total_cores"]} cores, '
                     f'{record["machine"]["os"]})\n')
             f.write(f'{DIVIDER}\n')
-            f.write(f'  CONFIG\n')
+            f.write('  CONFIG\n')
             f.write(f'    Workers        : {record["config"]["workers"]}\n')
             f.write(f'    Dataset        : {record["config"]["dataset_mb"]} MB\n')
             f.write(f'    App            : {record["config"]["app"]}\n')
             f.write(f'    JVM Mode       : {record["config"]["jvm_mode"]}\n')
             f.write(f'    Cores/entity   : {record["config"]["cores_per_entity"]}\n')
             f.write(f'{DIVIDER}\n')
-            f.write(f'  MULTI-DRIVER TIMING\n')
+            f.write('  MULTI-DRIVER TIMING\n')
             md = record['multi_driver']
             f.write(f'    T_Load         : {md["load_time"]:>8.4f} s\n')
             f.write(f'    T_Proc (avg)   : {md["avg_proc_time"]:>8.4f} s\n')
@@ -149,12 +149,12 @@ class DevLogger:
                 ss = record['std_spark']
                 sp = record['speedup']
                 f.write(f'{DIVIDER}\n')
-                f.write(f'  BASELINE (Std Spark)\n')
+                f.write('  BASELINE (Std Spark)\n')
                 f.write(f'    T_Load         : {ss["load_time"]:>8.4f} s\n')
                 f.write(f'    T_Proc         : {ss["proc_time"]:>8.4f} s\n')
                 f.write(f'    T_Total        : {ss["total_time"]:>8.4f} s\n')
                 f.write(f'{DIVIDER}\n')
-                f.write(f'  SPEEDUP\n')
+                f.write('  SPEEDUP\n')
                 f.write(f'    Load           : {sp["load"]:>6.2f}x\n')
                 f.write(f'    Processing     : {sp["processing"]:>6.2f}x\n')
                 f.write(f'    Total          : {sp["total"]:>6.2f}x\n')

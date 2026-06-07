@@ -31,10 +31,8 @@
 # ================================================================
 
 import math
-import os
 import time
 import threading
-from mpi4py import MPI
 
 # ── MPI tag constants (mirrors mpj_spark_mpi.py tag allocation) ──
 TAG_CONFIG         = 10
@@ -212,7 +210,6 @@ def run_root_mpi(
         compute_global_seed_centres,
         aggregate_kmeans_results,
         aggregate_logreg_results,
-        reassign_pass_root,
         _print_timing_summary,
         _print_comparison,
     )

@@ -5,7 +5,6 @@
 # Mirrors baseline_kmeans.py structure.
 # ================================================================
 import math
-import os
 import time
 
 try:

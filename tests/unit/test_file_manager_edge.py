@@ -7,7 +7,6 @@
 #   empty file (0 bytes) causes OSError on that seek; these
 #   tests verify the guard works correctly.
 # =============================================================
-import os
 import pytest
 
 from mpj_spark.core.file_manager import MPJSparkFileManager

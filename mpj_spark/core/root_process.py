@@ -165,7 +165,7 @@ def aggregate_kmeans_results(worker_results):
         merged.append(ws.tolist())
 
     total_wcss = sum(r['wcss'] for r in worker_results)
-    print(f'\n  K-Means aggregation complete')
+    print('\n  K-Means aggregation complete')
     _info(f'Total rows : {total_rows:,}')
     _info(f'Total WCSS : {total_wcss:.4f}')
     _info(f'Workers    : {len(worker_results)}')
@@ -250,7 +250,7 @@ def run_logreg_allreduce(
         print(f'  [LogReg Allreduce] iter {iteration+1}/{num_iterations}  '
               f'({iter_time:.3f}s)  |w|={weight_norm:.4f}')
 
-    print(f'  [LogReg Allreduce] Complete')
+    print('  [LogReg Allreduce] Complete')
     return {
         'weight_vector'  : final_weights,
         'intercept'      : final_intercept,
@@ -713,7 +713,7 @@ def run_root(
 
         allreduce_thread = threading.Thread(target=_allreduce_thread_fn, daemon=True)
         allreduce_thread.start()
-        print(f'  [LogReg Allreduce] Coordinator started in background thread')
+        print('  [LogReg Allreduce] Coordinator started in background thread')
 
     # ── Phase 4: Collect ───────────────────────────────────────────
     _phase(4, 'Collecting results')

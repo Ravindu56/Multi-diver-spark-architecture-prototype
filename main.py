@@ -152,7 +152,7 @@ def main():
 
     if not os.path.exists(dataset_path):
         print(f"[main] ERROR: Dataset not found: {dataset_path}")
-        print(f"[main] Tip:   Use --generate <MB> to create one first.")
+        print("[main] Tip:   Use --generate <MB> to create one first.")
         sys.exit(1)
 
     print(f'\n[main] Dataset          : {dataset_path}')

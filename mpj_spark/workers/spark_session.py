@@ -19,8 +19,6 @@
 # Pre-requisite (run once on your machine):
 #   sudo apt-get install -y libopenblas-dev
 # ================================================================
-import os
-import math
 
 # Hoist TOTAL_CORES to module level so tests can patch
 # 'mpj_spark.workers.spark_session.TOTAL_CORES' directly.
