@@ -196,9 +196,9 @@ def run_root_mpi(
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    assert rank == 0, (
-        f"run_root_mpi() must only be called by rank 0 (called on rank {rank})."
-    )
+    assert (
+        rank == 0
+    ), f"run_root_mpi() must only be called by rank 0 (called on rank {rank})."
     assert size >= 2, (
         f"Need at least 2 MPI ranks (1 root + 1 worker); got size={size}. "
         "Increase -np in your mpirun command."

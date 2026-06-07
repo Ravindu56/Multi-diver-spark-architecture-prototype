@@ -127,9 +127,9 @@ class TestDynamicPartitionCount:
         path = _write_lines(tmp_path, [f"word {i}" for i in range(40)])
         result = file_manager.dynamic_partition(path, num_workers=4)
         for meta in result:
-            assert os.path.isfile(meta["partition_path"]), (
-                f"Partition file not found: {meta['partition_path']}"
-            )
+            assert os.path.isfile(
+                meta["partition_path"]
+            ), f"Partition file not found: {meta['partition_path']}"
 
     def test_single_worker_gets_all_lines(self, file_manager, tmp_path):
         """With num_workers=1, one partition must contain all lines."""
@@ -178,9 +178,9 @@ class TestDynamicPartitionCompleteness:
         all_lines = []
         for meta in result:
             all_lines.extend(self._read_partition_lines(meta))
-        assert len(all_lines) == len(set(all_lines)), (
-            "Duplicate lines found across partitions"
-        )
+        assert len(all_lines) == len(
+            set(all_lines)
+        ), "Duplicate lines found across partitions"
 
     def test_uneven_split_covered(self, file_manager, tmp_path):
         """
@@ -222,9 +222,9 @@ class TestCleanup:
         result = file_manager.dynamic_partition(path, num_workers=2)
         file_manager.cleanup()
         for meta in result:
-            assert not os.path.isfile(meta["partition_path"]), (
-                f"Partition file still exists after cleanup: {meta['partition_path']}"
-            )
+            assert not os.path.isfile(
+                meta["partition_path"]
+            ), f"Partition file still exists after cleanup: {meta['partition_path']}"
 
     def test_cleanup_recreates_partitions_dir(self, file_manager):
         """After cleanup, the partitions directory must still exist (empty)."""

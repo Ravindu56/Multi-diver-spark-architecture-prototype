@@ -295,9 +295,9 @@ class TestRunLogregAllreduce:
         messages = []
         while not down_q.empty():
             messages.append(down_q.get_nowait())
-        assert len(messages) == N, (
-            f"Expected {N} broadcast messages, got {len(messages)}"
-        )
+        assert (
+            len(messages) == N
+        ), f"Expected {N} broadcast messages, got {len(messages)}"
         msg = messages[0]
         assert {"type", "iteration", "weights", "intercept"}.issubset(msg.keys())
         assert msg["type"] == "avg_weights"
