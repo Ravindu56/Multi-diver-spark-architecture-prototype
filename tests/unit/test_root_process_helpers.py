@@ -107,20 +107,6 @@ class TestDynamicPartitionHelper:
 # ─────────────────────────────────────────────────────────────
 # reassign_pass_root
 # ─────────────────────────────────────────────────────────────
-#
-# Protocol reminder (from root_process.py):
-#   root  → puts  {'type': 'reassign', 'centres': ...}  N times  (down)
-#   workers → put  {'type': 'stats', ...}                N times  (up)
-#   Both directions travel through THE SAME queue object.
-#
-# We simulate the worker side in a daemon thread:
-#   1. drain exactly num_workers 'reassign' messages
-#   2. put back num_workers 'stats' replies
-#
-# threading.queue.Queue is used instead of multiprocessing.Queue
-# so there is no OS-pipe buffer limit that could cause a deadlock
-# when producer and consumer run in the same process.
-# ─────────────────────────────────────────────────────────────
 
 def _make_stats_msg(k, dims, row_count, rng=None):
     if rng is None:
@@ -140,15 +126,13 @@ def _run_reassign(gossip_centres, num_workers, worker_msgs):
     Run reassign_pass_root with a threading.Queue so put/get never
     deadlock, regardless of message size or ordering.
     """
-    q = queue.Queue()          # threading.Queue — no OS pipe
-    k    = len(gossip_centres)
-    dims = len(gossip_centres[0])
+    q    = queue.Queue()          # threading.Queue — no OS pipe
+    n_k  = len(gossip_centres)
+    n_d  = len(gossip_centres[0])
 
     def _simulate_workers():
-        # drain the N 'reassign' broadcast messages root puts first
         for _ in range(num_workers):
             q.get(timeout=5)
-        # push back the synthetic stats replies
         for msg in worker_msgs:
             q.put(msg)
 
@@ -160,8 +144,8 @@ def _run_reassign(gossip_centres, num_workers, worker_msgs):
         gossip_centres=gossip_centres,
         reassign_queue=q,
         num_workers=num_workers,
-        k=k,
-        dims=dims,
+        k=n_k,
+        dims=n_d,
     )
     t.join(timeout=5)
     return result
@@ -170,28 +154,24 @@ def _run_reassign(gossip_centres, num_workers, worker_msgs):
 class TestReassignPassRoot:
 
     def test_returns_list(self):
-        k, dims = 2, 3
-        centres = [[float(i)] * dims for i in range(k)]
-        msgs    = [_make_stats_msg(k, dims, 50) for _ in range(2)]
+        centres = [[float(i)] * 3 for i in range(2)]
+        msgs    = [_make_stats_msg(2, 3, 50) for _ in range(2)]
         assert isinstance(_run_reassign(centres, 2, msgs), list)
 
     def test_output_k_matches_input(self):
-        k, dims = 3, 4
-        centres = [[float(i)] * dims for i in range(k)]
-        msgs    = [_make_stats_msg(k, dims, 100, np.random.default_rng(i))
+        centres = [[float(i)] * 4 for i in range(3)]
+        msgs    = [_make_stats_msg(3, 4, 100, np.random.default_rng(i))
                    for i in range(2)]
-        assert len(_run_reassign(centres, 2, msgs)) == k
+        assert len(_run_reassign(centres, 2, msgs)) == 3
 
     def test_each_centre_has_correct_dims(self):
-        k, dims = 2, 5
-        centres = [[float(i)] * dims for i in range(k)]
-        result  = _run_reassign(centres, 1, [_make_stats_msg(k, dims, 80)])
+        centres = [[float(i)] * 5 for i in range(2)]
+        result  = _run_reassign(centres, 1, [_make_stats_msg(2, 5, 80)])
         for c in result:
-            assert len(c) == dims
+            assert len(c) == 5
 
     def test_single_worker_returns_own_centroid(self):
         """corrected centroid = sums / counts exactly."""
-        k, dims = 2, 2
         sums    = [[4.0, 8.0], [6.0, 3.0]]
         counts  = [2, 3]
         msg = {
@@ -206,13 +186,11 @@ class TestReassignPassRoot:
 
     def test_two_workers_weighted_average(self):
         """(sum_w1 + sum_w2) / (count_w1 + count_w2)."""
-        k, dims = 1, 2
         msg1 = {"type": "stats", "cluster_sums": [[3.0, 6.0]],
                 "cluster_counts": [3], "row_count": 3}
         msg2 = {"type": "stats", "cluster_sums": [[5.0, 4.0]],
                 "cluster_counts": [2], "row_count": 2}
         result = _run_reassign([[0.0, 0.0]], 2, [msg1, msg2])
-        # (3+5)/(3+2)=1.6,  (6+4)/(3+2)=2.0
         np.testing.assert_allclose(result[0], [1.6, 2.0], rtol=1e-6)
 
     def test_empty_cluster_falls_back_to_gossip_centre(self):
@@ -231,20 +209,6 @@ class TestReassignPassRoot:
 
 # ─────────────────────────────────────────────────────────────
 # compute_global_seed_centres  (subprocess path — fully mocked)
-# ─────────────────────────────────────────────────────────────
-#
-# root_process.py does:
-#   from multiprocessing import Queue, Process, Event
-# so Queue and Process are bound into the module namespace as
-#   mpj_spark.core.root_process.Queue
-#   mpj_spark.core.root_process.Process
-#
-# We patch those bound names directly.  The mock Process must:
-#   - accept target, args, daemon as keyword args (matching the
-#     call site: Process(target=..., args=..., daemon=False))
-#   - expose .start() and .join() that return immediately
-#   - expose .exitcode
-# The mock Queue must expose .get_nowait() returning the result.
 # ─────────────────────────────────────────────────────────────
 
 MODULE = "mpj_spark.core.root_process"
