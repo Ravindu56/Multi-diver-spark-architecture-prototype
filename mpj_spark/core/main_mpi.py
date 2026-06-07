@@ -51,20 +51,21 @@ os.environ.setdefault(
     "--add-opens=java.base/java.util=ALL-UNNAMED "
     "-Djava.security.manager=allow",
 )
-os.environ["PYSPARK_PYTHON"]        = sys.executable
+os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 from mpi4py import MPI  # noqa: E402  (must follow env setup)
 
 # ── MPI communicator — initialised once at module load ────────────────────
 comm = MPI.COMM_WORLD
-rank = comm.Get_rank()   # 0 = root, 1..N-1 = workers
-size = comm.Get_size()   # total ranks = 1 root + N workers
+rank = comm.Get_rank()  # 0 = root, 1..N-1 = workers
+size = comm.Get_size()  # total ranks = 1 root + N workers
 
 
 # ================================================================
 # ARGUMENT PARSER  (rank 0 only)
 # ================================================================
+
 
 def _build_arg_parser():
     """
@@ -73,6 +74,7 @@ def _build_arg_parser():
     triggering a full MPI run.
     """
     import argparse
+
     p = argparse.ArgumentParser(
         prog="python -m mpj_spark.core.main_mpi",
         description=(
@@ -85,54 +87,72 @@ def _build_arg_parser():
 
     # ── Dataset ───────────────────────────────────────────────────
     p.add_argument(
-        "--input", default="./test_dataset.txt",
+        "--input",
+        default="./test_dataset.txt",
         help="Path to input dataset file.",
     )
     p.add_argument(
-        "--generate", type=int, default=50, metavar="MB",
+        "--generate",
+        type=int,
+        default=50,
+        metavar="MB",
         help="Auto-generate a synthetic dataset of this size (MB) if --input not found.",
     )
 
     # ── Parallelism ───────────────────────────────────────────────
     p.add_argument(
-        "--workers", type=int, default=None,
+        "--workers",
+        type=int,
+        default=None,
         help="Informational only — actual worker count is always MPI size - 1.",
     )
     p.add_argument(
-        "--cores", type=int, default=None,
+        "--cores",
+        type=int,
+        default=None,
         help="Override Spark local[N] core count per worker.",
     )
 
     # ── Application ──────────────────────────────────────────────
     p.add_argument(
-        "--app", default="wordcount",
+        "--app",
+        default="wordcount",
         choices=["wordcount", "kmeans", "logreg"],
         help="Workload to run on each Spark driver.",
     )
-    p.add_argument("--compare",      action="store_true",
-                   help="Run a single-driver baseline and print a speedup table.")
-    p.add_argument("--no-prewarm",   action="store_true",
-                   help="Skip JVM pre-warm barrier (faster cold start, higher variance).")
+    p.add_argument(
+        "--compare",
+        action="store_true",
+        help="Run a single-driver baseline and print a speedup table.",
+    )
+    p.add_argument(
+        "--no-prewarm",
+        action="store_true",
+        help="Skip JVM pre-warm barrier (faster cold start, higher variance).",
+    )
 
     # ── K-Means options ───────────────────────────────────────────
-    p.add_argument("--kmeans-k",         type=int,   default=3)
-    p.add_argument("--kmeans-iter",      type=int,   default=20)
-    p.add_argument("--baseline-threads", type=int,   default=None)
-    p.add_argument("--gossip",           action="store_true")
+    p.add_argument("--kmeans-k", type=int, default=3)
+    p.add_argument("--kmeans-iter", type=int, default=20)
+    p.add_argument("--baseline-threads", type=int, default=None)
+    p.add_argument("--gossip", action="store_true")
     p.add_argument("--gossip-threshold", type=float, default=1e-3)
-    p.add_argument("--gossip-max-rounds",type=int,   default=10)
-    p.add_argument("--gossip-fanout",    type=int,   default=2)
-    p.add_argument("--global-seed",      action="store_true")
-    p.add_argument("--reassign",         action="store_true")
+    p.add_argument("--gossip-max-rounds", type=int, default=10)
+    p.add_argument("--gossip-fanout", type=int, default=2)
+    p.add_argument("--global-seed", action="store_true")
+    p.add_argument("--reassign", action="store_true")
 
     # ── Logistic Regression options ───────────────────────────────
-    p.add_argument("--logreg-iter",      type=int,   default=10)
+    p.add_argument("--logreg-iter", type=int, default=10)
     p.add_argument("--logreg-reg-param", type=float, default=0.01)
-    p.add_argument("--logreg-features",  type=int,   default=10)
+    p.add_argument("--logreg-features", type=int, default=10)
 
     # ── Output ───────────────────────────────────────────────────
-    p.add_argument("--results-dir", default="results",
-                   help="Directory for profiling CSVs and result files.")
+    p.add_argument(
+        "--results-dir",
+        default="results",
+        help="Directory for profiling CSVs and result files.",
+    )
 
     return p
 
@@ -140,6 +160,7 @@ def _build_arg_parser():
 # ================================================================
 # RANK 0  —  Root coordinator
 # ================================================================
+
 
 def _run_root(args):
     """
@@ -167,7 +188,7 @@ def _run_root(args):
 
     print(
         f"\n[main_mpi] MPI_COMM_WORLD size={size}  "
-        f"root=rank-0  workers=ranks-1..{size-1}"
+        f"root=rank-0  workers=ranks-1..{size - 1}"
     )
 
     # Auto-generate dataset if the input file does not exist (rank 0 only)
@@ -182,37 +203,40 @@ def _run_root(args):
         if _repo_root not in sys.path:
             sys.path.insert(0, _repo_root)
         from mpj_spark_prototype_v2 import generate_test_dataset  # noqa
+
         args.input = generate_test_dataset(args.input, args.generate)
 
     # ── Delegate to the Phase-3 MPI root coordinator ──────────────
     from mpj_spark.core.root_mpi import run_root_mpi
+
     run_root_mpi(
-        comm             = comm,
-        input_file       = args.input,
-        num_workers      = num_workers,
-        compare          = args.compare,
-        prewarm          = not args.no_prewarm,
-        cores_override   = args.cores,
-        app              = args.app,
-        kmeans_k         = args.kmeans_k,
-        kmeans_iter      = args.kmeans_iter,
-        baseline_threads = args.baseline_threads,
-        use_gossip       = args.gossip,
-        gossip_threshold  = args.gossip_threshold,
-        gossip_max_rounds = args.gossip_max_rounds,
-        gossip_fanout     = args.gossip_fanout,
-        use_global_seed  = args.global_seed,
-        use_reassign     = args.reassign,
-        logreg_iter      = args.logreg_iter,
-        logreg_reg_param = args.logreg_reg_param,
-        logreg_features  = args.logreg_features,
-        results_dir      = args.results_dir,
+        comm=comm,
+        input_file=args.input,
+        num_workers=num_workers,
+        compare=args.compare,
+        prewarm=not args.no_prewarm,
+        cores_override=args.cores,
+        app=args.app,
+        kmeans_k=args.kmeans_k,
+        kmeans_iter=args.kmeans_iter,
+        baseline_threads=args.baseline_threads,
+        use_gossip=args.gossip,
+        gossip_threshold=args.gossip_threshold,
+        gossip_max_rounds=args.gossip_max_rounds,
+        gossip_fanout=args.gossip_fanout,
+        use_global_seed=args.global_seed,
+        use_reassign=args.reassign,
+        logreg_iter=args.logreg_iter,
+        logreg_reg_param=args.logreg_reg_param,
+        logreg_features=args.logreg_features,
+        results_dir=args.results_dir,
     )
 
 
 # ================================================================
 # RANKS 1..N  —  Spark driver workers
 # ================================================================
+
 
 def _run_worker():
     """
@@ -228,6 +252,7 @@ def _run_worker():
     )
 
     from mpj_spark.workers.worker_mpi import run_worker_mpi
+
     run_worker_mpi(comm)
 
 
@@ -238,9 +263,7 @@ def _run_worker():
 if __name__ == "__main__":
     # Ensure the repo root is on sys.path (needed for data-generation
     # helper and backwards-compat parity imports).
-    _repo_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..")
-    )
+    _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _repo_root not in sys.path:
         sys.path.insert(0, _repo_root)
 
@@ -250,7 +273,7 @@ if __name__ == "__main__":
         # Worker ranks must NOT call argparse — a SystemExit on any
         # rank while others are blocked on comm.recv() causes a deadlock.
         parser = _build_arg_parser()
-        args   = parser.parse_args()
+        args = parser.parse_args()
         _run_root(args)
     else:
         # ── Workers: no CLI parsing, receive config from root ─────

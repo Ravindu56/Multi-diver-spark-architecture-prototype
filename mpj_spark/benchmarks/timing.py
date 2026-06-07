@@ -19,7 +19,7 @@ class TimingCollector:
     """
 
     def __init__(self):
-        self._starts:  dict = {}
+        self._starts: dict = {}
         self._elapsed: dict = {}
 
     def start(self, name: str):
@@ -27,7 +27,7 @@ class TimingCollector:
 
     def stop(self, name: str):
         if name not in self._starts:
-            raise KeyError(f'Timer {name!r} was never started.')
+            raise KeyError(f"Timer {name!r} was never started.")
         self._elapsed[name] = time.time() - self._starts[name]
 
     def elapsed(self, name: str) -> float:
@@ -51,28 +51,23 @@ class TimingCollector:
         jvm_init_time    — total time Root waited for all JVMs to warm up
         agg_time         — aggregation time at root
         """
-        valid = [
-            wt for wt in (worker_timings or [])
-            if 'error' not in wt
-        ]
+        valid = [wt for wt in (worker_timings or []) if "error" not in wt]
 
         avg_proc = (
-            sum(wt['processing'] for wt in valid) / len(valid)
-            if valid else self._elapsed.get('parallel', 0.0)
+            sum(wt["processing"] for wt in valid) / len(valid)
+            if valid
+            else self._elapsed.get("parallel", 0.0)
         )
-        avg_init = (
-            sum(wt['driver_init'] for wt in valid) / len(valid)
-            if valid else 0.0
-        )
+        avg_init = sum(wt["driver_init"] for wt in valid) / len(valid) if valid else 0.0
 
         return {
             # ── primary comparison keys ──
-            'load_time':       self._elapsed.get('load',     0.0),
-            'processing_time': avg_proc,
-            'total_time':      self._elapsed.get('total',    0.0),
+            "load_time": self._elapsed.get("load", 0.0),
+            "processing_time": avg_proc,
+            "total_time": self._elapsed.get("total", 0.0),
             # ── detail keys ──
-            'parallel_time':   self._elapsed.get('parallel', 0.0),
-            'avg_init_time':   avg_init,
-            'jvm_init_time':   self._elapsed.get('jvm_init', 0.0),
-            'agg_time':        self._elapsed.get('agg',      0.0),
+            "parallel_time": self._elapsed.get("parallel", 0.0),
+            "avg_init_time": avg_init,
+            "jvm_init_time": self._elapsed.get("jvm_init", 0.0),
+            "agg_time": self._elapsed.get("agg", 0.0),
         }

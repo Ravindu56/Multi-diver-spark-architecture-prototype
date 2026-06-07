@@ -39,6 +39,7 @@ def _make_queue(states):
 # Section 1: Helper function unit tests
 # =============================================================
 
+
 class TestHungarianAlign:
     """Tests for the _hungarian_align() centroid reordering helper."""
 
@@ -53,22 +54,22 @@ class TestHungarianAlign:
         Candidate has centroids in reversed order relative to reference.
         Hungarian algorithm must swap them back.
         """
-        ref  = [[0.0, 0.0], [10.0, 10.0]]
-        cand = [[10.0, 10.0], [0.0, 0.0]]   # reversed
+        ref = [[0.0, 0.0], [10.0, 10.0]]
+        cand = [[10.0, 10.0], [0.0, 0.0]]  # reversed
         result = _hungarian_align(ref, cand)
         np.testing.assert_array_almost_equal(result, ref)
 
     def test_single_centroid_passthrough(self):
         """With k=1 there is nothing to permute."""
-        ref  = [[3.0, 3.0]]
+        ref = [[3.0, 3.0]]
         cand = [[3.0, 3.0]]
         result = _hungarian_align(ref, cand)
         np.testing.assert_array_almost_equal(result, ref)
 
     def test_higher_dimensional_centroids(self):
         """Alignment must work for d > 2 (e.g. d=5 feature space)."""
-        ref  = [[1]*5, [9]*5]
-        cand = [[9]*5, [1]*5]  # reversed
+        ref = [[1] * 5, [9] * 5]
+        cand = [[9] * 5, [1] * 5]  # reversed
         result = _hungarian_align(ref, cand)
         np.testing.assert_array_almost_equal(result, ref)
 
@@ -90,8 +91,8 @@ class TestWeightedAvg:
         """
         Worker A has 3x more rows than B → result must be closer to A.
         """
-        a = [[0.0], [0.0]]   # centroids at 0
-        b = [[4.0], [4.0]]   # centroids at 4
+        a = [[0.0], [0.0]]  # centroids at 0
+        b = [[4.0], [4.0]]  # centroids at 4
         result = _weighted_avg(a, 300, b, 100)  # A has 3x weight
         # Expected: 0*0.75 + 4*0.25 = 1.0
         np.testing.assert_array_almost_equal(result, [[1.0], [1.0]])
@@ -127,6 +128,7 @@ class TestPerWorkerDrift:
 # Section 2: GossipAggregator integration tests
 # =============================================================
 
+
 class TestGossipAggregatorCore:
     """Core aggregation behaviour tests."""
 
@@ -135,10 +137,12 @@ class TestGossipAggregatorCore:
         Two nearly-identical workers should converge in 1–2 rounds.
         Validates basic gossip loop termination (Obj 1b).
         """
-        q = _make_queue([
-            (0, [[2.0, 2.0], [8.0, 8.0]], 100, 1.0),
-            (1, [[2.1, 2.1], [7.9, 7.9]], 100, 1.1),
-        ])
+        q = _make_queue(
+            [
+                (0, [[2.0, 2.0], [8.0, 8.0]], 100, 1.0),
+                (1, [[2.1, 2.1], [7.9, 7.9]], 100, 1.1),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         assert result["converged"] is True
@@ -147,46 +151,59 @@ class TestGossipAggregatorCore:
         """
         Sum of per-worker row counts must equal total_rows in result.
         """
-        q = _make_queue([
-            (0, [[1.0, 1.0]], 150, 0.5),
-            (1, [[1.0, 1.0]], 250, 0.5),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0]], 150, 0.5),
+                (1, [[1.0, 1.0]], 250, 0.5),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         assert result["total_rows"] == 400
 
     def test_total_wcss_is_sum_of_workers(self):
         """total_wcss must equal sum of individual worker WCSS values."""
-        q = _make_queue([
-            (0, [[1.0, 1.0]], 100, 2.5),
-            (1, [[1.0, 1.0]], 100, 3.5),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0]], 100, 2.5),
+                (1, [[1.0, 1.0]], 100, 3.5),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         assert result["total_wcss"] == pytest.approx(6.0)
 
     def test_result_keys_complete(self):
         """Result dict must contain all documented keys."""
-        q = _make_queue([
-            (0, [[1.0, 1.0]], 50, 0.5),
-            (1, [[1.0, 1.0]], 50, 0.5),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0]], 50, 0.5),
+                (1, [[1.0, 1.0]], 50, 0.5),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         expected_keys = {
-            "centres", "total_wcss", "total_rows",
-            "num_workers", "rounds_run", "converged",
-            "round_log", "agg_time_s"
+            "centres",
+            "total_wcss",
+            "total_rows",
+            "num_workers",
+            "rounds_run",
+            "converged",
+            "round_log",
+            "agg_time_s",
         }
         assert expected_keys.issubset(result.keys())
 
     def test_num_workers_matches_config(self):
         """num_workers in result must match GossipAggregator config."""
-        q = _make_queue([
-            (0, [[1.0, 1.0]], 50, 0.5),
-            (1, [[1.0, 1.0]], 50, 0.5),
-            (2, [[1.0, 1.0]], 50, 0.5),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0]], 50, 0.5),
+                (1, [[1.0, 1.0]], 50, 0.5),
+                (2, [[1.0, 1.0]], 50, 0.5),
+            ]
+        )
         agg = GossipAggregator(num_workers=3, verbose=False)
         result = agg.aggregate(q)
         assert result["num_workers"] == 3
@@ -198,10 +215,12 @@ class TestGossipAggregatorCore:
         """
         k, d = 3, 4
         centres = [[float(i)] * d for i in range(k)]
-        q = _make_queue([
-            (0, centres, 100, 1.0),
-            (1, centres, 100, 1.0),
-        ])
+        q = _make_queue(
+            [
+                (0, centres, 100, 1.0),
+                (1, centres, 100, 1.0),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         assert len(result["centres"]) == k
@@ -216,34 +235,42 @@ class TestGossipAggregatorEdgeCases:
         If fewer states arrive than num_workers, aggregate() must
         raise RuntimeError (timeout path).
         """
-        q = _make_queue([
-            (0, [[1.0, 1.0]], 50, 0.5),
-            # Worker 1 never pushes — simulates crash
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0]], 50, 0.5),
+                # Worker 1 never pushes — simulates crash
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         with pytest.raises((RuntimeError, Exception)):
             agg.aggregate(q, timeout_per_worker=0.3)
 
     def test_round_log_populated(self):
         """round_log must have at least one entry after aggregation."""
-        q = _make_queue([
-            (0, [[0.0, 0.0], [5.0, 5.0]], 100, 1.0),
-            (1, [[0.1, 0.1], [4.9, 4.9]], 100, 1.0),
-        ])
+        q = _make_queue(
+            [
+                (0, [[0.0, 0.0], [5.0, 5.0]], 100, 1.0),
+                (1, [[0.1, 0.1], [4.9, 4.9]], 100, 1.0),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         assert len(result["round_log"]) >= 1
 
     def test_round_log_schema(self):
         """Each round_log entry must contain required keys."""
-        q = _make_queue([
-            (0, [[1.0, 1.0]], 50, 0.5),
-            (1, [[1.0, 1.0]], 50, 0.5),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0]], 50, 0.5),
+                (1, [[1.0, 1.0]], 50, 0.5),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         for entry in result["round_log"]:
-            assert {"round", "fanout", "max_drift", "per_worker_drift"}.issubset(entry.keys())
+            assert {"round", "fanout", "max_drift", "per_worker_drift"}.issubset(
+                entry.keys()
+            )
 
 
 class TestGossipAggregatorSeedCentres:
@@ -259,10 +286,12 @@ class TestGossipAggregatorSeedCentres:
         Result C0 must be near [2,2], C1 near [8,8] after alignment.
         """
         seed = [[2.0, 2.0], [8.0, 8.0]]
-        q = _make_queue([
-            (0, [[2.0, 2.0], [8.0, 8.0]], 100, 1.0),
-            (1, [[8.0, 8.0], [2.0, 2.0]], 100, 1.0),  # reversed labels
-        ])
+        q = _make_queue(
+            [
+                (0, [[2.0, 2.0], [8.0, 8.0]], 100, 1.0),
+                (1, [[8.0, 8.0], [2.0, 2.0]], 100, 1.0),  # reversed labels
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q, seed_centres=seed)
         # C0 should be near [2,2], not near [8,8]
@@ -274,10 +303,12 @@ class TestGossipAggregatorSeedCentres:
         When seed_centres=None, aggregation still completes without error.
         (Fallback to states[0] alignment — original behaviour.)
         """
-        q = _make_queue([
-            (0, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
-            (1, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
+                (1, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q, seed_centres=None)
         assert result["centres"] is not None
@@ -296,16 +327,14 @@ class TestGossipAggregatorConvergence:
         converge on round 1.
         """
         centres = [[3.0, 3.0], [7.0, 7.0]]
-        q = _make_queue([
-            (0, centres, 100, 1.0),
-            (1, centres, 100, 1.0),
-            (2, centres, 100, 1.0),
-        ])
-        agg = GossipAggregator(
-            num_workers=3,
-            convergence_threshold=1e-3,
-            verbose=False
+        q = _make_queue(
+            [
+                (0, centres, 100, 1.0),
+                (1, centres, 100, 1.0),
+                (2, centres, 100, 1.0),
+            ]
         )
+        agg = GossipAggregator(num_workers=3, convergence_threshold=1e-3, verbose=False)
         result = agg.aggregate(q)
         assert result["converged"] is True
         assert result["rounds_run"] == 1
@@ -315,25 +344,29 @@ class TestGossipAggregatorConvergence:
         When workers are very far apart, rounds_run must not exceed
         max_rounds even if convergence is not achieved.
         """
-        q = _make_queue([
-            (0, [[0.0, 0.0], [1.0, 1.0]], 100, 1.0),
-            (1, [[1000.0, 1000.0], [1001.0, 1001.0]], 100, 1.0),
-        ])
+        q = _make_queue(
+            [
+                (0, [[0.0, 0.0], [1.0, 1.0]], 100, 1.0),
+                (1, [[1000.0, 1000.0], [1001.0, 1001.0]], 100, 1.0),
+            ]
+        )
         agg = GossipAggregator(
             num_workers=2,
             max_rounds=3,
             convergence_threshold=1e-10,  # impossibly tight
-            verbose=False
+            verbose=False,
         )
         result = agg.aggregate(q)
         assert result["rounds_run"] <= 3
 
     def test_agg_time_is_positive_float(self):
         """Execution timing must be a positive number."""
-        q = _make_queue([
-            (0, [[1.0, 1.0]], 50, 0.5),
-            (1, [[1.0, 1.0]], 50, 0.5),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0]], 50, 0.5),
+                (1, [[1.0, 1.0]], 50, 0.5),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         assert result["agg_time_s"] > 0.0
@@ -342,6 +375,7 @@ class TestGossipAggregatorConvergence:
 # =============================================================
 # Section 7: verbose=True coverage (lines 145, 264-267, 269, 323)
 # =============================================================
+
 
 class TestGossipAggregatorVerbose:
     """
@@ -360,10 +394,12 @@ class TestGossipAggregatorVerbose:
         emit [Gossip] diagnostic output to stdout.
         Covers line 145 (_log print) and lines 264-267, 269 (_print_summary).
         """
-        q = _make_queue([
-            (0, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
-            (1, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
-        ])
+        q = _make_queue(
+            [
+                (0, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
+                (1, [[1.0, 1.0], [9.0, 9.0]], 100, 1.0),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=True)
         result = agg.aggregate(q)
         captured = capsys.readouterr()
@@ -375,10 +411,12 @@ class TestGossipAggregatorVerbose:
         _print_summary() must emit the 'Gossip Aggregation Summary'
         header. Covers lines 264-267, 269 in full.
         """
-        q = _make_queue([
-            (0, [[2.0, 2.0]], 50, 0.5),
-            (1, [[2.0, 2.0]], 50, 0.5),
-        ])
+        q = _make_queue(
+            [
+                (0, [[2.0, 2.0]], 50, 0.5),
+                (1, [[2.0, 2.0]], 50, 0.5),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=True)
         agg.aggregate(q)
         captured = capsys.readouterr()
@@ -391,10 +429,12 @@ class TestGossipAggregatorVerbose:
         Line 323: _global_merge logs 'aligning to states[0]' when
         seed_centres=None and verbose=True.
         """
-        q = _make_queue([
-            (0, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
-            (1, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
-        ])
+        q = _make_queue(
+            [
+                (0, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+                (1, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=True)
         agg.aggregate(q, seed_centres=None)
         captured = capsys.readouterr()
@@ -406,10 +446,12 @@ class TestGossipAggregatorVerbose:
         must mention 'seed_reference' (the other _global_merge branch).
         """
         seed = [[3.0, 3.0], [7.0, 7.0]]
-        q = _make_queue([
-            (0, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
-            (1, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
-        ])
+        q = _make_queue(
+            [
+                (0, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+                (1, [[3.0, 3.0], [7.0, 7.0]], 100, 1.0),
+            ]
+        )
         agg = GossipAggregator(num_workers=2, verbose=True)
         agg.aggregate(q, seed_centres=seed)
         captured = capsys.readouterr()

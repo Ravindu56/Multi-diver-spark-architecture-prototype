@@ -30,6 +30,7 @@ import pytest
 # Helper: fluent SparkSession builder mock
 # ─────────────────────────────────────────────────────────────
 
+
 def _make_builder_mock():
     """
     Returns (session_mock, builder_mock).
@@ -37,11 +38,11 @@ def _make_builder_mock():
     so build_spark_session() can chain .appName().master()... freely.
     """
     builder = MagicMock(name="builder")
-    builder.appName.return_value    = builder
-    builder.master.return_value     = builder
-    builder.config.return_value     = builder
+    builder.appName.return_value = builder
+    builder.master.return_value = builder
+    builder.config.return_value = builder
     session = MagicMock(name="SparkSession")
-    session.sparkContext            = MagicMock()
+    session.sparkContext = MagicMock()
     builder.getOrCreate.return_value = session
     return session, builder
 
@@ -50,24 +51,26 @@ def _make_builder_mock():
 # get_total_ram_mb
 # ─────────────────────────────────────────────────────────────
 
+
 class TestGetTotalRamMb:
     """Tests the three-tier RAM detection fallback."""
 
     def test_uses_psutil_when_available(self):
         """When psutil is importable, return its virtual_memory().total."""
-        fake_vm       = MagicMock()
-        fake_vm.total = 16 * 1024 * 1024 * 1024   # 16 GB in bytes
-        fake_psutil   = MagicMock()
+        fake_vm = MagicMock()
+        fake_vm.total = 16 * 1024 * 1024 * 1024  # 16 GB in bytes
+        fake_psutil = MagicMock()
         fake_psutil.virtual_memory.return_value = fake_vm
 
         with patch.dict(sys.modules, {"psutil": fake_psutil}):
             # Re-import to pick up the patched sys.modules entry
             import importlib
             import mpj_spark.workers.spark_session as ss
+
             importlib.reload(ss)
             result = ss.get_total_ram_mb()
 
-        assert result == 16 * 1024   # 16384 MB
+        assert result == 16 * 1024  # 16384 MB
 
     def test_fallback_to_proc_meminfo(self, monkeypatch):
         """When psutil is absent, fall back to /proc/meminfo."""
@@ -81,7 +84,7 @@ class TestGetTotalRamMb:
             ]
             mock_open = MagicMock()
             mock_open.return_value.__enter__ = lambda s: iter(meminfo_lines)
-            mock_open.return_value.__exit__  = MagicMock(return_value=False)
+            mock_open.return_value.__exit__ = MagicMock(return_value=False)
 
             with patch("builtins.open", mock_open):
                 result = ss.get_total_ram_mb()
@@ -93,18 +96,22 @@ class TestGetTotalRamMb:
         """When psutil is absent AND /proc/meminfo raises, return 8192."""
         import mpj_spark.workers.spark_session as ss
 
-        with patch.dict(sys.modules, {"psutil": None}), \
-             patch("builtins.open", side_effect=OSError("no meminfo")):
+        with (
+            patch.dict(sys.modules, {"psutil": None}),
+            patch("builtins.open", side_effect=OSError("no meminfo")),
+        ):
             result = ss.get_total_ram_mb()
 
         assert result == 8192
 
     def test_returns_integer(self):
         from mpj_spark.workers.spark_session import get_total_ram_mb
+
         assert isinstance(get_total_ram_mb(), int)
 
     def test_returns_positive_value(self):
         from mpj_spark.workers.spark_session import get_total_ram_mb
+
         assert get_total_ram_mb() > 0
 
 
@@ -112,6 +119,7 @@ class TestGetTotalRamMb:
 # Shared fixture: patch pyspark.sql in sys.modules so the local
 # import inside build_spark_session() resolves to our mock.
 # ─────────────────────────────────────────────────────────────
+
 
 @pytest.fixture()
 def spark_mock(monkeypatch):
@@ -122,12 +130,12 @@ def spark_mock(monkeypatch):
     """
     session, builder = _make_builder_mock()
 
-    pyspark_mod     = types.ModuleType("pyspark")
+    pyspark_mod = types.ModuleType("pyspark")
     pyspark_sql_mod = types.ModuleType("pyspark.sql")
-    pyspark_sql_mod.SparkSession         = MagicMock()
+    pyspark_sql_mod.SparkSession = MagicMock()
     pyspark_sql_mod.SparkSession.builder = builder
 
-    monkeypatch.setitem(sys.modules, "pyspark",     pyspark_mod)
+    monkeypatch.setitem(sys.modules, "pyspark", pyspark_mod)
     monkeypatch.setitem(sys.modules, "pyspark.sql", pyspark_sql_mod)
 
     return session, builder
@@ -137,8 +145,8 @@ def spark_mock(monkeypatch):
 # build_spark_session — RAM allocation
 # ─────────────────────────────────────────────────────────────
 
-class TestBuildSparkSessionRamAllocation:
 
+class TestBuildSparkSessionRamAllocation:
     def _driver_memory(self, builder):
         for c in builder.config.call_args_list:
             if c[0][0] == "spark.driver.memory":
@@ -149,6 +157,7 @@ class TestBuildSparkSessionRamAllocation:
         """driver_memory_mb=1024 must produce 'spark.driver.memory' == '1024m'."""
         _, builder = spark_mock
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", driver_memory_mb=1024)
         assert self._driver_memory(builder) == "1024m"
 
@@ -158,9 +167,11 @@ class TestBuildSparkSessionRamAllocation:
         """
         _, builder = spark_mock
         import mpj_spark.workers.spark_session as ss
+
         monkeypatch.setattr(ss, "get_total_ram_mb", lambda: 4096)
 
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", num_workers=2, memory_fraction=1.0)
         assert self._driver_memory(builder) == f"{max(512, 4096 // 2)}m"
 
@@ -168,9 +179,11 @@ class TestBuildSparkSessionRamAllocation:
         """heap_mb must never drop below 512 MB regardless of workers."""
         _, builder = spark_mock
         import mpj_spark.workers.spark_session as ss
+
         monkeypatch.setattr(ss, "get_total_ram_mb", lambda: 512)
 
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", num_workers=100, memory_fraction=0.75)
         assert self._driver_memory(builder) == "512m"
 
@@ -178,9 +191,11 @@ class TestBuildSparkSessionRamAllocation:
         """Without num_workers, heap = total_ram * memory_fraction."""
         _, builder = spark_mock
         import mpj_spark.workers.spark_session as ss
+
         monkeypatch.setattr(ss, "get_total_ram_mb", lambda: 8192)
 
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", memory_fraction=0.5)
         assert self._driver_memory(builder) == "4096m"
 
@@ -189,12 +204,13 @@ class TestBuildSparkSessionRamAllocation:
 # build_spark_session — CPU allocation
 # ─────────────────────────────────────────────────────────────
 
-class TestBuildSparkSessionCpuAllocation:
 
+class TestBuildSparkSessionCpuAllocation:
     def test_cores_override_sets_local_master(self, spark_mock):
         """cores_override=4 → master('local[4]')."""
         _, builder = spark_mock
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", cores_override=4)
         builder.master.assert_called_once_with("local[4]")
 
@@ -202,6 +218,7 @@ class TestBuildSparkSessionCpuAllocation:
         """Without cores_override, master uses TOTAL_CORES from config."""
         _, builder = spark_mock
         from mpj_spark.workers.spark_session import build_spark_session
+
         with patch("mpj_spark.workers.spark_session.TOTAL_CORES", 8):
             build_spark_session("TestApp")
         builder.master.assert_called_once_with("local[8]")
@@ -211,8 +228,8 @@ class TestBuildSparkSessionCpuAllocation:
 # build_spark_session — config keys emitted
 # ─────────────────────────────────────────────────────────────
 
-class TestBuildSparkSessionConfigKeys:
 
+class TestBuildSparkSessionConfigKeys:
     EXPECTED_KEYS = {
         "spark.driver.memory",
         "spark.executor.memory",
@@ -232,6 +249,7 @@ class TestBuildSparkSessionConfigKeys:
     def test_all_expected_config_keys_set(self, spark_mock):
         _, builder = spark_mock
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", cores_override=2, driver_memory_mb=512)
         called_keys = {c[0][0] for c in builder.config.call_args_list}
         for key in self.EXPECTED_KEYS:
@@ -240,10 +258,15 @@ class TestBuildSparkSessionConfigKeys:
     def test_blas_flags_in_java_options(self, spark_mock):
         _, builder = spark_mock
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", cores_override=2, driver_memory_mb=512)
         jvm_val = next(
-            (c[0][1] for c in builder.config.call_args_list
-             if c[0][0] == "spark.driver.extraJavaOptions"), None
+            (
+                c[0][1]
+                for c in builder.config.call_args_list
+                if c[0][0] == "spark.driver.extraJavaOptions"
+            ),
+            None,
         )
         assert jvm_val is not None
         assert "NativeSystemBLAS" in jvm_val
@@ -251,10 +274,15 @@ class TestBuildSparkSessionConfigKeys:
     def test_gc_flags_in_java_options(self, spark_mock):
         _, builder = spark_mock
         from mpj_spark.workers.spark_session import build_spark_session
+
         build_spark_session("TestApp", cores_override=2, driver_memory_mb=512)
         jvm_val = next(
-            (c[0][1] for c in builder.config.call_args_list
-             if c[0][0] == "spark.driver.extraJavaOptions"), None
+            (
+                c[0][1]
+                for c in builder.config.call_args_list
+                if c[0][0] == "spark.driver.extraJavaOptions"
+            ),
+            None,
         )
         assert jvm_val is not None
         assert "UseG1GC" in jvm_val
@@ -262,5 +290,6 @@ class TestBuildSparkSessionConfigKeys:
     def test_returns_spark_session_object(self, spark_mock):
         session, builder = spark_mock
         from mpj_spark.workers.spark_session import build_spark_session
+
         result = build_spark_session("TestApp", cores_override=1, driver_memory_mb=512)
         assert result is builder.getOrCreate.return_value

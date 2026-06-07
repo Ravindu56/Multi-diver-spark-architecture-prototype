@@ -7,6 +7,7 @@
 # ============================================================
 
 import os
+
 os.environ["JAVA_TOOL_OPTIONS"] = "-Djava.security.manager=allow"
 
 import time  # noqa: E402
@@ -14,6 +15,7 @@ import math  # noqa: E402
 import shutil  # noqa: E402
 from multiprocessing import Process, Queue  # noqa: E402
 from collections import defaultdict  # noqa: E402
+
 
 # ============================================================
 # COMPONENT 1: MPJ-SPARK File Manager (Simulates HPC Shared Storage)
@@ -24,6 +26,7 @@ class MPJSparkFileManager:
     Handles: read, partition, and write operations.
     Paper Reference: Section IV.B - MPJ-SPARK File Manager
     """
+
     def __init__(self, shared_storage_path="./shared_storage"):
         self.shared_storage_path = shared_storage_path
         os.makedirs(shared_storage_path, exist_ok=True)
@@ -32,7 +35,7 @@ class MPJSparkFileManager:
 
     def read_input_file(self, input_file_path):
         """Read input file from shared storage"""
-        with open(input_file_path, 'r', encoding='utf-8') as f:
+        with open(input_file_path, "r", encoding="utf-8") as f:
             content = f.read()
         file_size = os.path.getsize(input_file_path)
         return content, file_size
@@ -44,7 +47,7 @@ class MPJSparkFileManager:
         One-to-one relationship between partitions and MPJ workers
         """
         content, file_size = self.read_input_file(input_file_path)
-        lines = content.strip().split('\n')
+        lines = content.strip().split("\n")
 
         # Calculate partition size dynamically
         partition_size = math.ceil(len(lines) / num_workers)
@@ -59,8 +62,8 @@ class MPJSparkFileManager:
             # Write partition to shared storage
             partition_filename = f"partition_{i}.txt"
             partition_path = os.path.join(self.partitions_dir, partition_filename)
-            with open(partition_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(partition_lines))
+            with open(partition_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(partition_lines))
 
             # Return METADATA only (not raw data) - Key paper principle
             metadata = {
@@ -68,7 +71,7 @@ class MPJSparkFileManager:
                 "partition_path": partition_path,
                 "num_lines": len(partition_lines),
                 "start_line": start_idx,
-                "end_line": end_idx
+                "end_line": end_idx,
             }
             partition_metadata_list.append(metadata)
 
@@ -90,6 +93,7 @@ class KeyValueStructure:
     Converts Spark RDD results into contiguous key-value arrays
     suitable for MPJ message passing (simulated via Queue).
     """
+
     def __init__(self):
         self.data = []  # List of (key, value) tuples
 
@@ -132,16 +136,17 @@ def mpj_worker_process(worker_id, partition_metadata, result_queue, timing_queue
         # === STEP 1: Create INDEPENDENT Spark Driver for this worker ===
         # Paper: "Each MPJ Worker has its own copy of the spark driver"
         # Paper: "isolated from the other workers"
-        spark = SparkSession.builder \
-            .master("local[*]") \
-            .appName(f"MPJ-Worker-{worker_id}-SparkDriver") \
-            .config("spark.ui.enabled", "false") \
-            .config("spark.driver.host", "localhost") \
-            .config("spark.sql.shuffle.partitions", "2") \
-            .config("spark.default.parallelism", "2") \
-            .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow") \
-            .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow") \
+        spark = (
+            SparkSession.builder.master("local[*]")
+            .appName(f"MPJ-Worker-{worker_id}-SparkDriver")
+            .config("spark.ui.enabled", "false")
+            .config("spark.driver.host", "localhost")
+            .config("spark.sql.shuffle.partitions", "2")
+            .config("spark.default.parallelism", "2")
+            .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow")
+            .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow")
             .getOrCreate()
+        )
 
         sc = spark.sparkContext
         sc.setLogLevel("ERROR")
@@ -155,11 +160,12 @@ def mpj_worker_process(worker_id, partition_metadata, result_queue, timing_queue
 
         # === STEP 3: Execute WordCount Application Logic ===
         # flatMap -> map -> reduceByKey (standard WordCount)
-        word_counts_rdd = text_rdd \
-            .flatMap(lambda line: line.lower().split()) \
-            .filter(lambda word: len(word) > 0) \
-            .map(lambda word: (word, 1)) \
+        word_counts_rdd = (
+            text_rdd.flatMap(lambda line: line.lower().split())
+            .filter(lambda word: len(word) > 0)
+            .map(lambda word: (word, 1))
             .reduceByKey(lambda a, b: a + b)
+        )
 
         # === STEP 4: Collect results (RDD -> local) ===
         results = word_counts_rdd.collect()
@@ -174,34 +180,32 @@ def mpj_worker_process(worker_id, partition_metadata, result_queue, timing_queue
 
         # === STEP 6: Send results to Root (simulates MPJ Send) ===
         # Paper: "Method Send-Results(Result, Start-Position, Count, Type, Root Process, Tag)"
-        result_queue.put({
-            "worker_id": worker_id,
-            "results": serialized_results,
-            "num_words": len(serialized_results),
-            "partition_lines": partition_metadata["num_lines"]
-        })
+        result_queue.put(
+            {
+                "worker_id": worker_id,
+                "results": serialized_results,
+                "num_words": len(serialized_results),
+                "partition_lines": partition_metadata["num_lines"],
+            }
+        )
 
         worker_end_time = time.time()
 
-        timing_queue.put({
-            "worker_id": worker_id,
-            "driver_init_time": driver_init_time - worker_start_time,
-            "processing_time": processing_time - driver_init_time,
-            "total_worker_time": worker_end_time - worker_start_time
-        })
+        timing_queue.put(
+            {
+                "worker_id": worker_id,
+                "driver_init_time": driver_init_time - worker_start_time,
+                "processing_time": processing_time - driver_init_time,
+                "total_worker_time": worker_end_time - worker_start_time,
+            }
+        )
 
         # Cleanup
         spark.stop()
 
     except Exception as e:
-        result_queue.put({
-            "worker_id": worker_id,
-            "error": str(e)
-        })
-        timing_queue.put({
-            "worker_id": worker_id,
-            "error": str(e)
-        })
+        result_queue.put({"worker_id": worker_id, "error": str(e)})
+        timing_queue.put({"worker_id": worker_id, "error": str(e)})
 
 
 # ============================================================
@@ -229,13 +233,17 @@ def mpj_root_process(input_file_path, num_workers):
     file_manager = MPJSparkFileManager()
 
     load_start = time.time()
-    partition_metadata_list = file_manager.dynamic_partition(input_file_path, num_workers)
+    partition_metadata_list = file_manager.dynamic_partition(
+        input_file_path, num_workers
+    )
     load_end = time.time()
     load_time = load_end - load_start
 
     print(f"[ROOT] Input partitioned into {num_workers} partitions")
     for meta in partition_metadata_list:
-        print(f"  Partition {meta['partition_id']}: {meta['num_lines']} lines -> {meta['partition_path']}")
+        print(
+            f"  Partition {meta['partition_id']}: {meta['num_lines']} lines -> {meta['partition_path']}"
+        )
 
     # === PHASE 2: Distribute Metadata & Launch Workers ===
     print(f"\n[ROOT] Phase 2: Distributing metadata to {num_workers} MPJ Workers...")
@@ -250,11 +258,13 @@ def mpj_root_process(input_file_path, num_workers):
         # Paper: "Send-Metadata(PRTi.Metadata, Start-Position, Count, Type, Dest-Worker-Process, Tag)"
         p = Process(
             target=mpj_worker_process,
-            args=(i, partition_metadata_list[i], result_queue, timing_queue)
+            args=(i, partition_metadata_list[i], result_queue, timing_queue),
         )
         workers.append(p)
         p.start()
-        print(f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) with independent Spark Driver")
+        print(
+            f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) with independent Spark Driver"
+        )
 
     # === PHASE 3: Wait for all workers ===
     print(f"\n[ROOT] Phase 3: Waiting for {num_workers} workers to complete...")
@@ -277,7 +287,9 @@ def mpj_root_process(input_file_path, num_workers):
             print(f"  [ERROR] Worker {result['worker_id']}: {result['error']}")
         else:
             all_results.append(result)
-            print(f"  [ROOT] Received {result['num_words']} unique words from Worker {result['worker_id']}")
+            print(
+                f"  [ROOT] Received {result['num_words']} unique words from Worker {result['worker_id']}"
+            )
 
     while not timing_queue.empty():
         worker_timings.append(timing_queue.get())
@@ -320,15 +332,21 @@ def mpj_root_process(input_file_path, num_workers):
     print(f"  Processing Time (T_Proc):  {processing_time:.4f} sec")
     print(f"  Aggregation Time:          {aggregation_end - aggregation_start:.4f} sec")
     print(f"  Total Execution Time:      {total_end_time - total_start_time:.4f} sec")
-    print(f"  Load %% of Total:           {(load_time/(total_end_time - total_start_time))*100:.1f}%%")
-    print(f"  Processing %% of Total:     {(processing_time/(total_end_time - total_start_time))*100:.1f}%%")
+    print(
+        f"  Load %% of Total:           {(load_time / (total_end_time - total_start_time)) * 100:.1f}%%"
+    )
+    print(
+        f"  Processing %% of Total:     {(processing_time / (total_end_time - total_start_time)) * 100:.1f}%%"
+    )
 
     if worker_timings:
         print("\n  Per-Worker Timings:")
-        for wt in sorted(worker_timings, key=lambda x: x.get('worker_id', 0)):
-            if 'error' not in wt:
-                print(f"    Worker {wt['worker_id']}: Driver Init={wt['driver_init_time']:.2f}s, "
-                      f"Processing={wt['processing_time']:.2f}s, Total={wt['total_worker_time']:.2f}s")
+        for wt in sorted(worker_timings, key=lambda x: x.get("worker_id", 0)):
+            if "error" not in wt:
+                print(
+                    f"    Worker {wt['worker_id']}: Driver Init={wt['driver_init_time']:.2f}s, "
+                    f"Processing={wt['processing_time']:.2f}s, Total={wt['total_worker_time']:.2f}s"
+                )
 
     # Cleanup
     file_manager.cleanup()
@@ -336,7 +354,7 @@ def mpj_root_process(input_file_path, num_workers):
     return sorted_results, {
         "load_time": load_time,
         "processing_time": processing_time,
-        "total_time": total_end_time - total_start_time
+        "total_time": total_end_time - total_start_time,
     }
 
 
@@ -356,11 +374,12 @@ def standard_spark_wordcount(input_file_path):
 
     total_start = time.time()
 
-    spark = SparkSession.builder \
-        .master("local[*]") \
-        .appName("Standard-Spark-SingleDriver") \
-        .config("spark.ui.enabled", "false") \
+    spark = (
+        SparkSession.builder.master("local[*]")
+        .appName("Standard-Spark-SingleDriver")
+        .config("spark.ui.enabled", "false")
         .getOrCreate()
+    )
 
     sc = spark.sparkContext
     sc.setLogLevel("ERROR")
@@ -371,11 +390,12 @@ def standard_spark_wordcount(input_file_path):
     load_end = time.time()
 
     process_start = time.time()
-    word_counts = text_rdd \
-        .flatMap(lambda line: line.lower().split()) \
-        .filter(lambda word: len(word) > 0) \
-        .map(lambda word: (word, 1)) \
+    word_counts = (
+        text_rdd.flatMap(lambda line: line.lower().split())
+        .filter(lambda word: len(word) > 0)
+        .map(lambda word: (word, 1))
         .reduceByKey(lambda a, b: a + b)
+    )
 
     results = word_counts.collect()
     process_end = time.time()
@@ -398,7 +418,7 @@ def standard_spark_wordcount(input_file_path):
     return sorted_results, {
         "load_time": load_end - load_start,
         "processing_time": process_end - process_start,
-        "total_time": total_end - total_start
+        "total_time": total_end - total_start,
     }
 
 
@@ -439,13 +459,13 @@ The partition size affects network bandwidth during data transfer between comput
     target_bytes = target_size_mb * 1024 * 1024
     current_size = 0
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         while current_size < target_bytes:
             f.write(sample_text)
-            current_size += len(sample_text.encode('utf-8'))
+            current_size += len(sample_text.encode("utf-8"))
 
     actual_size = os.path.getsize(output_path)
-    print(f"Generated: {output_path} ({actual_size / (1024*1024):.1f} MB)")
+    print(f"Generated: {output_path} ({actual_size / (1024 * 1024):.1f} MB)")
     return output_path
 
 
@@ -455,11 +475,22 @@ The partition size affects network bandwidth during data transfer between comput
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="MPJ-SPARK Multi-Driver WordCount Prototype")
-    parser.add_argument("--workers", type=int, default=4, help="Number of MPJ workers (default: 4)")
+    parser = argparse.ArgumentParser(
+        description="MPJ-SPARK Multi-Driver WordCount Prototype"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=4, help="Number of MPJ workers (default: 4)"
+    )
     parser.add_argument("--input", type=str, default=None, help="Input text file path")
-    parser.add_argument("--generate", type=int, default=50, help="Generate test dataset of N MB (default: 50)")
-    parser.add_argument("--compare", action="store_true", help="Run comparison with standard Spark")
+    parser.add_argument(
+        "--generate",
+        type=int,
+        default=50,
+        help="Generate test dataset of N MB (default: 50)",
+    )
+    parser.add_argument(
+        "--compare", action="store_true", help="Run comparison with standard Spark"
+    )
 
     args = parser.parse_args()
 
@@ -479,8 +510,16 @@ if __name__ == "__main__":
         print("\n" + "=" * 70)
         print("  COMPARISON: Multi-Driver vs Standard Spark")
         print("=" * 70)
-        print(f"  {'Metric':<25} {'Multi-Driver':>15} {'Standard Spark':>15} {'Speedup':>10}")
-        print(f"  {'-'*65}")
-        print(f"  {'Load Time (sec)':<25} {multi_timing['load_time']:>15.4f} {std_timing['load_time']:>15.4f} {std_timing['load_time']/max(multi_timing['load_time'],0.001):>9.2f}x")
-        print(f"  {'Processing Time (sec)':<25} {multi_timing['processing_time']:>15.4f} {std_timing['processing_time']:>15.4f} {std_timing['processing_time']/max(multi_timing['processing_time'],0.001):>9.2f}x")
-        print(f"  {'Total Time (sec)':<25} {multi_timing['total_time']:>15.4f} {std_timing['total_time']:>15.4f} {std_timing['total_time']/max(multi_timing['total_time'],0.001):>9.2f}x")
+        print(
+            f"  {'Metric':<25} {'Multi-Driver':>15} {'Standard Spark':>15} {'Speedup':>10}"
+        )
+        print(f"  {'-' * 65}")
+        print(
+            f"  {'Load Time (sec)':<25} {multi_timing['load_time']:>15.4f} {std_timing['load_time']:>15.4f} {std_timing['load_time'] / max(multi_timing['load_time'], 0.001):>9.2f}x"
+        )
+        print(
+            f"  {'Processing Time (sec)':<25} {multi_timing['processing_time']:>15.4f} {std_timing['processing_time']:>15.4f} {std_timing['processing_time'] / max(multi_timing['processing_time'], 0.001):>9.2f}x"
+        )
+        print(
+            f"  {'Total Time (sec)':<25} {multi_timing['total_time']:>15.4f} {std_timing['total_time']:>15.4f} {std_timing['total_time'] / max(multi_timing['total_time'], 0.001):>9.2f}x"
+        )

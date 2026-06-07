@@ -17,6 +17,7 @@ from mpj_spark.core.file_manager import MPJSparkFileManager
 # Fixtures
 # =============================================================
 
+
 @pytest.fixture
 def file_manager(tmp_path):
     """MPJSparkFileManager pointing at a fresh temp directory."""
@@ -37,6 +38,7 @@ def _write_lines(tmp_path, lines, filename="input.txt"):
 # Section 1: _count_lines() static method
 # =============================================================
 
+
 class TestCountLines:
     """Tests for the O(1)-memory binary line counter."""
 
@@ -50,7 +52,7 @@ class TestCountLines:
 
     def test_count_large_file(self, tmp_path):
         """10 000-line file — validates chunk-based counting."""
-        path = _write_lines(tmp_path, [f"word{i} word{i+1}" for i in range(10_000)])
+        path = _write_lines(tmp_path, [f"word{i} word{i + 1}" for i in range(10_000)])
         assert MPJSparkFileManager._count_lines(path) == 10_000
 
     def test_count_file_without_trailing_newline(self, tmp_path):
@@ -88,6 +90,7 @@ class TestCountLines:
 # Section 2: dynamic_partition() — partition count & metadata
 # =============================================================
 
+
 class TestDynamicPartitionCount:
     """Validate partition count and metadata structure."""
 
@@ -102,8 +105,12 @@ class TestDynamicPartitionCount:
         path = _write_lines(tmp_path, [f"line {i}" for i in range(20)])
         result = file_manager.dynamic_partition(path, num_workers=2)
         required = {
-            "partition_id", "partition_path",
-            "num_lines", "start_line", "end_line", "file_size_bytes"
+            "partition_id",
+            "partition_path",
+            "num_lines",
+            "start_line",
+            "end_line",
+            "file_size_bytes",
         }
         for meta in result:
             assert required.issubset(meta.keys())
@@ -135,6 +142,7 @@ class TestDynamicPartitionCount:
 # =============================================================
 # Section 3: dynamic_partition() — data completeness
 # =============================================================
+
 
 class TestDynamicPartitionCompleteness:
     """
@@ -170,7 +178,9 @@ class TestDynamicPartitionCompleteness:
         all_lines = []
         for meta in result:
             all_lines.extend(self._read_partition_lines(meta))
-        assert len(all_lines) == len(set(all_lines)), "Duplicate lines found across partitions"
+        assert len(all_lines) == len(set(all_lines)), (
+            "Duplicate lines found across partitions"
+        )
 
     def test_uneven_split_covered(self, file_manager, tmp_path):
         """
@@ -202,6 +212,7 @@ class TestDynamicPartitionCompleteness:
 # =============================================================
 # Section 4: cleanup()
 # =============================================================
+
 
 class TestCleanup:
     """Validate that cleanup() removes all partition files."""

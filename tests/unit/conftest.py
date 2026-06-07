@@ -15,8 +15,7 @@ def spark():
     entire test session. Avoids expensive start/stop per test.
     """
     session = (
-        SparkSession.builder
-        .master("local[2]")
+        SparkSession.builder.master("local[2]")
         .appName("mpj-spark-unit-tests")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
@@ -46,12 +45,14 @@ def push_worker_state(queue, worker_id, centres, row_count, wcss=0.5):
     row_count  : int
     wcss       : float  (default 0.5 — irrelevant for aggregation tests)
     """
-    queue.put({
-        "worker_id": worker_id,
-        "centres":   centres,
-        "row_count": row_count,
-        "wcss":      wcss,
-    })
+    queue.put(
+        {
+            "worker_id": worker_id,
+            "centres": centres,
+            "row_count": row_count,
+            "wcss": wcss,
+        }
+    )
 
 
 # ── Temporary input file factory ─────────────────────────────
@@ -64,8 +65,10 @@ def tmp_text_file(tmp_path):
     Usage:
         path = tmp_text_file(["hello world", "foo bar"], "input.txt")
     """
+
     def _factory(lines, filename="input.txt"):
         p = tmp_path / filename
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return str(p)
+
     return _factory

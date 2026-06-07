@@ -48,9 +48,10 @@ from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
 
 
 def _build_schema(num_features: int) -> StructType:
-    fields = [StructField(f'f{i}', DoubleType(), nullable=True)
-              for i in range(num_features)]
-    fields.append(StructField('label', DoubleType(), nullable=True))
+    fields = [
+        StructField(f"f{i}", DoubleType(), nullable=True) for i in range(num_features)
+    ]
+    fields.append(StructField("label", DoubleType(), nullable=True))
     return StructType(fields)
 
 
@@ -68,13 +69,18 @@ def _write_worker_metrics(worker_id: int, records: list, results_dir: str) -> st
         local_weight_norm, intercept, row_count
     """
     os.makedirs(results_dir, exist_ok=True)
-    path = os.path.join(results_dir, f'worker_{worker_id}_logreg_iter_metrics.csv')
+    path = os.path.join(results_dir, f"worker_{worker_id}_logreg_iter_metrics.csv")
     fieldnames = [
-        'worker_id', 'iteration', 'iter_time_s',
-        'weight_norm', 'weight_delta', 'local_weight_norm',
-        'intercept', 'row_count',
+        "worker_id",
+        "iteration",
+        "iter_time_s",
+        "weight_norm",
+        "weight_delta",
+        "local_weight_norm",
+        "intercept",
+        "row_count",
     ]
-    with open(path, 'w', newline='') as f:
+    with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
@@ -82,9 +88,14 @@ def _write_worker_metrics(worker_id: int, records: list, results_dir: str) -> st
 
 
 ITER_METRICS_FIELDS = [
-    'worker_id', 'iteration', 'iter_time_s',
-    'weight_norm', 'weight_delta', 'local_weight_norm',
-    'intercept', 'row_count',
+    "worker_id",
+    "iteration",
+    "iter_time_s",
+    "weight_norm",
+    "weight_delta",
+    "local_weight_norm",
+    "intercept",
+    "row_count",
 ]
 
 
@@ -95,13 +106,13 @@ def run(
     num_features: int = 10,
     seed: int = 42,
     worker_id: int = 0,
-    allreduce_up_queue=None,    # worker → root
+    allreduce_up_queue=None,  # worker → root
     allreduce_down_queue=None,  # root  → worker
     # Legacy single-queue param kept for backwards compat — ignored when
     # up/down queues are provided.
     allreduce_queue=None,
     num_workers: int = 1,
-    results_dir: str = 'results',
+    results_dir: str = "results",
 ) -> dict:
     """
     Logistic Regression pipeline on a labelled binary-classification CSV.
@@ -117,12 +128,14 @@ def run(
     """
     spark = SparkSession.getActiveSession()
     if spark is None:
-        raise RuntimeError('[LogReg] No active SparkSession found in worker.')
+        raise RuntimeError("[LogReg] No active SparkSession found in worker.")
 
     # Resolve queue handles: prefer explicit up/down; fall back to legacy
     # single-queue mode (up == down) for any caller that hasn't migrated.
-    _up   = allreduce_up_queue   if allreduce_up_queue   is not None else allreduce_queue
-    _down = allreduce_down_queue if allreduce_down_queue is not None else allreduce_queue
+    _up = allreduce_up_queue if allreduce_up_queue is not None else allreduce_queue
+    _down = (
+        allreduce_down_queue if allreduce_down_queue is not None else allreduce_queue
+    )
     use_allreduce = _up is not None and _down is not None
 
     # ─ 1. Load CSV with explicit schema ───────────────────────────────────────────
@@ -130,131 +143,145 @@ def run(
     df_raw = spark.read.csv(partition_path, schema=schema, header=False)
 
     # Drop stray header row (parses as NULLs) and cast label to int
-    df = (df_raw
-          .filter(F.col('f0').isNotNull())
-          .dropna()
-          .withColumn('label', F.col('label').cast(IntegerType())))
+    df = (
+        df_raw.filter(F.col("f0").isNotNull())
+        .dropna()
+        .withColumn("label", F.col("label").cast(IntegerType()))
+    )
 
-    feature_cols = [f'f{i}' for i in range(num_features)]
-    row_count    = df.count()
+    feature_cols = [f"f{i}" for i in range(num_features)]
+    row_count = df.count()
 
     if row_count == 0:
         raise RuntimeError(
-            f'[LogReg Worker {worker_id}] Partition is empty after cleaning. '
-            f'Check --logreg-features matches the dataset (expected {num_features} features).')
+            f"[LogReg Worker {worker_id}] Partition is empty after cleaning. "
+            f"Check --logreg-features matches the dataset (expected {num_features} features)."
+        )
 
-    print(f'[LogReg Worker {worker_id}] reg_param={reg_param} | '
-          f'max_iter={max_iter} | rows={row_count:,} | '
-          f'features={len(feature_cols)} | allreduce={use_allreduce}')
+    print(
+        f"[LogReg Worker {worker_id}] reg_param={reg_param} | "
+        f"max_iter={max_iter} | rows={row_count:,} | "
+        f"features={len(feature_cols)} | allreduce={use_allreduce}"
+    )
 
     # ─ 2. Assemble feature vector ───────────────────────────────────────────────
     assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol='features', handleInvalid='skip')
-    df_vec = assembler.transform(df).select('features', 'label').cache()
+        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
+    )
+    df_vec = assembler.transform(df).select("features", "label").cache()
 
     # ─ 3. Iterative Allreduce training ──────────────────────────────────────────
-    current_weights   = None
+    current_weights = None
     current_intercept = 0.0
-    iterations_done   = 0
-    iter_metrics      = []   # Objective 2a: per-iteration convergence records
-    prev_global_norm  = 0.0  # for weight_delta = ||w_t - w_{t-1}||
+    iterations_done = 0
+    iter_metrics = []  # Objective 2a: per-iteration convergence records
+    prev_global_norm = 0.0  # for weight_delta = ||w_t - w_{t-1}||
 
     for iteration in range(max_iter):
         t_iter = time.perf_counter()
 
         lr = LogisticRegression(
-            featuresCol='features',
-            labelCol='label',
+            featuresCol="features",
+            labelCol="label",
             maxIter=1,
             regParam=reg_param,
             elasticNetParam=0.0,
-            family='binomial',
+            family="binomial",
             fitIntercept=True,
             standardization=True,
         )
         model = lr.fit(df_vec)
 
-        local_weights   = model.coefficients.toArray().tolist()
+        local_weights = model.coefficients.toArray().tolist()
         local_intercept = float(model.intercept)
-        local_norm      = _weight_norm(local_weights)
+        local_norm = _weight_norm(local_weights)
 
         if use_allreduce:
             # Push to root via UP queue
-            _up.put({
-                'type'     : 'weights',
-                'worker_id': worker_id,
-                'iteration': iteration,
-                'weights'  : local_weights,
-                'intercept': local_intercept,
-                'row_count': row_count,
-            })
+            _up.put(
+                {
+                    "type": "weights",
+                    "worker_id": worker_id,
+                    "iteration": iteration,
+                    "weights": local_weights,
+                    "intercept": local_intercept,
+                    "row_count": row_count,
+                }
+            )
 
             # Block on DOWN queue — root writes exactly one msg per worker per iter
             msg = _down.get(timeout=180)
-            if msg.get('type') == 'avg_weights':
-                current_weights   = msg['weights']
-                current_intercept = msg['intercept']
+            if msg.get("type") == "avg_weights":
+                current_weights = msg["weights"]
+                current_intercept = msg["intercept"]
             else:
-                current_weights   = local_weights
+                current_weights = local_weights
                 current_intercept = local_intercept
         else:
-            current_weights   = local_weights
+            current_weights = local_weights
             current_intercept = local_intercept
 
         iterations_done += 1
-        iter_time    = time.perf_counter() - t_iter
-        global_norm  = _weight_norm(current_weights)
+        iter_time = time.perf_counter() - t_iter
+        global_norm = _weight_norm(current_weights)
         weight_delta = abs(global_norm - prev_global_norm)
         prev_global_norm = global_norm
 
         # ── Accumulate per-iteration record (Objective 2a) ───────────────
-        iter_metrics.append({
-            'worker_id'        : worker_id,
-            'iteration'        : iteration + 1,         # 1-based
-            'iter_time_s'      : round(iter_time, 6),
-            'weight_norm'      : round(global_norm, 8), # after Allreduce
-            'weight_delta'     : round(weight_delta, 8),# ||w_t|| - ||w_{t-1}||
-            'local_weight_norm': round(local_norm, 8),  # before Allreduce
-            'intercept'        : round(current_intercept, 8),
-            'row_count'        : row_count,
-        })
+        iter_metrics.append(
+            {
+                "worker_id": worker_id,
+                "iteration": iteration + 1,  # 1-based
+                "iter_time_s": round(iter_time, 6),
+                "weight_norm": round(global_norm, 8),  # after Allreduce
+                "weight_delta": round(weight_delta, 8),  # ||w_t|| - ||w_{t-1}||
+                "local_weight_norm": round(local_norm, 8),  # before Allreduce
+                "intercept": round(current_intercept, 8),
+                "row_count": row_count,
+            }
+        )
 
-        print(f'[LogReg Worker {worker_id}] iter {iteration+1}/{max_iter}  '
-              f'({iter_time:.3f}s)  '
-              f'|w|={global_norm:.4f}  '
-              f'\u0394={weight_delta:.6f}')
+        print(
+            f"[LogReg Worker {worker_id}] iter {iteration + 1}/{max_iter}  "
+            f"({iter_time:.3f}s)  "
+            f"|w|={global_norm:.4f}  "
+            f"\u0394={weight_delta:.6f}"
+        )
 
     # ─ 4. Final accuracy on local partition ──────────────────────────────────
     lr_final = LogisticRegression(
-        featuresCol='features',
-        labelCol='label',
+        featuresCol="features",
+        labelCol="label",
         maxIter=1,
         regParam=reg_param,
         elasticNetParam=0.0,
-        family='binomial',
+        family="binomial",
         fitIntercept=True,
     )
-    model_final    = lr_final.fit(df_vec)
+    model_final = lr_final.fit(df_vec)
     train_accuracy = float(model_final.summary.accuracy)
-    weight_vector  = model_final.coefficients.toArray().tolist()
+    weight_vector = model_final.coefficients.toArray().tolist()
 
-    print(f'[LogReg Worker {worker_id}] Final train accuracy: {train_accuracy:.4f}')
-    print(f'[LogReg Worker {worker_id}] Weight norm: '
-          f'{_weight_norm(weight_vector):.4f}')
+    print(f"[LogReg Worker {worker_id}] Final train accuracy: {train_accuracy:.4f}")
+    print(f"[LogReg Worker {worker_id}] Weight norm: {_weight_norm(weight_vector):.4f}")
 
     df_vec.unpersist()
 
     # ─ 5. Write per-worker metrics CSV ───────────────────────────────────────
     worker_csv_path = _write_worker_metrics(worker_id, iter_metrics, results_dir)
-    print(f'[LogReg Worker {worker_id}] Iter metrics \u2192 {worker_csv_path} '
-          f'({len(iter_metrics)} rows)')
+    print(
+        f"[LogReg Worker {worker_id}] Iter metrics \u2192 {worker_csv_path} "
+        f"({len(iter_metrics)} rows)"
+    )
 
     return {
-        'weight_vector'  : current_weights if current_weights is not None else weight_vector,
-        'intercept'      : current_intercept,
-        'train_accuracy' : train_accuracy,
-        'row_count'      : row_count,
-        'iterations_done': iterations_done,
-        'partition_path' : partition_path,
-        'iter_metrics'   : iter_metrics,   # Objective 2a — consumed by root
+        "weight_vector": current_weights
+        if current_weights is not None
+        else weight_vector,
+        "intercept": current_intercept,
+        "train_accuracy": train_accuracy,
+        "row_count": row_count,
+        "iterations_done": iterations_done,
+        "partition_path": partition_path,
+        "iter_metrics": iter_metrics,  # Objective 2a — consumed by root
     }

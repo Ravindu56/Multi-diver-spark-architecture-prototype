@@ -36,6 +36,7 @@ from mpj_spark.core.root_process import (
 # Section 1: align_centres_hungarian()
 # =============================================================
 
+
 class TestAlignCentresHungarian:
     """
     Tests for the Hungarian-algorithm centroid alignment helper.
@@ -48,7 +49,7 @@ class TestAlignCentresHungarian:
         When reference and candidate are identical, the returned
         centroid list must match reference exactly.
         """
-        ref  = [[1.0, 2.0], [5.0, 6.0], [9.0, 9.0]]
+        ref = [[1.0, 2.0], [5.0, 6.0], [9.0, 9.0]]
         aligned, perm = align_centres_hungarian(ref, ref)
         np.testing.assert_array_almost_equal(aligned, ref)
         assert perm == [0, 1, 2]
@@ -58,14 +59,14 @@ class TestAlignCentresHungarian:
         Candidate with reversed centroid order must be reordered to
         match reference ordering after alignment.
         """
-        ref  = [[0.0, 0.0], [10.0, 10.0]]
+        ref = [[0.0, 0.0], [10.0, 10.0]]
         cand = [[10.0, 10.0], [0.0, 0.0]]  # reversed
         aligned, perm = align_centres_hungarian(ref, cand)
         np.testing.assert_array_almost_equal(aligned, ref)
 
     def test_returns_permutation_list(self):
         """Second return value must be a list of column indices."""
-        ref  = [[1.0, 1.0], [5.0, 5.0]]
+        ref = [[1.0, 1.0], [5.0, 5.0]]
         cand = [[5.0, 5.0], [1.0, 1.0]]
         _, perm = align_centres_hungarian(ref, cand)
         assert isinstance(perm, list)
@@ -73,14 +74,14 @@ class TestAlignCentresHungarian:
 
     def test_three_clusters_correct_permutation(self):
         """3-cluster case: alignment must find the optimal permutation."""
-        ref  = [[0.0], [5.0], [10.0]]
+        ref = [[0.0], [5.0], [10.0]]
         cand = [[10.0], [0.0], [5.0]]  # rotated
         aligned, _ = align_centres_hungarian(ref, cand)
         np.testing.assert_array_almost_equal(aligned, ref)
 
     def test_high_dimensional_centroids(self):
         """Alignment correctness must hold for d=8 feature space."""
-        ref  = [[float(i)] * 8 for i in range(4)]
+        ref = [[float(i)] * 8 for i in range(4)]
         cand = list(reversed(ref))
         aligned, _ = align_centres_hungarian(ref, cand)
         np.testing.assert_array_almost_equal(aligned, ref)
@@ -90,6 +91,7 @@ class TestAlignCentresHungarian:
 # Section 2: aggregate_kmeans_results()
 # =============================================================
 
+
 class TestAggregateKmeansResults:
     """
     Tests for the batch Hungarian K-Means aggregation path
@@ -98,11 +100,11 @@ class TestAggregateKmeansResults:
 
     def _make_worker(self, worker_id, centres, row_count, wcss=1.0):
         return {
-            'worker_id': worker_id,
-            'centres':   centres,
-            'row_count': row_count,
-            'wcss':      wcss,
-            'k':         len(centres),
+            "worker_id": worker_id,
+            "centres": centres,
+            "row_count": row_count,
+            "wcss": wcss,
+            "k": len(centres),
         }
 
     def test_result_has_required_keys(self):
@@ -150,24 +152,22 @@ class TestAggregateKmeansResults:
         w0 = self._make_worker(0, [[0.0, 0.0], [10.0, 10.0]], 100)
         w1 = self._make_worker(1, [[10.0, 10.0], [0.0, 0.0]], 100)  # reversed
         result = aggregate_kmeans_results([w0, w1])
-        assert result["centres"][0][0] < 5.0   # C0 ≈ [0,0]
-        assert result["centres"][1][0] > 5.0   # C1 ≈ [10,10]
+        assert result["centres"][0][0] < 5.0  # C0 ≈ [0,0]
+        assert result["centres"][1][0] > 5.0  # C1 ≈ [10,10]
 
     def test_weighted_average_biased_toward_larger_partition(self):
         """
         Worker 0 has 3x more rows than Worker 1.
         The global centroid must be 75% biased toward Worker 0.
         """
-        w0 = self._make_worker(0, [[0.0]], 300)   # centroid at 0
-        w1 = self._make_worker(1, [[4.0]], 100)   # centroid at 4
+        w0 = self._make_worker(0, [[0.0]], 300)  # centroid at 0
+        w1 = self._make_worker(1, [[4.0]], 100)  # centroid at 4
         result = aggregate_kmeans_results([w0, w1])
         # Expected: 0*0.75 + 4*0.25 = 1.0
         assert result["centres"][0][0] == pytest.approx(1.0)
 
     def test_num_workers_in_result(self):
-        workers = [
-            self._make_worker(i, [[float(i), float(i)]], 50) for i in range(3)
-        ]
+        workers = [self._make_worker(i, [[float(i), float(i)]], 50) for i in range(3)]
         result = aggregate_kmeans_results(workers)
         assert result["num_workers"] == 3
 
@@ -175,6 +175,7 @@ class TestAggregateKmeansResults:
 # =============================================================
 # Section 3: run_logreg_allreduce()
 # =============================================================
+
 
 class TestRunLogregAllreduce:
     """
@@ -188,8 +189,9 @@ class TestRunLogregAllreduce:
     Never share queue state between test methods.
     """
 
-    def _simulate_workers(self, up_queue, num_workers, num_iterations,
-                          num_features, weights_factory=None):
+    def _simulate_workers(
+        self, up_queue, num_workers, num_iterations, num_features, weights_factory=None
+    ):
         """
         Push synthetic weight messages for all workers across all
         iterations onto up_queue, simulating what real worker
@@ -197,15 +199,16 @@ class TestRunLogregAllreduce:
         """
         for _ in range(num_iterations):
             for wid in range(num_workers):
-                w = (weights_factory(wid) if weights_factory
-                     else [1.0] * num_features)
-                up_queue.put({
-                    'type'      : 'weights',
-                    'worker_id' : wid,
-                    'weights'   : w,
-                    'intercept' : 0.1 * wid,
-                    'row_count' : 100,
-                })
+                w = weights_factory(wid) if weights_factory else [1.0] * num_features
+                up_queue.put(
+                    {
+                        "type": "weights",
+                        "worker_id": wid,
+                        "weights": w,
+                        "intercept": 0.1 * wid,
+                        "row_count": 100,
+                    }
+                )
 
     def test_result_keys_complete(self):
         up_q, down_q = Queue(), Queue()
@@ -237,14 +240,26 @@ class TestRunLogregAllreduce:
         FEAT = 4
         # Worker 0: weights = [0]*FEAT, Worker 1: weights = [2]*FEAT
         for _ in range(1):  # single iteration
-            up_q.put({'type':'weights','worker_id':0,
-                      'weights':[0.0]*FEAT,'intercept':0.0,'row_count':100})
-            up_q.put({'type':'weights','worker_id':1,
-                      'weights':[2.0]*FEAT,'intercept':0.0,'row_count':100})
+            up_q.put(
+                {
+                    "type": "weights",
+                    "worker_id": 0,
+                    "weights": [0.0] * FEAT,
+                    "intercept": 0.0,
+                    "row_count": 100,
+                }
+            )
+            up_q.put(
+                {
+                    "type": "weights",
+                    "worker_id": 1,
+                    "weights": [2.0] * FEAT,
+                    "intercept": 0.0,
+                    "row_count": 100,
+                }
+            )
         result = run_logreg_allreduce(up_q, down_q, 2, 1, FEAT)
-        np.testing.assert_array_almost_equal(
-            result["weight_vector"], [1.0] * FEAT
-        )
+        np.testing.assert_array_almost_equal(result["weight_vector"], [1.0] * FEAT)
 
     def test_down_queue_receives_broadcast_messages(self):
         """
@@ -292,6 +307,7 @@ class TestRunLogregAllreduce:
 # Section 4: aggregate_logreg_results()
 # =============================================================
 
+
 class TestAggregateLogregResults:
     """
     Tests for the post-training LogReg result aggregation step.
@@ -299,16 +315,16 @@ class TestAggregateLogregResults:
     real project directory during tests.
     """
 
-    def _make_worker_result(self, worker_id, row_count,
-                            weight_vector, intercept=0.1,
-                            train_accuracy=0.9):
+    def _make_worker_result(
+        self, worker_id, row_count, weight_vector, intercept=0.1, train_accuracy=0.9
+    ):
         return {
-            'worker_id'       : worker_id,
-            'row_count'       : row_count,
-            'weight_vector'   : weight_vector,
-            'intercept'       : intercept,
-            'train_accuracy'  : train_accuracy,
-            'iter_metrics'    : [],
+            "worker_id": worker_id,
+            "row_count": row_count,
+            "weight_vector": weight_vector,
+            "intercept": intercept,
+            "train_accuracy": train_accuracy,
+            "iter_metrics": [],
         }
 
     def test_result_keys_complete(self, tmp_path):
@@ -316,11 +332,15 @@ class TestAggregateLogregResults:
             self._make_worker_result(0, 100, [1.0, 2.0]),
             self._make_worker_result(1, 100, [1.0, 2.0]),
         ]
-        result = aggregate_logreg_results(
-            workers, results_dir=str(tmp_path))
+        result = aggregate_logreg_results(workers, results_dir=str(tmp_path))
         required = {
-            "weight_vector", "intercept", "avg_accuracy",
-            "total_rows", "num_workers", "weight_norm", "agg_mode"
+            "weight_vector",
+            "intercept",
+            "avg_accuracy",
+            "total_rows",
+            "num_workers",
+            "weight_norm",
+            "agg_mode",
         }
         assert required.issubset(result.keys())
 
@@ -355,15 +375,13 @@ class TestAggregateLogregResults:
             self._make_worker_result(1, 100, [0.0, 0.0]),
         ]
         allreduce = {
-            'weight_vector': [9.9, 9.9],
-            'intercept'    : 0.5,
+            "weight_vector": [9.9, 9.9],
+            "intercept": 0.5,
         }
         result = aggregate_logreg_results(
-            workers, allreduce_result=allreduce,
-            results_dir=str(tmp_path))
-        np.testing.assert_array_almost_equal(
-            result["weight_vector"], [9.9, 9.9]
+            workers, allreduce_result=allreduce, results_dir=str(tmp_path)
         )
+        np.testing.assert_array_almost_equal(result["weight_vector"], [9.9, 9.9])
         assert result["agg_mode"] == "Allreduce (FedAvg)"
 
     def test_no_allreduce_uses_row_weighted_mean(self, tmp_path):
@@ -376,8 +394,7 @@ class TestAggregateLogregResults:
             self._make_worker_result(0, 300, [0.0]),
             self._make_worker_result(1, 100, [4.0]),
         ]
-        result = aggregate_logreg_results(
-            workers, results_dir=str(tmp_path))
+        result = aggregate_logreg_results(workers, results_dir=str(tmp_path))
         assert result["weight_vector"][0] == pytest.approx(1.0)
         assert result["agg_mode"] == "Row-weighted mean (no Allreduce)"
 
@@ -394,15 +411,26 @@ class TestAggregateLogregResults:
         workers = [
             self._make_worker_result(0, 100, [1.0, 1.0]),
         ]
-        workers[0]['iter_metrics'] = [{
-            'worker_id': 0, 'iteration': 0, 'iter_time_s': 0.1,
-            'weight_norm': 1.4, 'weight_delta': 0.0,
-            'local_weight_norm': 1.4, 'intercept': 0.1, 'row_count': 100,
-        }]
+        workers[0]["iter_metrics"] = [
+            {
+                "worker_id": 0,
+                "iteration": 0,
+                "iter_time_s": 0.1,
+                "weight_norm": 1.4,
+                "weight_delta": 0.0,
+                "local_weight_norm": 1.4,
+                "intercept": 0.1,
+                "row_count": 100,
+            }
+        ]
         aggregate_logreg_results(
-            workers, results_dir=str(tmp_path),
-            run_id='test_run', num_workers=1,
-            reg_param=0.01, num_features=2
+            workers,
+            results_dir=str(tmp_path),
+            run_id="test_run",
+            num_workers=1,
+            reg_param=0.01,
+            num_features=2,
         )
         import os
-        assert os.path.isfile(str(tmp_path / 'logreg_iter_metrics.csv'))
+
+        assert os.path.isfile(str(tmp_path / "logreg_iter_metrics.csv"))

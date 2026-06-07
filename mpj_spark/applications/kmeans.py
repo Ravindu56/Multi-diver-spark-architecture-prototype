@@ -59,14 +59,12 @@ def _inject_seed_anchors(spark, df_vec, seed_centres: list) -> object:
     initial centres. The anchor rows are numerically negligible
     (k rows vs ~1.4M partition rows).
     """
-    schema = StructType([StructField('features', VectorUDT(), False)])
+    schema = StructType([StructField("features", VectorUDT(), False)])
     anchor_rows = [
-        (Vectors.dense(list(c)),)
-        for c in seed_centres
-        for _ in range(_ANCHOR_WEIGHT)
+        (Vectors.dense(list(c)),) for c in seed_centres for _ in range(_ANCHOR_WEIGHT)
     ]
     df_anchors = spark.createDataFrame(anchor_rows, schema)
-    return df_anchors.union(df_vec)   # anchors FIRST so they are sampled early
+    return df_anchors.union(df_vec)  # anchors FIRST so they are sampled early
 
 
 def run(
@@ -100,41 +98,44 @@ def run(
     """
     spark = SparkSession.getActiveSession()
     if spark is None:
-        raise RuntimeError('[KMeans] No active SparkSession found in worker.')
+        raise RuntimeError("[KMeans] No active SparkSession found in worker.")
 
     # ─ 1. Load CSV --------------------------------------------------------
-    df_raw       = spark.read.csv(partition_path, inferSchema=True, header=False)
+    df_raw = spark.read.csv(partition_path, inferSchema=True, header=False)
     feature_cols = df_raw.columns
     num_features = len(feature_cols)
-    df           = df_raw.dropna()
+    df = df_raw.dropna()
 
     # ─ 2. Assemble feature vector -----------------------------------------
     assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol='features', handleInvalid='skip')
-    df_vec    = assembler.transform(df).select('features')
-    row_count = df_vec.count()   # real row count before any anchors
+        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
+    )
+    df_vec = assembler.transform(df).select("features")
+    row_count = df_vec.count()  # real row count before any anchors
 
     # ─ 3. Choose init strategy based on seed availability -----------------
     use_global_seed = seed_centres is not None and len(seed_centres) == k
 
-    print(f'[KMeans Worker] k={k} | max_iter={max_iter} | seed={seed} | '
-          f"global_seed={'YES' if use_global_seed else 'NO'} | "
-          f'rows={row_count:,}')
+    print(
+        f"[KMeans Worker] k={k} | max_iter={max_iter} | seed={seed} | "
+        f"global_seed={'YES' if use_global_seed else 'NO'} | "
+        f"rows={row_count:,}"
+    )
 
     if use_global_seed:
         # Single-pass init: anchors first + initSteps=1
-        df_train   = _inject_seed_anchors(spark, df_vec, seed_centres)
+        df_train = _inject_seed_anchors(spark, df_vec, seed_centres)
         init_steps = 1
         print(
-            f'[KMeans Worker] Single-pass init: {k} anchor rows prepended '
-            f'(1 per centroid), initSteps=1  '
-            f'[was: {k * 500} anchors, initSteps=2]'
+            f"[KMeans Worker] Single-pass init: {k} anchor rows prepended "
+            f"(1 per centroid), initSteps=1  "
+            f"[was: {k * 500} anchors, initSteps=2]"
         )
     else:
         # Standard k-means|| — no prior knowledge of centres
-        df_train   = df_vec
+        df_train = df_vec
         init_steps = 2
-        print('[KMeans Worker] Standard init: k-means|| initSteps=2 (no seed)')
+        print("[KMeans Worker] Standard init: k-means|| initSteps=2 (no seed)")
 
     df_train = df_train.cache()
 
@@ -143,28 +144,28 @@ def run(
         k=k,
         maxIter=max_iter,
         seed=seed,
-        featuresCol='features',
-        initMode='k-means||',
+        featuresCol="features",
+        initMode="k-means||",
         initSteps=init_steps,
     )
 
     # ─ 5. Fit -------------------------------------------------------------
-    model   = kmeans_est.fit(df_train)
+    model = kmeans_est.fit(df_train)
     centres = [c.tolist() for c in model.clusterCenters()]
-    wcss    = float(model.summary.trainingCost)
+    wcss = float(model.summary.trainingCost)
 
-    print(f'[KMeans Worker] WCSS = {wcss:.4f}')
+    print(f"[KMeans Worker] WCSS = {wcss:.4f}")
     for i, c in enumerate(centres):
-        preview = ', '.join(f'{v:.3f}' for v in c[:4])
+        preview = ", ".join(f"{v:.3f}" for v in c[:4])
         print(f"[KMeans Worker] C{i}: [{preview}{'...' if num_features > 4 else ''}]")
 
     df_train.unpersist()
 
     return {
-        'centres'         : centres,
-        'wcss'            : wcss,
-        'k'               : k,
-        'row_count'       : row_count,
-        'partition_path'  : partition_path,
-        'used_global_seed': use_global_seed,
+        "centres": centres,
+        "wcss": wcss,
+        "k": k,
+        "row_count": row_count,
+        "partition_path": partition_path,
+        "used_global_seed": use_global_seed,
     }
