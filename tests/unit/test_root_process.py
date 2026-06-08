@@ -20,9 +20,10 @@
 #   - Objective 1c: correctness on iterative ML workloads
 #   - Objective 2d: baseline validation helpers
 # =============================================================
+import queue as _threading_queue  # synchronous threading Queue for in-process tests
+
 import pytest
 import numpy as np
-from multiprocessing import Queue
 
 from mpj_spark.core.root_process import (
     align_centres_hungarian,
@@ -183,11 +184,25 @@ class TestRunLogregAllreduce:
     Workers are simulated by pushing messages directly onto the
     up_queue — no real subprocess spawning needed.
 
+    Uses queue.Queue (threading) instead of multiprocessing.Queue.
+    multiprocessing.Queue uses a background OS-pipe feeder thread
+    whose flush is not instantaneous — .empty() can return True
+    immediately after .put() in the same process, causing the
+    down_q drain loop to see 0 messages.  queue.Queue is
+    synchronous: .put() is immediately visible to .empty() and
+    .get_nowait() within the same process, which is correct for
+    these synchronous in-process unit tests.
+
     IMPORTANT: every test creates its OWN fresh Queue pair and calls
     _simulate_workers BEFORE run_logreg_allreduce so that the
     coordinator finds all messages already waiting on up_q.
     Never share queue state between test methods.
     """
+
+    @staticmethod
+    def _make_queues():
+        """Return a fresh (up_q, down_q) pair using threading Queue."""
+        return _threading_queue.Queue(), _threading_queue.Queue()
 
     def _simulate_workers(
         self, up_queue, num_workers, num_iterations, num_features, weights_factory=None
@@ -211,21 +226,21 @@ class TestRunLogregAllreduce:
                 )
 
     def test_result_keys_complete(self):
-        up_q, down_q = Queue(), Queue()
+        up_q, down_q = self._make_queues()
         N, ITERS, FEAT = 2, 3, 4
         self._simulate_workers(up_q, N, ITERS, FEAT)
         result = run_logreg_allreduce(up_q, down_q, N, ITERS, FEAT)
         assert {"weight_vector", "intercept", "iterations_done"}.issubset(result)
 
     def test_iterations_done_matches_config(self):
-        up_q, down_q = Queue(), Queue()
+        up_q, down_q = self._make_queues()
         N, ITERS, FEAT = 2, 5, 3
         self._simulate_workers(up_q, N, ITERS, FEAT)
         result = run_logreg_allreduce(up_q, down_q, N, ITERS, FEAT)
         assert result["iterations_done"] == ITERS
 
     def test_weight_vector_length_matches_features(self):
-        up_q, down_q = Queue(), Queue()
+        up_q, down_q = self._make_queues()
         N, ITERS, FEAT = 3, 2, 6
         self._simulate_workers(up_q, N, ITERS, FEAT)
         result = run_logreg_allreduce(up_q, down_q, N, ITERS, FEAT)
@@ -236,7 +251,7 @@ class TestRunLogregAllreduce:
         Two workers with equal row counts and weights [0,0,...] and
         [2,2,...] respectively. FedAvg must produce [1,1,...] each iter.
         """
-        up_q, down_q = Queue(), Queue()
+        up_q, down_q = self._make_queues()
         FEAT = 4
         # Worker 0: weights = [0]*FEAT, Worker 1: weights = [2]*FEAT
         for _ in range(1):  # single iteration
@@ -267,7 +282,7 @@ class TestRunLogregAllreduce:
         num_workers messages onto down_queue for workers to read.
         Total messages = num_workers * num_iterations.
         """
-        up_q, down_q = Queue(), Queue()
+        up_q, down_q = self._make_queues()
         N, ITERS, FEAT = 3, 2, 4
         self._simulate_workers(up_q, N, ITERS, FEAT)
         run_logreg_allreduce(up_q, down_q, N, ITERS, FEAT)
@@ -286,7 +301,7 @@ class TestRunLogregAllreduce:
         blocks on up_q.get() so messages must already be present.
         Never relies on state left by any other test method.
         """
-        up_q, down_q = Queue(), Queue()
+        up_q, down_q = self._make_queues()
         N, ITERS, FEAT = 2, 1, 3
         # Pre-load all worker messages before the coordinator runs
         self._simulate_workers(up_q, N, ITERS, FEAT)
