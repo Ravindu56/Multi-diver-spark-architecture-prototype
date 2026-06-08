@@ -35,7 +35,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from mpj_spark.applications.kmeans.allreduce import allreduce_centroids
 
@@ -95,8 +94,8 @@ _REMOTE_SUMS   = np.array([[4.0, 2.0], [8.0, 6.0]], dtype=np.float64)
 _REMOTE_COUNTS = np.array([2.0, 2.0], dtype=np.float64)
 
 # Expected global centroids after Allreduce:
-#   global_sums[0]   = [2+4, 4+2] = [6, 6],  global_counts[0] = 4  → centroid = [1.5, 1.5]
-#   global_sums[1]   = [6+8, 8+6] = [14, 14], global_counts[1] = 4 → centroid = [3.5, 3.5]
+#   global_sums[0]   = [2+4, 4+2] = [6, 6],  global_counts[0] = 4  -> centroid = [1.5, 1.5]
+#   global_sums[1]   = [6+8, 8+6] = [14, 14], global_counts[1] = 4 -> centroid = [3.5, 3.5]
 _EXPECTED_CENTROIDS = np.array([[1.5, 1.5], [3.5, 3.5]], dtype=np.float64)
 
 
@@ -186,7 +185,7 @@ def test_allreduce_empty_cluster_reinit():
         result[0], [0.1, 0.2], decimal=10,
         err_msg=f"Empty cluster 0 not reinitialised: got {result[0]}"
     )
-    # Cluster 1 must be unaffected: global_sums[1]=[14,14], counts[1]=4 → [3.5, 3.5]
+    # Cluster 1 must be unaffected: global_sums[1]=[14,14], counts[1]=4 -> [3.5, 3.5]
     np.testing.assert_array_almost_equal(
         result[1], [3.5, 3.5], decimal=10,
         err_msg=f"Non-empty cluster 1 altered: got {result[1]}"
@@ -227,7 +226,7 @@ def test_allreduce_does_not_hang():
         converged_flag = np.zeros(1, dtype=np.int32)
         comm.Bcast([converged_flag, MPI.INT], root=0)
 
-    # n_iters Bcast calls for convergence (no empty clusters → no reinit Bcast)
+    # n_iters Bcast calls for convergence (no empty clusters -> no reinit Bcast)
     assert comm._bcast_calls == n_iters, (
         f"Expected {n_iters} Bcast calls, got {comm._bcast_calls} — "
         "convergence flag must be broadcast on every iteration"
