@@ -71,16 +71,16 @@ def _make_dataset(tmp_dir: str) -> str:
 # Created by rank 0 and broadcast to all ranks so every rank uses the same
 # path (required: partition() reads from a shared filesystem).
 # ---------------------------------------------------------------------------
-_tmp_dir_obj = None   # only rank 0 creates this
-_tmp_dir     = None   # broadcast to all
+_tmp_dir_obj = None  # only rank 0 creates this
+_tmp_dir = None  # broadcast to all
 _dataset_path = None  # broadcast to all
 
 if rank == 0:
-    _tmp_dir_obj  = tempfile.TemporaryDirectory()
-    _tmp_dir      = _tmp_dir_obj.name
+    _tmp_dir_obj = tempfile.TemporaryDirectory()
+    _tmp_dir = _tmp_dir_obj.name
     _dataset_path = _make_dataset(_tmp_dir)
 
-_tmp_dir      = comm.bcast(_tmp_dir,      root=0)
+_tmp_dir = comm.bcast(_tmp_dir, root=0)
 _dataset_path = comm.bcast(_dataset_path, root=0)
 
 
@@ -117,6 +117,7 @@ def spark_partition_session():
 # Tests 1–4 — partition metadata and file visibility (no Spark)
 # ---------------------------------------------------------------------------
 
+
 def test_scatter_metadata_keys():
     """
     partition_and_init_spark() uses comm.scatter() to distribute metadata.
@@ -125,15 +126,17 @@ def test_scatter_metadata_keys():
     """
     # Import only; does not start Spark (metadata path only)
     from mpj_spark.applications.kmeans.partition import _scatter_partition_metadata
+
     meta = _scatter_partition_metadata(
-        comm=comm, rank=rank, size=size,
-        input_file=_dataset_path, output_dir=_tmp_dir,
+        comm=comm,
+        rank=rank,
+        size=size,
+        input_file=_dataset_path,
+        output_dir=_tmp_dir,
     )
     required = {"partition_id", "partition_path", "num_lines", "total_lines"}
     missing = required - set(meta.keys())
-    assert not missing, (
-        f"[rank {rank}] Scatter metadata missing keys: {missing}"
-    )
+    assert not missing, f"[rank {rank}] Scatter metadata missing keys: {missing}"
 
 
 def test_partition_file_exists():
@@ -144,14 +147,16 @@ def test_partition_file_exists():
     to a path visible to all ranks.
     """
     from mpj_spark.applications.kmeans.partition import _scatter_partition_metadata
+
     meta = _scatter_partition_metadata(
-        comm=comm, rank=rank, size=size,
-        input_file=_dataset_path, output_dir=_tmp_dir,
+        comm=comm,
+        rank=rank,
+        size=size,
+        input_file=_dataset_path,
+        output_dir=_tmp_dir,
     )
     path = meta["partition_path"]
-    assert os.path.exists(path), (
-        f"[rank {rank}] Partition file not found: {path}"
-    )
+    assert os.path.exists(path), f"[rank {rank}] Partition file not found: {path}"
 
 
 def test_partition_file_non_empty():
@@ -161,16 +166,18 @@ def test_partition_file_non_empty():
     zero-count cluster on every iteration — triggering the reinit guard.
     """
     from mpj_spark.applications.kmeans.partition import _scatter_partition_metadata
+
     meta = _scatter_partition_metadata(
-        comm=comm, rank=rank, size=size,
-        input_file=_dataset_path, output_dir=_tmp_dir,
+        comm=comm,
+        rank=rank,
+        size=size,
+        input_file=_dataset_path,
+        output_dir=_tmp_dir,
     )
     path = meta["partition_path"]
     with open(path) as f:
         lines = f.readlines()
-    assert len(lines) > 0, (
-        f"[rank {rank}] Partition file is empty: {path}"
-    )
+    assert len(lines) > 0, f"[rank {rank}] Partition file is empty: {path}"
 
 
 def test_total_lines_equal_input():
@@ -180,9 +187,13 @@ def test_total_lines_equal_input():
     complete, non-overlapping cover of the input.
     """
     from mpj_spark.applications.kmeans.partition import _scatter_partition_metadata
+
     meta = _scatter_partition_metadata(
-        comm=comm, rank=rank, size=size,
-        input_file=_dataset_path, output_dir=_tmp_dir,
+        comm=comm,
+        rank=rank,
+        size=size,
+        input_file=_dataset_path,
+        output_dir=_tmp_dir,
     )
     local_lines = meta["num_lines"]
     total_local = comm.reduce(local_lines, op=MPI.SUM, root=0)
@@ -196,6 +207,7 @@ def test_total_lines_equal_input():
 # ---------------------------------------------------------------------------
 # Tests 5–6 — Spark JVM session (skipped if size < 2)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(
     MPI.COMM_WORLD.Get_size() < 2,
@@ -211,9 +223,9 @@ def test_spark_session_live(spark_partition_session):
     _, spark = spark_partition_session
     try:
         result = spark.sparkContext.parallelize([rank]).collect()
-        assert result == [rank], (
-            f"[rank {rank}] Spark parallelize/collect failed: got {result}"
-        )
+        assert result == [
+            rank
+        ], f"[rank {rank}] Spark parallelize/collect failed: got {result}"
     except Exception as e:
         pytest.fail(f"[rank {rank}] Spark session is not usable: {e}")
 
@@ -232,8 +244,8 @@ def test_partition_rdd_readable(spark_partition_session):
     try:
         rdd = spark.sparkContext.textFile(partition_path)
         count = rdd.count()
-        assert count > 0, (
-            f"[rank {rank}] Partition RDD is empty for file: {partition_path}"
-        )
+        assert (
+            count > 0
+        ), f"[rank {rank}] Partition RDD is empty for file: {partition_path}"
     except Exception as e:
         pytest.fail(f"[rank {rank}] Failed to read partition as RDD: {e}")

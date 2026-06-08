@@ -53,7 +53,7 @@ class FakeComm:
 #       = sqrt(3 * 2 * 0.01) = sqrt(0.06) ≈ 0.244949
 _OLD = np.array([[1.0, 1.0], [5.0, 5.0], [9.0, 9.0]], dtype=np.float64)
 _NEW = np.array([[1.1, 1.1], [5.1, 5.1], [9.1, 9.1]], dtype=np.float64)
-_EXPECTED_SHIFT = float(np.linalg.norm(_NEW - _OLD, ord='fro'))  # ≈ 0.244949
+_EXPECTED_SHIFT = float(np.linalg.norm(_NEW - _OLD, ord="fro"))  # ≈ 0.244949
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +61,11 @@ _EXPECTED_SHIFT = float(np.linalg.norm(_NEW - _OLD, ord='fro'))  # ≈ 0.244949
 # ---------------------------------------------------------------------------
 def test_frobenius_shift_arithmetic():
     from mpj_spark.applications.kmeans.convergence import frobenius_shift
+
     result = frobenius_shift(_NEW, _OLD)
-    assert abs(result - _EXPECTED_SHIFT) < 1e-10, (
-        f"Expected {_EXPECTED_SHIFT:.10f}, got {result:.10f}"
-    )
+    assert (
+        abs(result - _EXPECTED_SHIFT) < 1e-10
+    ), f"Expected {_EXPECTED_SHIFT:.10f}, got {result:.10f}"
 
 
 # ---------------------------------------------------------------------------
@@ -72,10 +73,9 @@ def test_frobenius_shift_arithmetic():
 # ---------------------------------------------------------------------------
 def test_frobenius_shift_zero_when_unchanged():
     from mpj_spark.applications.kmeans.convergence import frobenius_shift
+
     result = frobenius_shift(_OLD, _OLD)
-    assert result == 0.0, (
-        f"Expected 0.0 for identical arrays, got {result}"
-    )
+    assert result == 0.0, f"Expected 0.0 for identical arrays, got {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -88,14 +88,10 @@ def test_broadcast_convergence_iteration_1_guard():
     completed — a single-iteration run cannot be called converged.
     """
     from mpj_spark.applications.kmeans.convergence import broadcast_convergence
+
     comm = FakeComm()
-    result = broadcast_convergence(
-        comm=comm, rank=0,
-        shift=0.0, tol=1e-4, iteration=1
-    )
-    assert result is False, (
-        f"Expected False on iteration 1 (guard), got {result}"
-    )
+    result = broadcast_convergence(comm=comm, rank=0, shift=0.0, tol=1e-4, iteration=1)
+    assert result is False, f"Expected False on iteration 1 (guard), got {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -103,14 +99,10 @@ def test_broadcast_convergence_iteration_1_guard():
 # ---------------------------------------------------------------------------
 def test_broadcast_convergence_not_converged():
     from mpj_spark.applications.kmeans.convergence import broadcast_convergence
+
     comm = FakeComm()
-    result = broadcast_convergence(
-        comm=comm, rank=0,
-        shift=0.5, tol=1e-4, iteration=5
-    )
-    assert result is False, (
-        f"Expected False (shift=0.5 >= tol=1e-4), got {result}"
-    )
+    result = broadcast_convergence(comm=comm, rank=0, shift=0.5, tol=1e-4, iteration=5)
+    assert result is False, f"Expected False (shift=0.5 >= tol=1e-4), got {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -118,14 +110,12 @@ def test_broadcast_convergence_not_converged():
 # ---------------------------------------------------------------------------
 def test_broadcast_convergence_converged():
     from mpj_spark.applications.kmeans.convergence import broadcast_convergence
+
     comm = FakeComm()
-    result = broadcast_convergence(
-        comm=comm, rank=0,
-        shift=1e-6, tol=1e-4, iteration=3
-    )
-    assert result is True, (
-        f"Expected True (shift=1e-6 < tol=1e-4, iter=3), got {result}"
-    )
+    result = broadcast_convergence(comm=comm, rank=0, shift=1e-6, tol=1e-4, iteration=3)
+    assert (
+        result is True
+    ), f"Expected True (shift=1e-6 < tol=1e-4, iter=3), got {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +130,7 @@ def test_broadcast_convergence_bcast_call_count():
     from mpj_spark.applications.kmeans.convergence import broadcast_convergence
 
     comm = FakeComm()
-    broadcast_convergence(comm=comm, rank=0, shift=0.5,  tol=1e-4, iteration=2)
+    broadcast_convergence(comm=comm, rank=0, shift=0.5, tol=1e-4, iteration=2)
     broadcast_convergence(comm=comm, rank=0, shift=1e-6, tol=1e-4, iteration=3)
 
     assert comm.bcast_calls == 2, (
@@ -163,27 +153,25 @@ def test_check_and_broadcast_return_type_and_shift():
         check_and_broadcast,
         frobenius_shift,
     )
+
     comm = FakeComm()
 
     converged, shift = check_and_broadcast(
-        comm=comm, rank=0,
+        comm=comm,
+        rank=0,
         new_centroids=_NEW,
         prev_centroids=_OLD,
-        tol=1.0,        # tol large enough that shift < tol → should converge
+        tol=1.0,  # tol large enough that shift < tol → should converge
         iteration=2,
     )
 
     expected_shift = frobenius_shift(_NEW, _OLD)
 
-    assert isinstance(converged, bool), (
-        f"converged must be bool, got {type(converged)}"
-    )
-    assert isinstance(shift, float), (
-        f"shift must be float, got {type(shift)}"
-    )
-    assert abs(shift - expected_shift) < 1e-10, (
-        f"shift={shift:.10f} != frobenius_shift={expected_shift:.10f}"
-    )
-    assert converged is True, (
-        f"Expected True (shift={shift:.6f} < tol=1.0, iter=2), got {converged}"
-    )
+    assert isinstance(converged, bool), f"converged must be bool, got {type(converged)}"
+    assert isinstance(shift, float), f"shift must be float, got {type(shift)}"
+    assert (
+        abs(shift - expected_shift) < 1e-10
+    ), f"shift={shift:.10f} != frobenius_shift={expected_shift:.10f}"
+    assert (
+        converged is True
+    ), f"Expected True (shift={shift:.6f} < tol=1.0, iter=2), got {converged}"

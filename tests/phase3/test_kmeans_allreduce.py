@@ -86,11 +86,11 @@ class FakeComm:
 # ---------------------------------------------------------------------------
 # 2-cluster, 2-dimensional problem.
 # Local rank (rank 0) data:
-_LOCAL_SUMS   = np.array([[2.0, 4.0], [6.0, 8.0]], dtype=np.float64)   # K=2, D=2
-_LOCAL_COUNTS = np.array([2.0, 2.0], dtype=np.float64)                  # 2 pts/cluster
+_LOCAL_SUMS = np.array([[2.0, 4.0], [6.0, 8.0]], dtype=np.float64)  # K=2, D=2
+_LOCAL_COUNTS = np.array([2.0, 2.0], dtype=np.float64)  # 2 pts/cluster
 
 # Remote rank (rank 1) data injected by FakeComm.Allreduce:
-_REMOTE_SUMS   = np.array([[4.0, 2.0], [8.0, 6.0]], dtype=np.float64)
+_REMOTE_SUMS = np.array([[4.0, 2.0], [8.0, 6.0]], dtype=np.float64)
 _REMOTE_COUNTS = np.array([2.0, 2.0], dtype=np.float64)
 
 # Expected global centroids after Allreduce:
@@ -104,6 +104,7 @@ _EXPECTED_CENTROIDS = np.array([[1.5, 1.5], [3.5, 3.5]], dtype=np.float64)
 # ---------------------------------------------------------------------------
 class FakePointsRDD:
     """Minimal Spark RDD stub: takeSample returns one fixed point."""
+
     def takeSample(self, withReplacement, num, seed=None):
         return [[0.1, 0.2]]  # replacement point for empty cluster
 
@@ -122,14 +123,17 @@ def test_allreduce_centroids_arithmetic():
     """
     comm = FakeComm(_REMOTE_SUMS, _REMOTE_COUNTS)
     result = allreduce_centroids(
-        comm=comm, rank=0,
+        comm=comm,
+        rank=0,
         local_sums=_LOCAL_SUMS.copy(),
         local_counts=_LOCAL_COUNTS.copy(),
         points_rdd=fake_points_rdd,
     )
     np.testing.assert_array_almost_equal(
-        result, _EXPECTED_CENTROIDS, decimal=10,
-        err_msg=f"Expected {_EXPECTED_CENTROIDS}, got {result}"
+        result,
+        _EXPECTED_CENTROIDS,
+        decimal=10,
+        err_msg=f"Expected {_EXPECTED_CENTROIDS}, got {result}",
     )
 
 
@@ -144,7 +148,8 @@ def test_allreduce_centroids_dtype():
     """
     comm = FakeComm(_REMOTE_SUMS, _REMOTE_COUNTS)
     result = allreduce_centroids(
-        comm=comm, rank=0,
+        comm=comm,
+        rank=0,
         local_sums=_LOCAL_SUMS.copy(),
         local_counts=_LOCAL_COUNTS.copy(),
         points_rdd=fake_points_rdd,
@@ -169,12 +174,13 @@ def test_allreduce_empty_cluster_reinit():
     Simulated by making the remote count negative enough to cancel local,
     so global_count == 0 for cluster 0.
     """
-    remote_sums_empty   = np.array([[-2.0, -4.0], [8.0, 6.0]], dtype=np.float64)
+    remote_sums_empty = np.array([[-2.0, -4.0], [8.0, 6.0]], dtype=np.float64)
     remote_counts_empty = np.array([-2.0, 2.0], dtype=np.float64)  # cluster 0 total = 0
 
     comm = FakeComm(remote_sums_empty, remote_counts_empty)
     result = allreduce_centroids(
-        comm=comm, rank=0,
+        comm=comm,
+        rank=0,
         local_sums=_LOCAL_SUMS.copy(),
         local_counts=_LOCAL_COUNTS.copy(),
         points_rdd=fake_points_rdd,
@@ -182,18 +188,22 @@ def test_allreduce_empty_cluster_reinit():
 
     # Cluster 0 must have been reinitialised to the sampled point [0.1, 0.2]
     np.testing.assert_array_almost_equal(
-        result[0], [0.1, 0.2], decimal=10,
-        err_msg=f"Empty cluster 0 not reinitialised: got {result[0]}"
+        result[0],
+        [0.1, 0.2],
+        decimal=10,
+        err_msg=f"Empty cluster 0 not reinitialised: got {result[0]}",
     )
     # Cluster 1 must be unaffected: global_sums[1]=[14,14], counts[1]=4 -> [3.5, 3.5]
     np.testing.assert_array_almost_equal(
-        result[1], [3.5, 3.5], decimal=10,
-        err_msg=f"Non-empty cluster 1 altered: got {result[1]}"
+        result[1],
+        [3.5, 3.5],
+        decimal=10,
+        err_msg=f"Non-empty cluster 1 altered: got {result[1]}",
     )
     # Bcast must have been called exactly once (for the one empty cluster)
-    assert comm._bcast_calls == 1, (
-        f"Expected 1 Bcast call for empty-cluster reinit, got {comm._bcast_calls}"
-    )
+    assert (
+        comm._bcast_calls == 1
+    ), f"Expected 1 Bcast call for empty-cluster reinit, got {comm._bcast_calls}"
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +227,8 @@ def test_allreduce_does_not_hang():
 
     for _ in range(n_iters):
         allreduce_centroids(
-            comm=comm, rank=0,
+            comm=comm,
+            rank=0,
             local_sums=_LOCAL_SUMS.copy(),
             local_counts=_LOCAL_COUNTS.copy(),
             points_rdd=fake_points_rdd,
@@ -256,6 +267,7 @@ def test_run_kmeans_allreduce_return_keys():
     }
     from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
     import inspect
+
     src = inspect.getsource(run_kmeans_allreduce)
     for key in required_keys:
         assert f'"{key}"' in src, (

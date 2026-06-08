@@ -33,7 +33,9 @@ from mpj_spark.applications.kmeans.metrics import KMeansMetricsCollector, _ITER_
 # ---------------------------------------------------------------------------
 # Shared helper: build a collector with N pre-recorded iterations
 # ---------------------------------------------------------------------------
-def _make_collector(n_iters: int = 3, rank: int = 0, tmp_dir: str = "/tmp") -> KMeansMetricsCollector:
+def _make_collector(
+    n_iters: int = 3, rank: int = 0, tmp_dir: str = "/tmp"
+) -> KMeansMetricsCollector:
     collector = KMeansMetricsCollector(rank=rank, output_dir=tmp_dir)
     for i in range(1, n_iters + 1):
         collector.record_iteration(
@@ -77,18 +79,18 @@ def test_record_iteration_rounding():
         collector = KMeansMetricsCollector(rank=0, output_dir=tmp)
         collector.record_iteration(
             iteration=1,
-            spark_time_s=1.123456789,   # should round to 6dp → 1.123457
-            sync_time_s=0.111111111,    # → 0.111111
-            iter_time_s=1.234567890,    # → 1.234568
-            centroid_shift=0.123456789, # should round to 8dp → 0.12345679
-            global_wcss=9876.54321,     # should round to 4dp → 9876.5432
+            spark_time_s=1.123456789,  # should round to 6dp → 1.123457
+            sync_time_s=0.111111111,  # → 0.111111
+            iter_time_s=1.234567890,  # → 1.234568
+            centroid_shift=0.123456789,  # should round to 8dp → 0.12345679
+            global_wcss=9876.54321,  # should round to 4dp → 9876.5432
         )
         row = collector._iterations[0]
-        assert row["spark_time_s"]   == round(1.123456789,   6)
-        assert row["sync_time_s"]    == round(0.111111111,   6)
-        assert row["iter_time_s"]    == round(1.234567890,   6)
-        assert row["centroid_shift"] == round(0.123456789,   8)
-        assert row["global_wcss"]    == round(9876.54321,    4)
+        assert row["spark_time_s"] == round(1.123456789, 6)
+        assert row["sync_time_s"] == round(0.111111111, 6)
+        assert row["iter_time_s"] == round(1.234567890, 6)
+        assert row["centroid_shift"] == round(0.123456789, 8)
+        assert row["global_wcss"] == round(9876.54321, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +105,9 @@ def test_sync_overhead_pct_arithmetic():
         # iter 2: sync=0.2, iter=1.2 → 0.2/1.2*100 = 16.6667
         # (values are rounded; compare to 4dp precision)
         for overhead in overheads:
-            assert abs(overhead - round(0.1 / 0.6 * 100.0, 4)) < 1e-3, (
-                f"Unexpected sync overhead: {overhead}"
-            )
+            assert (
+                abs(overhead - round(0.1 / 0.6 * 100.0, 4)) < 1e-3
+            ), f"Unexpected sync overhead: {overhead}"
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +125,9 @@ def test_sync_overhead_pct_zero_iter_time_guard():
             global_wcss=0.0,
         )
         overheads = collector.sync_overhead_pct()
-        assert overheads == [0.0], (
-            f"Expected [0.0] when iter_time_s == 0, got {overheads}"
-        )
+        assert overheads == [
+            0.0
+        ], f"Expected [0.0] when iter_time_s == 0, got {overheads}"
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +141,9 @@ def test_convergence_rate_series():
         # shifts were recorded as 1/i for i in [1, 2, 3]
         expected = [round(1.0 / i, 8) for i in range(1, 4)]
         for actual, exp in zip(rate, expected):
-            assert abs(actual - exp) < 1e-10, (
-                f"Convergence rate mismatch: got {actual}, expected {exp}"
-            )
+            assert (
+                abs(actual - exp) < 1e-10
+            ), f"Convergence rate mismatch: got {actual}, expected {exp}"
 
 
 # ---------------------------------------------------------------------------
@@ -154,9 +156,9 @@ def test_wcss_series():
         assert len(wcss) == 3
         expected = [round(100.0 / i, 4) for i in range(1, 4)]
         for actual, exp in zip(wcss, expected):
-            assert abs(actual - exp) < 1e-6, (
-                f"WCSS series mismatch: got {actual}, expected {exp}"
-            )
+            assert (
+                abs(actual - exp) < 1e-6
+            ), f"WCSS series mismatch: got {actual}, expected {exp}"
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +170,9 @@ def test_summary_table_has_overhead_field():
         table = collector.summary_table()
         assert len(table) == 2
         for row in table:
-            assert "sync_overhead_pct" in row, (
-                f"summary_table row missing 'sync_overhead_pct': {row.keys()}"
-            )
+            assert (
+                "sync_overhead_pct" in row
+            ), f"summary_table row missing 'sync_overhead_pct': {row.keys()}"
             assert isinstance(row["sync_overhead_pct"], float)
 
 
@@ -189,9 +191,7 @@ def test_to_csv_header_and_row_count():
             reader = csv.DictReader(f)
             rows = list(reader)
 
-        assert len(rows) == n_iters, (
-            f"Expected {n_iters} rows, got {len(rows)}"
-        )
+        assert len(rows) == n_iters, f"Expected {n_iters} rows, got {len(rows)}"
         expected_headers = set(_ITER_FIELDS) | {"sync_overhead_pct"}
         assert set(reader.fieldnames) == expected_headers, (
             f"CSV header mismatch: got {set(reader.fieldnames)}, "
@@ -221,14 +221,14 @@ def test_to_json_structure():
         with open(path) as f:
             payload = json.load(f)
 
-        assert "run" in payload,        "Missing 'run' key in JSON output"
+        assert "run" in payload, "Missing 'run' key in JSON output"
         assert "iterations" in payload, "Missing 'iterations' key in JSON output"
-        assert "derived" in payload,    "Missing 'derived' key in JSON output"
+        assert "derived" in payload, "Missing 'derived' key in JSON output"
 
         assert len(payload["iterations"]) == n_iters
         assert len(payload["derived"]["sync_overhead_pct"]) == n_iters
-        assert len(payload["derived"]["convergence_rate"])  == n_iters
-        assert len(payload["derived"]["wcss_series"])        == n_iters
+        assert len(payload["derived"]["convergence_rate"]) == n_iters
+        assert len(payload["derived"]["wcss_series"]) == n_iters
 
 
 # ---------------------------------------------------------------------------
@@ -252,15 +252,17 @@ def test_aggregate_across_ranks_mean():
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 for i, overhead in enumerate(overheads, start=1):
-                    writer.writerow({
-                        "iteration"      : i,
-                        "spark_time_s"   : 0.5,
-                        "sync_time_s"    : 0.1,
-                        "iter_time_s"    : 0.6,
-                        "centroid_shift" : 0.1,
-                        "global_wcss"    : 100.0,
-                        "sync_overhead_pct": overhead,
-                    })
+                    writer.writerow(
+                        {
+                            "iteration": i,
+                            "spark_time_s": 0.5,
+                            "sync_time_s": 0.1,
+                            "iter_time_s": 0.6,
+                            "centroid_shift": 0.1,
+                            "global_wcss": 100.0,
+                            "sync_overhead_pct": overhead,
+                        }
+                    )
 
         agg_path = KMeansMetricsCollector.aggregate_across_ranks(
             output_dir=tmp,
@@ -272,9 +274,9 @@ def test_aggregate_across_ranks_mean():
         rows = list(csv.DictReader(open(agg_path)))
         assert len(rows) == 2, f"Expected 2 aggregated rows, got {len(rows)}"
 
-        assert abs(float(rows[0]["sync_overhead_pct_mean"]) - 20.0) < 1e-4, (
-            f"Iter 1 mean mismatch: {rows[0]['sync_overhead_pct_mean']}"
-        )
-        assert abs(float(rows[1]["sync_overhead_pct_mean"]) - 30.0) < 1e-4, (
-            f"Iter 2 mean mismatch: {rows[1]['sync_overhead_pct_mean']}"
-        )
+        assert (
+            abs(float(rows[0]["sync_overhead_pct_mean"]) - 20.0) < 1e-4
+        ), f"Iter 1 mean mismatch: {rows[0]['sync_overhead_pct_mean']}"
+        assert (
+            abs(float(rows[1]["sync_overhead_pct_mean"]) - 30.0) < 1e-4
+        ), f"Iter 2 mean mismatch: {rows[1]['sync_overhead_pct_mean']}"
