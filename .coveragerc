@@ -1,0 +1,11 @@
+[run]
+parallel = true
+data_file = .coverage
+source = mpj_spark
+
+[report]
+show_missing = true
+omit =
+    */tests/*
+    */venv/*
+    */__pycache__/*
