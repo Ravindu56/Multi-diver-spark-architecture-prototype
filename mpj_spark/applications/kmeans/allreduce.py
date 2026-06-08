@@ -1,84 +1,33 @@
 # =============================================================================
 # mpj_spark/applications/kmeans/allreduce.py
-# Phase 3 — Issue #8 — Step 4: Allreduce Centroid Synchronisation
+# Phase 3 — Issue #8 — Step 4 (refactored for Step 5)
 #
-# PURPOSE
-# -------
-# This module owns the MPI layer of the K-Means iteration loop.  It:
-#
-#   1. Calls compute_local_stats() (Step 3) to obtain per-rank raw centroid
-#      sums and point counts from the local PySpark RDD.
-#   2. Issues two buffer-level comm.Allreduce calls (op=MPI.SUM) to aggregate
-#      local_sums and local_counts across ALL ranks into global totals.
-#   3. Divides global_sums by global_counts to produce the new global centroid
-#      array — the numerically correct synchronous average.
-#   4. Handles empty clusters (global_counts[j] == 0) by re-initialising the
-#      dead centroid from a random data point on rank 0, then broadcasting.
-#   5. Broadcasts a convergence flag from rank 0 so ALL ranks exit the loop
-#      on the same iteration — critical for MPI collective correctness.
-#   6. Records per-iteration timing metrics for experimental evaluation.
-#
-# MPI COLLECTIVE CORRECTNESS RULES
-# ---------------------------------
-# Every comm.Allreduce and comm.bcast call is a COLLECTIVE operation: it
-# must be called by ALL ranks on EVERY iteration with no rank skipping.
-# A single rank exiting the loop early (e.g. due to a local convergence
-# check) while others are still inside Allreduce will cause an MPI deadlock.
-# The convergence check therefore happens on rank 0 only; the result is
-# broadcast to all ranks; all ranks read the same converged flag before
-# deciding whether to continue.
-#
-# BUFFER-LEVEL vs OBJECT-LEVEL Allreduce
-# ----------------------------------------
-# mpi4py supports two calling conventions:
-#   - Object-level (lowercase): comm.allreduce(scalar, op=MPI.SUM)
-#     Pickles Python objects. Convenient but slow for large arrays.
-#   - Buffer-level (uppercase): comm.Allreduce([arr, MPI.DOUBLE], ...)
-#     Passes numpy buffer directly to the MPI C layer. No pickle overhead.
-#     Required for numpy arrays of shape (K, D) to avoid serialisation cost.
-# This module uses buffer-level (uppercase) for all numpy array collectives.
-#
-# METRICS COLLECTED (per iteration)
-# -----------------------------------
-#   sync_time      — wall time inside the two Allreduce calls only
-#   iter_time      — total wall time for one full iteration
-#   centroid_shift — Frobenius norm ||new_centroids - old_centroids||_F
-#   global_wcss    — Within-Cluster Sum of Squares aggregated via Allreduce
-#
-# These feed the project's Synchronization Overhead and Convergence Rate
-# performance metrics (defined in the research scope).
-#
-# BOUNDARY WITH OTHER STEPS
-# --------------------------
-#   Step 2 (partition.py)       : provides partition_path, spark
-#   Step 3 (local_iteration.py) : provides load_partition_rdd,
-#                                  init_centroids, compute_local_stats
-#   Step 4 (this file)          : owns Allreduce + convergence + metrics
-#   Step 5 (convergence.py)     : will add the stopping-criterion check
-#                                  (currently inlined here as a simple
-#                                  Frobenius-norm threshold)
+# CHANGE LOG (Step 5 refactor)
+# ----------------------------
+# - Replaced the inlined convergence block in run_kmeans_allreduce() with
+#   a single call to check_and_broadcast() from convergence.py.
+# - Removes 12 lines of duplicated shift/flag/bcast arithmetic from the
+#   loop body.  All convergence logic now lives in convergence.py.
+# - metrics dict is unchanged — centroid_shift is still recorded per iter.
+# - All other Step 4 logic (buffer-level Allreduce, empty-cluster guard,
+#   WCSS aggregation, comm.Barrier()) is unchanged.
 # =============================================================================
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Sentinel: a global_counts element below this threshold is treated as an
-# empty cluster.  Using a small epsilon (not strict 0.0) guards against
-# floating-point underflow when counts are accumulated across many ranks.
-# ---------------------------------------------------------------------------
 _EMPTY_CLUSTER_THRESHOLD = 0.5
 
 
 # ===========================================================================
-# Core Allreduce primitive
+# Core Allreduce primitive  (unchanged from Step 4)
 # ===========================================================================
 
 def allreduce_centroids(
@@ -92,59 +41,27 @@ def allreduce_centroids(
     Aggregate local centroid sums and counts across all MPI ranks and
     compute the new global centroid array.
 
-    This is the acceptance-criterion function for Issue #8 Step 4.
-    The caller (run_kmeans_allreduce) wraps it with timing.
-
-    Algorithm
-    ---------
-    1. Allreduce local_sums  (K × D, float64) → global_sums
-    2. Allreduce local_counts (K,   float64) → global_counts
-    3. global_centroids[j] = global_sums[j] / global_counts[j]  for all j
-    4. For any j where global_counts[j] < _EMPTY_CLUSTER_THRESHOLD:
-         - Rank 0 samples a random point from its local partition RDD
-           and broadcasts it as the replacement centroid for cluster j.
-         - All ranks update their centroid copy.
-       This prevents a dead centroid from permanently biasing WCSS
-       (the re-init strategy follows k-means|| restart convention).
-
-    Parameters
-    ----------
-    comm          : mpi4py MPI communicator (COMM_WORLD or subset)
-    rank          : this process's rank
-    local_sums    : np.ndarray (K, D) — raw cluster sums from Step 3,
-                    dtype float64, NOT pre-divided
-    local_counts  : np.ndarray (K,)   — raw cluster point counts,
-                    dtype float64, NOT pre-divided
-    points_rdd    : cached PySpark RDD (used only for empty-cluster reinit)
-
-    Returns
-    -------
-    global_centroids : np.ndarray (K, D), dtype float64
+    See Step 4 commit for full algorithm description.
+    Buffer-level MPI.SUM Allreduce on local_sums (K×D) and local_counts (K,).
+    Empty-cluster guard: rank 0 samples a replacement and Bcasts it.
     """
     from mpi4py import MPI
 
     k, d = local_sums.shape
-
     global_sums   = np.zeros_like(local_sums)
     global_counts = np.zeros_like(local_counts)
 
-    # ---- Collective 1: aggregate cluster sums ----------------------------
-    # Buffer-level call: passes the numpy array buffer directly to MPI C
-    # layer — no Python pickling.  Both buffers must be contiguous float64.
     comm.Allreduce(
         [local_sums,   MPI.DOUBLE],
         [global_sums,  MPI.DOUBLE],
         op=MPI.SUM,
     )
-
-    # ---- Collective 2: aggregate cluster counts --------------------------
     comm.Allreduce(
         [local_counts,   MPI.DOUBLE],
         [global_counts,  MPI.DOUBLE],
         op=MPI.SUM,
     )
 
-    # ---- Divide: global sums / global counts → global centroids ----------
     global_centroids = np.zeros((k, d), dtype=np.float64)
     empty_clusters: List[int] = []
 
@@ -152,39 +69,27 @@ def allreduce_centroids(
         if global_counts[j] >= _EMPTY_CLUSTER_THRESHOLD:
             global_centroids[j] = global_sums[j] / global_counts[j]
         else:
-            # Mark for reinit — handled below after all centres are computed
             empty_clusters.append(j)
             logger.warning(
-                "[rank %d] Cluster %d is empty (global_count=%.1f) "
-                "— will reinitialise from rank 0 sample.",
+                "[rank %d] Cluster %d empty (global_count=%.1f) — reinitialising.",
                 rank, j, global_counts[j],
             )
 
-    # ---- Empty-cluster reinitialisation ----------------------------------
-    # Rank 0 picks a random point from its local data for each dead cluster
-    # and broadcasts it.  All ranks replace their copy of that centroid.
-    # This is a collective bcast per empty cluster — all ranks must enter.
     for j in empty_clusters:
         if rank == 0:
-            # takeSample(withReplacement=False, num=1) returns a list of 1
             sample = points_rdd.takeSample(False, 1, seed=int(time.time() * 1000))
             replacement = np.array(sample[0], dtype=np.float64)
         else:
             replacement = np.zeros(d, dtype=np.float64)
-
-        # Collective 3 (conditional): broadcast replacement centroid
         comm.Bcast([replacement, MPI.DOUBLE], root=0)
         global_centroids[j] = replacement
-        logger.info(
-            "[rank %d] Cluster %d reinitialised → %s",
-            rank, j, replacement[:4],
-        )
+        logger.info("[rank %d] Cluster %d reinitialised → %s", rank, j, replacement[:4])
 
     return global_centroids
 
 
 # ===========================================================================
-# Full K-Means Allreduce runner  (Steps 2 + 3 + 4 orchestration)
+# Full K-Means Allreduce runner  (Steps 2 + 3 + 4 + 5 orchestration)
 # ===========================================================================
 
 def run_kmeans_allreduce(
@@ -200,36 +105,16 @@ def run_kmeans_allreduce(
 ) -> Dict:
     """
     Full multi-driver K-Means with synchronous Allreduce centroid sync.
-
-    Orchestrates Steps 2, 3, 4 in sequence and returns per-iteration
-    metrics alongside the final global centroids.
-
-    Parameters
-    ----------
-    comm          : mpi4py COMM_WORLD
-    rank          : this process's MPI rank
-    size          : total number of MPI ranks
-    input_file    : path to full dataset (shared NFS / local)
-    k             : number of clusters
-    max_iter      : maximum iterations before forced stop
-    tol           : convergence threshold — Frobenius norm of centroid shift
-    seed          : random seed for init_centroids
-    cores_override: CPU cores per Spark session (None = auto)
+    Orchestrates Steps 2 → 3 → 4 → 5 in sequence.
 
     Returns
     -------
-    dict with keys:
-        global_centroids  : list[list[float]]  — final K × D centroid coords
-        iterations_run    : int                — iterations until convergence
-        converged         : bool               — True if tol was reached
-        metrics           : list[dict]         — one entry per iteration:
-            {
-              'iteration'     : int,
-              'sync_time_s'   : float,   # wall time inside Allreduce only
-              'iter_time_s'   : float,   # total iteration wall time
-              'centroid_shift': float,   # Frobenius norm
-              'global_wcss'   : float,   # aggregated WCSS across all ranks
-            }
+    dict:
+        global_centroids  : list[list[float]]
+        iterations_run    : int
+        converged         : bool
+        metrics           : list[dict]  — keys: iteration, sync_time_s,
+                            iter_time_s, centroid_shift, global_wcss
         rank              : int
         total_time_s      : float
     """
@@ -240,89 +125,64 @@ def run_kmeans_allreduce(
         init_centroids,
         compute_local_stats,
     )
+    from mpj_spark.applications.kmeans.convergence import check_and_broadcast
 
     t_total_start = time.perf_counter()
     metrics: List[Dict] = []
 
-    # ------------------------------------------------------------------ #
-    # STEP 2: Partition + scatter + per-rank Spark session                #
-    # ------------------------------------------------------------------ #
+    # ---- Step 2: partition + scatter + Spark session -------------------
     partition_path, spark = partition_and_init_spark(
-        comm=comm,
-        rank=rank,
-        size=size,
-        input_file=input_file,
-        num_workers=size,
+        comm=comm, rank=rank, size=size,
+        input_file=input_file, num_workers=size,
         cores_override=cores_override,
     )
 
-    # ------------------------------------------------------------------ #
-    # STEP 3 setup: Load and cache the RDD; initialise centroids         #
-    # ------------------------------------------------------------------ #
+    # ---- Step 3 setup: load RDD + init centroids -----------------------
     points_rdd = load_partition_rdd(spark, partition_path)
-    centroids  = init_centroids(points_rdd, k=k, seed=seed)  # shape (K, D)
+    centroids  = init_centroids(points_rdd, k=k, seed=seed)
 
-    # Barrier: ensure ALL ranks have their RDD cached and initial
-    # centroids computed before the first Allreduce.  Without this,
-    # a slow rank's JVM startup can delay its first Allreduce call while
-    # faster ranks are already inside the collective — causing a hang.
+    # Barrier: all ranks must finish RDD cache + Spark init before loop
     comm.Barrier()
     logger.info("[rank %d] Barrier passed — entering iteration loop", rank)
 
     prev_centroids = np.zeros_like(centroids)
-    converged = False
+    converged      = False
 
-    # ------------------------------------------------------------------ #
-    # MAIN LOOP: Steps 3 + 4 interleaved                                  #
-    # ------------------------------------------------------------------ #
+    # ---- Main loop: Steps 3 + 4 + 5 interleaved -----------------------
     for iteration in range(1, max_iter + 1):
         t_iter_start = time.perf_counter()
 
-        # ---- Step 3: per-rank local stats (one Spark action) -----------
+        # Step 3: one Spark action → local sums + counts
         local_sums, local_counts = compute_local_stats(points_rdd, centroids)
-
-        # Local WCSS: sum of squared distances from each point to its
-        # assigned centroid.  Computed from the same assignment pass
-        # without an extra RDD scan.
         local_wcss = _compute_local_wcss(points_rdd, centroids)
 
-        # ---- Step 4: Allreduce centroid sync ---------------------------
-        t_sync_start = time.perf_counter()
-
+        # Step 4: Allreduce → new global centroids
+        t_sync_start  = time.perf_counter()
         new_centroids = allreduce_centroids(
             comm, rank, local_sums, local_counts, points_rdd
         )
 
-        # Aggregate local WCSS into global WCSS
+        # Aggregate WCSS across all ranks (one extra scalar Allreduce)
         global_wcss_arr = np.array([local_wcss], dtype=np.float64)
         global_wcss_buf = np.zeros(1, dtype=np.float64)
-        comm.Allreduce([global_wcss_arr, MPI.DOUBLE],
-                       [global_wcss_buf,  MPI.DOUBLE], op=MPI.SUM)
+        comm.Allreduce(
+            [global_wcss_arr, MPI.DOUBLE],
+            [global_wcss_buf, MPI.DOUBLE],
+            op=MPI.SUM,
+        )
         global_wcss = float(global_wcss_buf[0])
 
-        t_sync_end = time.perf_counter()
-        sync_time = t_sync_end - t_sync_start
-
-        # ---- Convergence check (rank 0 decides; all ranks obey) --------
-        centroid_shift = float(
-            np.linalg.norm(new_centroids - prev_centroids, ord='fro')
+        # Step 5: convergence check + broadcast
+        # check_and_broadcast() issues comm.Bcast unconditionally so
+        # all ranks execute it on every iteration (collective correctness).
+        converged, centroid_shift = check_and_broadcast(
+            comm, rank, new_centroids, prev_centroids, tol, iteration
         )
 
-        if rank == 0:
-            converged_flag = np.array(
-                [1] if (iteration > 1 and centroid_shift < tol) else [0],
-                dtype=np.int32,
-            )
-        else:
-            converged_flag = np.zeros(1, dtype=np.int32)
+        t_sync_end = time.perf_counter()
+        sync_time  = t_sync_end - t_sync_start
+        iter_time  = time.perf_counter() - t_iter_start
 
-        # Collective: broadcast convergence decision to all ranks
-        comm.Bcast([converged_flag, MPI.INT], root=0)
-
-        t_iter_end = time.perf_counter()
-        iter_time  = t_iter_end - t_iter_start
-
-        # ---- Record metrics --------------------------------------------
         metrics.append({
             "iteration"     : iteration,
             "sync_time_s"   : round(sync_time, 6),
@@ -332,56 +192,39 @@ def run_kmeans_allreduce(
         })
 
         logger.info(
-            "[rank %d] iter=%d  shift=%.6f  wcss=%.2f  "
-            "sync=%.4fs  iter=%.4fs",
-            rank, iteration, centroid_shift, global_wcss,
-            sync_time, iter_time,
+            "[rank %d] iter=%d  shift=%.6f  wcss=%.2f  sync=%.4fs  iter=%.4fs",
+            rank, iteration, centroid_shift, global_wcss, sync_time, iter_time,
         )
 
-        # ---- Update state and check exit condition ---------------------
         prev_centroids = centroids
         centroids      = new_centroids
 
-        if bool(converged_flag[0]):
-            converged = True
+        if converged:
             logger.info(
-                "[rank %d] Converged at iteration %d  (shift=%.6f < tol=%.6f)",
+                "[rank %d] Converged at iteration %d (shift=%.6f < tol=%.6f)",
                 rank, iteration, centroid_shift, tol,
             )
             break
 
-    # ------------------------------------------------------------------ #
-    # Cleanup                                                              #
-    # ------------------------------------------------------------------ #
+    # ---- Cleanup -------------------------------------------------------
     points_rdd.unpersist()
     spark.stop()
 
-    t_total_end  = time.perf_counter()
-    total_time   = t_total_end - t_total_start
-
     return {
-        "global_centroids" : centroids.tolist(),
-        "iterations_run"   : len(metrics),
-        "converged"        : converged,
-        "metrics"          : metrics,
-        "rank"             : rank,
-        "total_time_s"     : round(total_time, 4),
+        "global_centroids": centroids.tolist(),
+        "iterations_run"  : len(metrics),
+        "converged"       : converged,
+        "metrics"         : metrics,
+        "rank"            : rank,
+        "total_time_s"    : round(time.perf_counter() - t_total_start, 4),
     }
 
 
 # ===========================================================================
-# Internal helper — local WCSS without an extra Spark action
+# Internal helper — local WCSS  (unchanged from Step 4)
 # ===========================================================================
 
 def _compute_local_wcss(points_rdd, centroids: np.ndarray) -> float:
-    """
-    Compute Within-Cluster Sum of Squares for this rank's partition.
-
-    Uses a single mapPartitions action that mirrors the assignment logic
-    in compute_local_stats — no additional Spark job.  Called BEFORE
-    Allreduce so that the WCSS aggregation piggybacks on the same sync
-    round (one extra Allreduce scalar, not an extra RDD scan).
-    """
     _centroids = centroids
 
     def _wcss_partition(points_iter):
@@ -392,8 +235,4 @@ def _compute_local_wcss(points_rdd, centroids: np.ndarray) -> float:
             total   += float(np.min(sq_dists))
         yield total
 
-    return float(
-        points_rdd
-        .mapPartitions(_wcss_partition)
-        .sum()
-    )
+    return float(points_rdd.mapPartitions(_wcss_partition).sum())
