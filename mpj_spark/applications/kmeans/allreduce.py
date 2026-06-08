@@ -322,7 +322,7 @@ if __name__ == "__main__":
     if _rank == 0:
         print(
             f"\n{'='*60}\n"
-            f"  K-Means Allreduce — Phase 3 / Issue #8\n"
+            "  K-Means Allreduce — Phase 3 / Issue #8\n"
             f"  ranks={_size}  k={args.k}  max_iter={args.max_iter}  "
             f"tol={args.tol}  seed={args.seed}\n"
             f"  input  : {args.input}\n"
@@ -345,13 +345,13 @@ if __name__ == "__main__":
 
     # Only rank 0 prints the summary table to stdout
     if _rank == 0:
-        print(f"\n{'='*60}")
-        print(f"  Run complete — rank 0 summary")
+        print("\n" + "=" * 60)
+        print("  Run complete — rank 0 summary")
         print(f"  converged      : {result['converged']}")
         print(f"  iterations_run : {result['iterations_run']}")
         print(f"  total_time_s   : {result['total_time_s']}s")
         print(f"  output dir     : {args.output}")
-        print(f"{'='*60}\n")
+        print("=" * 60 + "\n")
 
         print("Per-iteration metrics (rank 0):")
         table = result["metrics"]
