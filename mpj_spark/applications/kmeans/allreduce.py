@@ -18,6 +18,11 @@
 #   run return dict now reads from collector._iterations and collector._run.
 # - All Step 4 and Step 5 logic (Allreduce, empty-cluster guard, WCSS
 #   Allreduce, convergence check, comm.Barrier) is unchanged.
+#
+# CHANGE LOG (__main__ entry-point)
+# ----------------------------------
+# - Added `if __name__ == '__main__':` block with argparse so that
+#   `python -m mpj_spark.applications.kmeans.allreduce` actually runs.
 # =============================================================================
 
 from __future__ import annotations
@@ -104,25 +109,6 @@ def run_kmeans_allreduce(
     """
     Full multi-driver K-Means with synchronous Allreduce centroid sync
     and per-iteration metrics collection (Step 6).
-
-    New parameter
-    -------------
-    metrics_output_dir : str
-        Directory where per-rank CSV and JSON files are written.
-        Rank 0 also writes the aggregated cross-rank CSV here.
-        Default: './metrics' (relative to the working directory).
-
-    Returns
-    -------
-    dict:
-        global_centroids  : list[list[float]]
-        iterations_run    : int
-        converged         : bool
-        metrics           : list[dict]  — one row per iteration with all
-                            6 fields + sync_overhead_pct
-        run_summary       : dict        — run-level fields
-        rank              : int
-        total_time_s      : float
     """
     from mpi4py import MPI
     from mpj_spark.applications.kmeans.partition import partition_and_init_spark
@@ -136,20 +122,19 @@ def run_kmeans_allreduce(
 
     t_total_start = time.perf_counter()
 
-    # Step 6: one collector per rank, writes to metrics_output_dir
     collector = KMeansMetricsCollector(rank=rank, output_dir=metrics_output_dir)
 
-    # ---- Step 2: partition + scatter + Spark session -------------------
+    # Step 2: partition + scatter + Spark session
     partition_path, spark = partition_and_init_spark(
         comm=comm, rank=rank, size=size,
         input_file=input_file, num_workers=size,
         cores_override=cores_override,
     )
 
-    # ---- Step 3 setup: load RDD + init centroids -----------------------
+    # Step 3 setup: load RDD + init centroids
     points_rdd   = load_partition_rdd(spark, partition_path)
     centroids    = init_centroids(points_rdd, k=k, seed=seed)
-    total_points = points_rdd.count()  # used for throughput calculation
+    total_points = points_rdd.count()
 
     comm.Barrier()
     logger.info("[rank %d] Barrier passed — entering iteration loop", rank)
@@ -157,30 +142,21 @@ def run_kmeans_allreduce(
     prev_centroids = np.zeros_like(centroids)
     converged      = False
 
-    # ---- Main loop: Steps 3 + 4 + 5 + 6 interleaved -------------------
+    # Main loop: Steps 3 + 4 + 5 + 6
     for iteration in range(1, max_iter + 1):
         t_iter_start = time.perf_counter()
 
-        # --------------------------------------------------------------- #
-        # Step 3 window: Spark action only                                 #
-        # Timed separately so spark_time_s ≠ sync_time_s in the output.   #
-        # --------------------------------------------------------------- #
         t_spark_start = time.perf_counter()
         local_sums, local_counts = compute_local_stats(points_rdd, centroids)
         local_wcss = _compute_local_wcss(points_rdd, centroids)
         spark_time = time.perf_counter() - t_spark_start
 
-        # --------------------------------------------------------------- #
-        # Step 4 + 5 window: MPI collectives only                          #
-        # Starts at first Allreduce; ends after convergence Bcast.         #
-        # --------------------------------------------------------------- #
         t_sync_start = time.perf_counter()
 
         new_centroids = allreduce_centroids(
             comm, rank, local_sums, local_counts, points_rdd
         )
 
-        # WCSS Allreduce (scalar — counted inside the sync window)
         global_wcss_arr = np.array([local_wcss], dtype=np.float64)
         global_wcss_buf = np.zeros(1, dtype=np.float64)
         comm.Allreduce(
@@ -190,7 +166,6 @@ def run_kmeans_allreduce(
         )
         global_wcss = float(global_wcss_buf[0])
 
-        # Step 5: convergence check + broadcast (inside sync window)
         converged, centroid_shift = check_and_broadcast(
             comm, rank, new_centroids, prev_centroids, tol, iteration
         )
@@ -198,9 +173,6 @@ def run_kmeans_allreduce(
         sync_time = time.perf_counter() - t_sync_start
         iter_time = time.perf_counter() - t_iter_start
 
-        # --------------------------------------------------------------- #
-        # Step 6: record this iteration                                    #
-        # --------------------------------------------------------------- #
         collector.record_iteration(
             iteration=iteration,
             spark_time_s=spark_time,
@@ -227,7 +199,7 @@ def run_kmeans_allreduce(
             )
             break
 
-    # ---- Step 6: run-level record + file output ------------------------
+    # Step 6: run-level record + file output
     total_time = time.perf_counter() - t_total_start
 
     collector.record_run(
@@ -241,9 +213,6 @@ def run_kmeans_allreduce(
     collector.to_csv()
     collector.to_json()
 
-    # Rank 0 produces the cross-rank aggregated CSV after all ranks have
-    # written their individual files.  A Barrier ensures rank 0 does not
-    # read files that other ranks have not yet flushed.
     comm.Barrier()
     if rank == 0:
         try:
@@ -254,7 +223,6 @@ def run_kmeans_allreduce(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Aggregation failed (non-fatal): %s", exc)
 
-    # ---- Cleanup -------------------------------------------------------
     points_rdd.unpersist()
     spark.stop()
 
@@ -285,3 +253,114 @@ def _compute_local_wcss(points_rdd, centroids: np.ndarray) -> float:
         yield total
 
     return float(points_rdd.mapPartitions(_wcss_partition).sum())
+
+
+# ===========================================================================
+# CLI entry-point
+# ===========================================================================
+
+if __name__ == "__main__":
+    import argparse
+    import os
+    import sys
+
+    from mpi4py import MPI
+
+    _comm = MPI.COMM_WORLD
+    _rank = _comm.Get_rank()
+    _size = _comm.Get_size()
+
+    parser = argparse.ArgumentParser(
+        prog="python -m mpj_spark.applications.kmeans.allreduce",
+        description="Multi-driver K-Means with synchronous MPI Allreduce "
+                    "centroid sync (Phase 3 — Issue #8).",
+    )
+    parser.add_argument(
+        "--input", required=True,
+        help="Path to the input CSV file (shared/NFS path visible to all ranks).",
+    )
+    parser.add_argument(
+        "--k", type=int, default=5,
+        help="Number of clusters K (default: 5).",
+    )
+    parser.add_argument(
+        "--max-iter", type=int, default=20,
+        help="Maximum number of iterations (default: 20).",
+    )
+    parser.add_argument(
+        "--tol", type=float, default=1e-4,
+        help="Convergence tolerance — Frobenius centroid shift (default: 1e-4).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for centroid initialisation (default: 42).",
+    )
+    parser.add_argument(
+        "--output", default="./kmeans_results",
+        help="Directory for per-rank metrics CSV/JSON and aggregated CSV "
+             "(default: ./kmeans_results).",
+    )
+    parser.add_argument(
+        "--log-level", default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level for all ranks (default: INFO).",
+    )
+
+    args = parser.parse_args()
+
+    # Configure logging: prefix every line with rank so interleaved output
+    # from 3 mpirun processes is traceable.
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format=f"%(asctime)s [rank {_rank}] %(levelname)s %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
+
+    os.makedirs(args.output, exist_ok=True)
+
+    if _rank == 0:
+        print(
+            f"\n{'='*60}\n"
+            f"  K-Means Allreduce — Phase 3 / Issue #8\n"
+            f"  ranks={_size}  k={args.k}  max_iter={args.max_iter}  "
+            f"tol={args.tol}  seed={args.seed}\n"
+            f"  input  : {args.input}\n"
+            f"  output : {args.output}\n"
+            f"{'='*60}\n",
+            flush=True,
+        )
+
+    result = run_kmeans_allreduce(
+        comm=_comm,
+        rank=_rank,
+        size=_size,
+        input_file=args.input,
+        k=args.k,
+        max_iter=args.max_iter,
+        tol=args.tol,
+        seed=args.seed,
+        metrics_output_dir=args.output,
+    )
+
+    # Only rank 0 prints the summary table to stdout
+    if _rank == 0:
+        print(f"\n{'='*60}")
+        print(f"  Run complete — rank 0 summary")
+        print(f"  converged      : {result['converged']}")
+        print(f"  iterations_run : {result['iterations_run']}")
+        print(f"  total_time_s   : {result['total_time_s']}s")
+        print(f"  output dir     : {args.output}")
+        print(f"{'='*60}\n")
+
+        print("Per-iteration metrics (rank 0):")
+        table = result["metrics"]
+        if table:
+            headers = list(table[0].keys())
+            col_w   = {h: max(len(h), max(len(str(r[h])) for r in table)) for h in headers}
+            header_line = "  ".join(h.ljust(col_w[h]) for h in headers)
+            print(header_line)
+            print("-" * len(header_line))
+            for row in table:
+                print("  ".join(str(row[h]).ljust(col_w[h]) for h in headers))
+        print()
