@@ -109,9 +109,9 @@ def test_mpi_allreduce_scalar_sum():
     local_value = rank  # each rank contributes its own rank index
     global_sum = comm.allreduce(local_value, op=MPI.SUM)
     expected = sum(range(size))  # 0+1+...+(size-1)
-    assert global_sum == expected, (
-        f"Allreduce scalar SUM failed: got {global_sum}, expected {expected}"
-    )
+    assert (
+        global_sum == expected
+    ), f"Allreduce scalar SUM failed: got {global_sum}, expected {expected}"
 
 
 # ---------------------------------------------------------------------------

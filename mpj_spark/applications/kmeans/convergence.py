@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 # 1. Frobenius norm of centroid shift
 # ---------------------------------------------------------------------------
 
+
 def frobenius_shift(
     new_centroids: np.ndarray,
     prev_centroids: np.ndarray,
@@ -98,12 +99,13 @@ def frobenius_shift(
     -------
     float — Frobenius norm of the displacement, >= 0.0
     """
-    return float(np.linalg.norm(new_centroids - prev_centroids, ord='fro'))
+    return float(np.linalg.norm(new_centroids - prev_centroids, ord="fro"))
 
 
 # ---------------------------------------------------------------------------
 # 2. Convergence broadcast
 # ---------------------------------------------------------------------------
+
 
 def broadcast_convergence(
     comm,
@@ -159,13 +161,18 @@ def broadcast_convergence(
             logger.info(
                 "[rank 0] Convergence declared at iteration %d "
                 "(shift=%.8f < tol=%.2e)",
-                iteration, shift, tol,
+                iteration,
+                shift,
+                tol,
             )
         else:
             logger.debug(
                 "[rank 0] Not converged at iteration %d "
                 "(shift=%.8f, tol=%.2e, iter_guard=%s)",
-                iteration, shift, tol, iteration <= 1,
+                iteration,
+                shift,
+                tol,
+                iteration <= 1,
             )
     else:
         # Non-root ranks allocate a zeroed buffer; MPI fills it from root
@@ -181,6 +188,7 @@ def broadcast_convergence(
 # ---------------------------------------------------------------------------
 # 3. Combined check-and-broadcast  (used by allreduce.py loop body)
 # ---------------------------------------------------------------------------
+
 
 def check_and_broadcast(
     comm,
@@ -220,6 +228,6 @@ def check_and_broadcast(
         converged — True if loop should stop (all ranks agree)
         shift     — Frobenius norm value for metrics recording
     """
-    shift     = frobenius_shift(new_centroids, prev_centroids)
+    shift = frobenius_shift(new_centroids, prev_centroids)
     converged = broadcast_convergence(comm, rank, shift, tol, iteration)
     return converged, shift

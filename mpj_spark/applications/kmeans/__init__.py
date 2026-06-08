@@ -9,7 +9,7 @@
 #   from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
 
 from mpj_spark.applications.kmeans.convergence import check_and_broadcast
-from mpj_spark.applications.kmeans.metrics     import KMeansMetricsCollector
+from mpj_spark.applications.kmeans.metrics import KMeansMetricsCollector
 
 __all__ = [
     "check_and_broadcast",

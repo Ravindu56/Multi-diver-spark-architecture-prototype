@@ -154,10 +154,10 @@ class KMeansMetricsCollector:
     """
 
     def __init__(self, rank: int, output_dir: str = "./metrics") -> None:
-        self.rank        = rank
-        self.output_dir  = Path(output_dir)
+        self.rank = rank
+        self.output_dir = Path(output_dir)
         self._iterations: List[Dict] = []
-        self._run:        Optional[Dict] = None
+        self._run: Optional[Dict] = None
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------------
@@ -183,20 +183,24 @@ class KMeansMetricsCollector:
         convergence analysis.
         """
         row = {
-            "iteration"     : int(iteration),
-            "spark_time_s"  : round(float(spark_time_s),   6),
-            "sync_time_s"   : round(float(sync_time_s),    6),
-            "iter_time_s"   : round(float(iter_time_s),    6),
+            "iteration": int(iteration),
+            "spark_time_s": round(float(spark_time_s), 6),
+            "sync_time_s": round(float(sync_time_s), 6),
+            "iter_time_s": round(float(iter_time_s), 6),
             "centroid_shift": round(float(centroid_shift), 8),
-            "global_wcss"   : round(float(global_wcss),    4),
+            "global_wcss": round(float(global_wcss), 4),
         }
         self._iterations.append(row)
         logger.debug(
             "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  "
             "shift=%.6f  wcss=%.2f",
-            self.rank, iteration,
-            spark_time_s, sync_time_s, iter_time_s,
-            centroid_shift, global_wcss,
+            self.rank,
+            iteration,
+            spark_time_s,
+            sync_time_s,
+            iter_time_s,
+            centroid_shift,
+            global_wcss,
         )
 
     def record_run(
@@ -214,19 +218,23 @@ class KMeansMetricsCollector:
         """
         throughput = round(dataset_size / total_time_s, 2) if total_time_s > 0 else 0.0
         self._run = {
-            "rank"          : self.rank,
-            "total_time_s"  : round(float(total_time_s),  4),
+            "rank": self.rank,
+            "total_time_s": round(float(total_time_s), 4),
             "iterations_run": int(iterations_run),
-            "converged"     : bool(converged),
-            "k"             : int(k),
-            "dataset_size"  : int(dataset_size),
-            "num_ranks"     : int(num_ranks),
-            "throughput"    : throughput,
+            "converged": bool(converged),
+            "k": int(k),
+            "dataset_size": int(dataset_size),
+            "num_ranks": int(num_ranks),
+            "throughput": throughput,
         }
         logger.info(
             "[rank %d] Run complete: %d iters, converged=%s, "
             "total=%.2fs, throughput=%.0f pts/s",
-            self.rank, iterations_run, converged, total_time_s, throughput,
+            self.rank,
+            iterations_run,
+            converged,
+            total_time_s,
+            throughput,
         )
 
     # -----------------------------------------------------------------------
@@ -344,12 +352,12 @@ class KMeansMetricsCollector:
         """
         path = self.output_dir / f"kmeans_metrics_rank{self.rank}.json"
         payload = {
-            "run"       : self._run or {},
+            "run": self._run or {},
             "iterations": self._iterations,
-            "derived"   : {
+            "derived": {
                 "sync_overhead_pct": self.sync_overhead_pct(),
-                "convergence_rate" : self.convergence_rate(),
-                "wcss_series"      : self.wcss_series(),
+                "convergence_rate": self.convergence_rate(),
+                "wcss_series": self.wcss_series(),
             },
         }
         with open(path, "w") as f:
@@ -404,9 +412,7 @@ class KMeansMetricsCollector:
                 all_rows[r] = list(csv.DictReader(f))
 
         if not all_rows:
-            raise FileNotFoundError(
-                f"No per-rank CSV files found in {output_dir}"
-            )
+            raise FileNotFoundError(f"No per-rank CSV files found in {output_dir}")
 
         # Iteration count from the first available rank
         first_rank_rows = next(iter(all_rows.values()))
@@ -415,9 +421,9 @@ class KMeansMetricsCollector:
         agg_rows = []
         for i in range(n_iters):
             sync_overheads = []
-            shifts         = []
-            iter_times     = []
-            wcsss          = []
+            shifts = []
+            iter_times = []
+            wcsss = []
 
             for rank_rows in all_rows.values():
                 if i >= len(rank_rows):
@@ -428,19 +434,21 @@ class KMeansMetricsCollector:
                 iter_times.append(float(row["iter_time_s"]))
                 wcsss.append(float(row["global_wcss"]))
 
-            agg_rows.append({
-                "iteration"              : i + 1,
-                "sync_overhead_pct_mean": round(statistics.mean(sync_overheads), 4),
-                "sync_overhead_pct_max" : round(max(sync_overheads), 4),
-                "sync_overhead_pct_min" : round(min(sync_overheads), 4),
-                "centroid_shift_mean"   : round(statistics.mean(shifts), 8),
-                "centroid_shift_max"    : round(max(shifts), 8),
-                "centroid_shift_min"    : round(min(shifts), 8),
-                "iter_time_s_mean"      : round(statistics.mean(iter_times), 6),
-                "iter_time_s_max"       : round(max(iter_times), 6),
-                "iter_time_s_min"       : round(min(iter_times), 6),
-                "global_wcss_mean"      : round(statistics.mean(wcsss), 4),
-            })
+            agg_rows.append(
+                {
+                    "iteration": i + 1,
+                    "sync_overhead_pct_mean": round(statistics.mean(sync_overheads), 4),
+                    "sync_overhead_pct_max": round(max(sync_overheads), 4),
+                    "sync_overhead_pct_min": round(min(sync_overheads), 4),
+                    "centroid_shift_mean": round(statistics.mean(shifts), 8),
+                    "centroid_shift_max": round(max(shifts), 8),
+                    "centroid_shift_min": round(min(shifts), 8),
+                    "iter_time_s_mean": round(statistics.mean(iter_times), 6),
+                    "iter_time_s_max": round(max(iter_times), 6),
+                    "iter_time_s_min": round(min(iter_times), 6),
+                    "global_wcss_mean": round(statistics.mean(wcsss), 4),
+                }
+            )
 
         agg_path = out / "kmeans_metrics_aggregated.csv"
         fieldnames = list(agg_rows[0].keys()) if agg_rows else []

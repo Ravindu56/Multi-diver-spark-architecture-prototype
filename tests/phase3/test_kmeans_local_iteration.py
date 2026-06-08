@@ -28,15 +28,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+
 # ---------------------------------------------------------------------------
 # SparkSession fixture — one session shared across all tests in this module
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def spark():
     from pyspark.sql import SparkSession
+
     sess = (
-        SparkSession.builder
-        .appName("test-kmeans-local-iteration")
+        SparkSession.builder.appName("test-kmeans-local-iteration")
         .master("local[1]")
         .config("spark.driver.memory", "512m")
         .config("spark.ui.enabled", "false")
@@ -56,25 +57,26 @@ def spark():
 # ---------------------------------------------------------------------------
 _CLUSTER0 = np.array([[1.0, 1.0], [1.1, 0.9], [0.9, 1.1], [1.0, 1.0]], dtype=np.float64)
 _CLUSTER1 = np.array([[9.0, 9.0], [9.1, 8.9], [8.9, 9.1], [9.0, 9.0]], dtype=np.float64)
-_ALL_POINTS = np.vstack([_CLUSTER0, _CLUSTER1])   # shape (8, 2)
+_ALL_POINTS = np.vstack([_CLUSTER0, _CLUSTER1])  # shape (8, 2)
 
 # Exact centroids — every point assigned unambiguously
 _CENTROIDS_EXACT = np.array([[1.0, 1.0], [9.0, 9.0]], dtype=np.float64)
 
 # Expected sums and counts for the local partition (all 8 points on one rank)
-_EXPECTED_SUMS = np.array([
-    _CLUSTER0.sum(axis=0),   # cluster 0 sum
-    _CLUSTER1.sum(axis=0),   # cluster 1 sum
-], dtype=np.float64)
+_EXPECTED_SUMS = np.array(
+    [
+        _CLUSTER0.sum(axis=0),  # cluster 0 sum
+        _CLUSTER1.sum(axis=0),  # cluster 1 sum
+    ],
+    dtype=np.float64,
+)
 _EXPECTED_COUNTS = np.array([len(_CLUSTER0), len(_CLUSTER1)], dtype=np.float64)
 
 
 @pytest.fixture(scope="module")
 def points_rdd(spark):
     """Cached RDD of numpy arrays from _ALL_POINTS."""
-    rdd = spark.sparkContext.parallelize(
-        [row for row in _ALL_POINTS]
-    ).cache()
+    rdd = spark.sparkContext.parallelize([row for row in _ALL_POINTS]).cache()
     rdd.count()  # materialise cache
     return rdd
 
@@ -84,11 +86,13 @@ def points_rdd(spark):
 # ---------------------------------------------------------------------------
 def test_init_centroids_shape(spark, points_rdd):
     from mpj_spark.applications.kmeans.local_iteration import init_centroids
+
     k, D = 2, 2
     centroids = init_centroids(points_rdd, k=k, seed=42)
-    assert centroids.shape == (k, D), (
-        f"Expected shape ({k}, {D}), got {centroids.shape}"
-    )
+    assert centroids.shape == (
+        k,
+        D,
+    ), f"Expected shape ({k}, {D}), got {centroids.shape}"
 
 
 # ---------------------------------------------------------------------------
@@ -96,15 +100,16 @@ def test_init_centroids_shape(spark, points_rdd):
 # ---------------------------------------------------------------------------
 def test_init_centroids_within_data_range(spark, points_rdd):
     from mpj_spark.applications.kmeans.local_iteration import init_centroids
+
     centroids = init_centroids(points_rdd, k=2, seed=42)
     data_min = _ALL_POINTS.min()
     data_max = _ALL_POINTS.max()
-    assert np.all(centroids >= data_min - 1e-9), (
-        f"Centroid value below data min ({data_min}): {centroids}"
-    )
-    assert np.all(centroids <= data_max + 1e-9), (
-        f"Centroid value above data max ({data_max}): {centroids}"
-    )
+    assert np.all(
+        centroids >= data_min - 1e-9
+    ), f"Centroid value below data min ({data_min}): {centroids}"
+    assert np.all(
+        centroids <= data_max + 1e-9
+    ), f"Centroid value above data max ({data_max}): {centroids}"
 
 
 # ---------------------------------------------------------------------------
@@ -112,14 +117,16 @@ def test_init_centroids_within_data_range(spark, points_rdd):
 # ---------------------------------------------------------------------------
 def test_compute_local_stats_shapes(spark, points_rdd):
     from mpj_spark.applications.kmeans.local_iteration import compute_local_stats
+
     k, D = 2, 2
     local_sums, local_counts = compute_local_stats(points_rdd, _CENTROIDS_EXACT)
-    assert local_sums.shape == (k, D), (
-        f"local_sums: expected ({k}, {D}), got {local_sums.shape}"
-    )
-    assert local_counts.shape == (k,), (
-        f"local_counts: expected ({k},), got {local_counts.shape}"
-    )
+    assert local_sums.shape == (
+        k,
+        D,
+    ), f"local_sums: expected ({k}, {D}), got {local_sums.shape}"
+    assert local_counts.shape == (
+        k,
+    ), f"local_counts: expected ({k},), got {local_counts.shape}"
 
 
 # ---------------------------------------------------------------------------
@@ -127,14 +134,19 @@ def test_compute_local_stats_shapes(spark, points_rdd):
 # ---------------------------------------------------------------------------
 def test_compute_local_stats_correct_sums(spark, points_rdd):
     from mpj_spark.applications.kmeans.local_iteration import compute_local_stats
+
     local_sums, local_counts = compute_local_stats(points_rdd, _CENTROIDS_EXACT)
 
     np.testing.assert_array_almost_equal(
-        local_sums, _EXPECTED_SUMS, decimal=10,
+        local_sums,
+        _EXPECTED_SUMS,
+        decimal=10,
         err_msg="local_sums do not match expected cluster column sums",
     )
     np.testing.assert_array_almost_equal(
-        local_counts, _EXPECTED_COUNTS, decimal=10,
+        local_counts,
+        _EXPECTED_COUNTS,
+        decimal=10,
         err_msg="local_counts do not match expected cluster sizes",
     )
 
@@ -159,11 +171,12 @@ def test_zero_count_cluster_stays_zero(spark):
     centroids = np.array([[1.0, 1.0], [1000.0, 1000.0]], dtype=np.float64)
     local_sums, local_counts = compute_local_stats(rdd, centroids)
 
-    assert local_counts[1] == 0.0, (
-        f"Expected local_counts[1] == 0 for unreachable centroid, got {local_counts[1]}"
-    )
+    assert (
+        local_counts[1] == 0.0
+    ), f"Expected local_counts[1] == 0 for unreachable centroid, got {local_counts[1]}"
     np.testing.assert_array_equal(
-        local_sums[1], np.zeros(2),
+        local_sums[1],
+        np.zeros(2),
         err_msg="local_sums[1] should be zeros for empty cluster",
     )
     rdd.unpersist()
@@ -183,7 +196,13 @@ def test_rdd_reusable_across_iterations(spark, points_rdd):
     sums1, counts1 = compute_local_stats(points_rdd, _CENTROIDS_EXACT)
     sums2, counts2 = compute_local_stats(points_rdd, _CENTROIDS_EXACT)
 
-    np.testing.assert_array_equal(sums1, sums2,
-        err_msg="local_sums differ across two calls — RDD may have been consumed")
-    np.testing.assert_array_equal(counts1, counts2,
-        err_msg="local_counts differ across two calls — RDD may have been consumed")
+    np.testing.assert_array_equal(
+        sums1,
+        sums2,
+        err_msg="local_sums differ across two calls — RDD may have been consumed",
+    )
+    np.testing.assert_array_equal(
+        counts1,
+        counts2,
+        err_msg="local_counts differ across two calls — RDD may have been consumed",
+    )

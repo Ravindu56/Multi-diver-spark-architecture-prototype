@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 # 1. Data loading
 # ---------------------------------------------------------------------------
 
+
 def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     """
     Load a numeric CSV partition file into a cached numpy-row RDD.
@@ -121,12 +122,7 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
         except ValueError:
             return None
 
-    points_rdd = (
-        raw_rdd
-        .map(_parse_line)
-        .filter(lambda x: x is not None)
-        .cache()
-    )
+    points_rdd = raw_rdd.map(_parse_line).filter(lambda x: x is not None).cache()
 
     # Trigger the cache by counting — ensures data is loaded into memory
     # before the first iteration begins so timing measurements (Step 4)
@@ -134,7 +130,9 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     row_count = points_rdd.count()
     logger.info(
         "[rank local] Loaded %d rows from '%s' (%d features)",
-        row_count, partition_path, n_features,
+        row_count,
+        partition_path,
+        n_features,
     )
     return points_rdd
 
@@ -142,6 +140,7 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
 # ---------------------------------------------------------------------------
 # 2. Centroid initialisation  (k-means++ single-pass)
 # ---------------------------------------------------------------------------
+
 
 def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     """
@@ -205,10 +204,9 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
 
     for _ in range(k - 1):
         # Squared distance from each sample point to the nearest existing centre
-        dists = np.array([
-            min(np.sum((pt - c) ** 2) for c in centres)
-            for pt in sample
-        ])  # shape: (sample_size,)
+        dists = np.array(
+            [min(np.sum((pt - c) ** 2) for c in centres) for pt in sample]
+        )  # shape: (sample_size,)
 
         # Probability proportional to D^2 distance (k-means++ rule)
         probs = dists / dists.sum()
@@ -218,7 +216,9 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     centroids = np.array(centres, dtype=np.float64)  # shape: (k, D)
     logger.info(
         "[rank local] init_centroids: k=%d, D=%d, sample_size=%d",
-        k, centroids.shape[1], sample_size,
+        k,
+        centroids.shape[1],
+        sample_size,
     )
     return centroids
 
@@ -226,6 +226,7 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # 3. Per-iteration local centroid stats  (the core Step 3 output)
 # ---------------------------------------------------------------------------
+
 
 def compute_local_stats(
     points_rdd: RDD,
@@ -297,8 +298,8 @@ def compute_local_stats(
         for pt in points_iter:
             # Vectorised nearest-centroid assignment:
             # diff shape: (K, D);  sq_dists shape: (K,)
-            diff = _centroids - pt          # broadcast subtract
-            sq_dists = np.einsum('ij,ij->i', diff, diff)  # row-wise dot product
+            diff = _centroids - pt  # broadcast subtract
+            sq_dists = np.einsum("ij,ij->i", diff, diff)  # row-wise dot product
             j = int(np.argmin(sq_dists))
             sums[j] += pt
             counts[j] += 1
@@ -315,8 +316,7 @@ def compute_local_stats(
     # One Spark action: mapPartitions → reduceByKey → collect
     # Result: list of (cluster_id, (sum_vec, count)) for clusters with >= 1 point
     raw_results = (
-        points_rdd
-        .mapPartitions(_map_partition)
+        points_rdd.mapPartitions(_map_partition)
         .reduceByKey(_reduce_partition_stats)
         .collect()
     )
