@@ -3,11 +3,12 @@
 # Public API for the logreg MPI-Allreduce subpackage.
 # Steps are implemented as separate modules mirroring the kmeans/ layout:
 #
-#   partition.py      — Step 1 (MPI init rule) + Step 2 (scatter)
-#   allreduce.py      — Steps 3–4 (gradient compute + Allreduce sync)   [pending]
-#   convergence.py    — Step 5 (loss broadcast + stop flag)              [pending]
-#   metrics.py        — Step 6 (per-epoch metric collection)             [pending]
+#   partition.py      — Step 1 (MPI init rule) + Step 2 (scatter)       [done]
+#   local_gradient.py — Steps 3 & 4 (cores formula + gradient RDD)      [done]
+#   allreduce.py      — Steps 5 & 6 (Allreduce sync + full runner)      [done]
+#   metrics.py        — Step 6b (per-epoch metric collection)           [done]
 
 from mpj_spark.applications.logreg.partition import partition_and_init_spark
+from mpj_spark.applications.logreg.allreduce import run_logreg_allreduce
 
-__all__ = ["partition_and_init_spark"]
+__all__ = ["partition_and_init_spark", "run_logreg_allreduce"]
