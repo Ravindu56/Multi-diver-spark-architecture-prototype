@@ -51,7 +51,8 @@
 # CLI ENTRY-POINT
 # ---------------
 #   mpirun -n 3 python -m mpj_spark.applications.logreg.allreduce \
-#       --input /path/to/data.csv --epochs 30 --lr 0.01
+#       --epochs 30 --lr 0.01
+#   (--input defaults to LOGREG_DATASET_PATH from config if omitted)
 # =============================================================================
 
 from __future__ import annotations
@@ -421,6 +422,7 @@ if __name__ == "__main__":
     import sys
 
     from mpi4py import MPI
+    from mpj_spark.config import LOGREG_DATASET_PATH
 
     # Step 1: MPI init FIRST — before any imports that touch Spark
     _comm = MPI.COMM_WORLD
@@ -434,8 +436,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--input",
-        required=True,
-        help="Path to the input CSV file (shared/NFS path visible to all ranks).",
+        required=False,
+        default=LOGREG_DATASET_PATH,
+        help="Path to the input CSV file (shared/NFS path visible to all ranks). "
+             f"Defaults to LOGREG_DATASET_PATH from config: {LOGREG_DATASET_PATH}",
     )
     parser.add_argument(
         "--epochs",
@@ -476,6 +480,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Resolve the input path: if user did not pass --input, the default
+    # from config is used. If the file is still missing, generate it now.
+    from scripts.generate_datasets import ensure_dataset
+    resolved_input = ensure_dataset("logreg", input_file=args.input)
+
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format=f"%(asctime)s [rank {_rank}] %(levelname)s %(name)s — %(message)s",
@@ -491,7 +500,7 @@ if __name__ == "__main__":
             "  LogReg Allreduce — Phase 3 / Issue #9\n"
             f"  ranks={_size}  epochs={args.epochs}  lr={args.lr}  "
             f"tol={args.tol}  seed={args.seed}\n"
-            f"  input  : {args.input}\n"
+            f"  input  : {resolved_input}\n"
             f"  output : {args.output}\n"
             f"{'='*60}\n",
             flush=True,
@@ -501,7 +510,7 @@ if __name__ == "__main__":
         comm=_comm,
         rank=_rank,
         size=_size,
-        input_file=args.input,
+        input_file=resolved_input,
         max_epochs=args.epochs,
         learning_rate=args.lr,
         tol=args.tol,
