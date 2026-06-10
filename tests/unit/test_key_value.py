@@ -10,7 +10,6 @@
 # =============================================================
 from mpj_spark.core.key_value import KeyValueStructure
 
-
 # =============================================================
 # Section 1: Construction helpers
 # =============================================================
@@ -178,17 +177,13 @@ class TestGetTopN:
 
     def test_sorted_descending(self):
         """Results must be ordered highest count first."""
-        kv = KeyValueStructure().from_rdd_collect(
-            [("low", 1), ("mid", 5), ("high", 10)]
-        )
+        kv = KeyValueStructure().from_rdd_collect([("low", 1), ("mid", 5), ("high", 10)])
         result = kv.get_top_n(3)
         counts = [v for _, v in result]
         assert counts == sorted(counts, reverse=True)
 
     def test_top_1_returns_most_frequent(self):
-        kv = KeyValueStructure().from_rdd_collect(
-            [("rare", 1), ("common", 100), ("medium", 10)]
-        )
+        kv = KeyValueStructure().from_rdd_collect([("rare", 1), ("common", 100), ("medium", 10)])
         assert kv.get_top_n(1)[0] == ("common", 100)
 
     def test_n_larger_than_data_returns_all(self):

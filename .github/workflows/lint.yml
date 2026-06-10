@@ -1,40 +1,31 @@
+# .github/workflows/lint.yml
+# Runs ruff lint + format check on every PR targeting dev or main.
+# Pinned to ruff 0.4.10 — matches local dev toolchain.
+
 name: Lint
 
 on:
   pull_request:
-    branches:
-      - dev
-      - master
-  push:
-    branches:
-      - dev
-      - master
+    branches: [dev, main, "feature/**"]
 
 jobs:
   ruff:
-    name: Ruff Code Quality Check
+    name: ruff 0.4.10
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
 
       - name: Install ruff
-        run: pip install ruff==0.4.10
+        run: pip install "ruff==0.4.10"
 
-      - name: Run ruff linter
-        run: |
-          ruff check . \
-            --exclude mpj_spark/benchmarks/reporter.py \
-            --output-format=github
+      - name: ruff check (lint)
+        run: ruff check .
 
-      - name: Run ruff formatter check
-        run: |
-          ruff format --check . \
-            --exclude mpj_spark/benchmarks/reporter.py
+      - name: ruff format check
+        run: ruff format --check .

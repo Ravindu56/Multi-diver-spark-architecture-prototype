@@ -36,7 +36,6 @@
 # =============================================================
 from unittest.mock import MagicMock, patch
 
-
 # =============================================================
 # Section 1: baseline_spark.py  (WordCount baseline)
 # =============================================================
@@ -165,9 +164,7 @@ class TestBaselineKmeansCoreBudget:
     The three core-budget priority levels in run_baseline_kmeans().
     """
 
-    def _run(
-        self, num_workers=2, cores_override=None, baseline_threads=None, total_cores=22
-    ):
+    def _run(self, num_workers=2, cores_override=None, baseline_threads=None, total_cores=22):
         fake_spark = MagicMock()
         fake_sc = MagicMock()
         fake_rdd = MagicMock()
@@ -342,6 +339,7 @@ class TestBaselineHeapGb:
         with patch.dict("sys.modules", {"psutil": mock_psutil}):
             # Re-import to pick up the patched psutil
             import importlib
+
             import mpj_spark.applications.baseline_logreg as mod
 
             importlib.reload(mod)
@@ -377,6 +375,7 @@ class TestBaselineHeapGb:
         original = sys.modules.pop("psutil", None)
         try:
             import importlib
+
             import mpj_spark.applications.baseline_logreg as mod
 
             importlib.reload(mod)

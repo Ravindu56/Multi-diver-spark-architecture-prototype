@@ -26,9 +26,8 @@ import time
 import traceback
 from multiprocessing import Queue
 
-
-from mpj_spark.workers.spark_session import build_spark_session
 from mpj_spark.utils.dev_logger import DevLogger
+from mpj_spark.workers.spark_session import build_spark_session
 
 
 def _tag(worker_id, phase):
@@ -40,9 +39,7 @@ def _tag(worker_id, phase):
 # ================================================================
 
 
-def _reassign_pass(
-    spark, partition_path: str, global_centres: list, worker_id: int
-) -> dict:
+def _reassign_pass(spark, partition_path: str, global_centres: list, worker_id: int) -> dict:
     """
     Option 2 re-assignment pass.
 
@@ -53,8 +50,8 @@ def _reassign_pass(
     import numpy as _np
     from pyspark.ml.feature import VectorAssembler
     from pyspark.sql import functions as F
-    from pyspark.sql.types import IntegerType, DoubleType
-    from pyspark.sql.functions import udf, col
+    from pyspark.sql.functions import col, udf
+    from pyspark.sql.types import DoubleType, IntegerType
 
     centres_bc = spark.sparkContext.broadcast(_np.array(global_centres))
     k = len(global_centres)
@@ -64,9 +61,7 @@ def _reassign_pass(
     feature_cols = df_raw.columns
     df = df_raw.dropna()
 
-    assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
-    )
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     df_vec = assembler.transform(df).select("features")
 
     def assign_cluster(features):
@@ -86,9 +81,7 @@ def _reassign_pass(
         return df_a.drop("features")
 
     df_expanded = expand_to_cols(df_assigned, dims)
-    agg_exprs = [F.sum(f"f{d}").alias(f"s{d}") for d in range(dims)] + [
-        F.count("*").alias("cnt")
-    ]
+    agg_exprs = [F.sum(f"f{d}").alias(f"s{d}") for d in range(dims)] + [F.count("*").alias("cnt")]
     df_agg = df_expanded.groupBy("cluster").agg(*agg_exprs).collect()
 
     cluster_sums = [[0.0] * dims for _ in range(k)]
@@ -102,9 +95,7 @@ def _reassign_pass(
         total_rows += cnt
 
     centres_bc.unpersist()
-    print(
-        f"{_tag(worker_id, 'REASSIGN')} Done — {total_rows:,} rows assigned to {k} clusters"
-    )
+    print(f"{_tag(worker_id, 'REASSIGN')} Done — {total_rows:,} rows assigned to {k} clusters")
     return {
         "cluster_sums": cluster_sums,
         "cluster_counts": cluster_counts,
@@ -232,9 +223,7 @@ def run_worker_core(
             )
 
         else:
-            raise ValueError(
-                f"Unknown app '{app_name}'. Valid: 'wordcount', 'kmeans', 'logreg'"
-            )
+            raise ValueError(f"Unknown app '{app_name}'. Valid: 'wordcount', 'kmeans', 'logreg'")
 
         proc_time = time.perf_counter() - t_proc_start
         print(f"{_tag(worker_id, 'DONE')} {app_name} complete  ({proc_time:.3f}s)")
@@ -262,9 +251,7 @@ def run_worker_core(
             msg = reassign_adapter.get(timeout=300)
             if msg.get("type") == "reassign":
                 global_centres = msg["centres"]
-                reassign_stats = _reassign_pass(
-                    spark, partition_path, global_centres, worker_id
-                )
+                reassign_stats = _reassign_pass(spark, partition_path, global_centres, worker_id)
                 reassign_adapter.put(
                     {
                         "type": "stats",
@@ -357,9 +344,7 @@ def worker_process(
         # Patch init_time into the timing dict (core doesn't know it)
         outcome["timing"]["init_time"] = init_time
         outcome["timing"]["total_time"] = (
-            init_time
-            + outcome["timing"]["load_time"]
-            + outcome["timing"]["processing_time"]
+            init_time + outcome["timing"]["load_time"] + outcome["timing"]["processing_time"]
         )
 
         # Re-log with correct init_time

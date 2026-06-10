@@ -45,9 +45,9 @@
 import time
 import traceback
 
-from mpj_spark.workers.spark_session import build_spark_session
 from mpj_spark.utils.dev_logger import DevLogger
-from mpj_spark.workers.worker_process import run_worker_core, _tag
+from mpj_spark.workers.spark_session import build_spark_session
+from mpj_spark.workers.worker_process import _tag, run_worker_core
 
 # ── MPI tag constants (mirrors root_mpi.py) ─────────────────────────
 TAG_CONFIG = 10
@@ -174,8 +174,7 @@ def run_worker_mpi(comm):
     num_workers = cfg.get("num_workers", 1)
 
     print(
-        f"{_tag(worker_id, 'BOOT')} config received  "
-        f"app={app_name}  partition={partition_path}"
+        f"{_tag(worker_id, 'BOOT')} config received  " f"app={app_name}  partition={partition_path}"
     )
 
     logger = DevLogger(worker_id=worker_id)
@@ -263,9 +262,7 @@ def run_worker_mpi(comm):
     # Patch init_time into the timing dict (core doesn’t know it)
     outcome["timing"]["init_time"] = init_time
     outcome["timing"]["total_time"] = (
-        init_time
-        + outcome["timing"]["load_time"]
-        + outcome["timing"]["processing_time"]
+        init_time + outcome["timing"]["load_time"] + outcome["timing"]["processing_time"]
     )
 
     # Re-log with correct init_time

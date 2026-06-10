@@ -27,7 +27,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from mpj_spark.applications.kmeans.metrics import KMeansMetricsCollector, _ITER_FIELDS
+from mpj_spark.applications.kmeans.metrics import _ITER_FIELDS, KMeansMetricsCollector
 
 
 # ---------------------------------------------------------------------------
@@ -125,9 +125,7 @@ def test_sync_overhead_pct_zero_iter_time_guard():
             global_wcss=0.0,
         )
         overheads = collector.sync_overhead_pct()
-        assert overheads == [
-            0.0
-        ], f"Expected [0.0] when iter_time_s == 0, got {overheads}"
+        assert overheads == [0.0], f"Expected [0.0] when iter_time_s == 0, got {overheads}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +138,7 @@ def test_convergence_rate_series():
         assert len(rate) == 3
         # shifts were recorded as 1/i for i in [1, 2, 3]
         expected = [round(1.0 / i, 8) for i in range(1, 4)]
-        for actual, exp in zip(rate, expected):
+        for actual, exp in zip(rate, expected, strict=False):
             assert (
                 abs(actual - exp) < 1e-10
             ), f"Convergence rate mismatch: got {actual}, expected {exp}"
@@ -155,10 +153,8 @@ def test_wcss_series():
         wcss = collector.wcss_series()
         assert len(wcss) == 3
         expected = [round(100.0 / i, 4) for i in range(1, 4)]
-        for actual, exp in zip(wcss, expected):
-            assert (
-                abs(actual - exp) < 1e-6
-            ), f"WCSS series mismatch: got {actual}, expected {exp}"
+        for actual, exp in zip(wcss, expected, strict=False):
+            assert abs(actual - exp) < 1e-6, f"WCSS series mismatch: got {actual}, expected {exp}"
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +190,7 @@ def test_to_csv_header_and_row_count():
         assert len(rows) == n_iters, f"Expected {n_iters} rows, got {len(rows)}"
         expected_headers = set(_ITER_FIELDS) | {"sync_overhead_pct"}
         assert set(reader.fieldnames) == expected_headers, (
-            f"CSV header mismatch: got {set(reader.fieldnames)}, "
-            f"expected {expected_headers}"
+            f"CSV header mismatch: got {set(reader.fieldnames)}, " f"expected {expected_headers}"
         )
 
 

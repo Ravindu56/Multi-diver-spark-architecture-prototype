@@ -31,8 +31,9 @@
 # ================================================================
 
 import math
-import time
 import threading
+import time
+from datetime import UTC
 
 # ── MPI tag constants (mirrors mpj_spark_mpi.py tag allocation) ──
 TAG_CONFIG = 10
@@ -196,9 +197,7 @@ def run_root_mpi(
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    assert (
-        rank == 0
-    ), f"run_root_mpi() must only be called by rank 0 (called on rank {rank})."
+    assert rank == 0, f"run_root_mpi() must only be called by rank 0 (called on rank {rank})."
     assert size >= 2, (
         f"Need at least 2 MPI ranks (1 root + 1 worker); got size={size}. "
         "Increase -np in your mpirun command."
@@ -216,17 +215,17 @@ def run_root_mpi(
     do_reassign = use_reassign and use_gossip and app == "kmeans"
     do_logreg_allreduce = app == "logreg"
 
-    from mpj_spark.config import TOTAL_CORES, DATA_DIR
-    from mpj_spark.utils.dev_logger import DevLogger
+    from mpj_spark.config import DATA_DIR, TOTAL_CORES
+    from mpj_spark.core.key_value import KeyValueStructure
     from mpj_spark.core.root_process import (
-        dynamic_partition,
-        compute_global_seed_centres,
+        _print_comparison,
+        _print_timing_summary,
         aggregate_kmeans_results,
         aggregate_logreg_results,
-        _print_timing_summary,
-        _print_comparison,
+        compute_global_seed_centres,
+        dynamic_partition,
     )
-    from mpj_spark.core.key_value import KeyValueStructure
+    from mpj_spark.utils.dev_logger import DevLogger
 
     logger = DevLogger(worker_id="root-mpi")
 
@@ -252,9 +251,7 @@ def run_root_mpi(
             f"  Global Seed    : {'ON' if do_seed else 'OFF'}\n"
             f"  Re-assign Pass : {'ON' if do_reassign else 'OFF'}"
         )
-        title_extra = (
-            f"  k={kmeans_k}  max_iter={kmeans_iter}\n  Aggregation : {agg_mode}\n{cf}"
-        )
+        title_extra = f"  k={kmeans_k}  max_iter={kmeans_iter}\n  Aggregation : {agg_mode}\n{cf}"
 
     _hdr(
         f"MPJ-Spark Multi-Driver [MPI]  |  app={app}  |  workers={num_workers}\n"
@@ -264,13 +261,9 @@ def run_root_mpi(
     )
 
     cores = (
-        max(1, cores_override)
-        if cores_override
-        else max(1, math.ceil(TOTAL_CORES / num_workers))
+        max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / num_workers))
     )
-    print(
-        f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)"
-    )
+    print(f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)")
 
     # ═══════════════════════════════════════════════════════════════
     # Phase 0  (optional): Global seed centroids for K-Means
@@ -455,9 +448,7 @@ def run_root_mpi(
                 seed_centres=seed_centres,
             )
             gossip_info = agg
-            _ok(
-                f"Gossip done  rounds={agg['rounds_run']}  converged={agg['converged']}"
-            )
+            _ok(f"Gossip done  rounds={agg['rounds_run']}  converged={agg['converged']}")
         else:
             agg = aggregate_kmeans_results(worker_results)
 
@@ -465,9 +456,9 @@ def run_root_mpi(
         _info(f"Total WCSS : {agg['total_wcss']:.4f}")
 
     elif app == "logreg":
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        _run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         agg = aggregate_logreg_results(
             worker_results,
             allreduce_result=allreduce_result,
@@ -519,9 +510,7 @@ def run_root_mpi(
             total_rows += msg["row_count"]
 
         corrected = [
-            (all_sums[j] / all_counts[j]).tolist()
-            if all_counts[j] > 0
-            else gossip_centres[j]
+            (all_sums[j] / all_counts[j]).tolist() if all_counts[j] > 0 else gossip_centres[j]
             for j in range(k_val)
         ]
         reassign_time = time.perf_counter() - t_reassign
@@ -540,9 +529,7 @@ def run_root_mpi(
     # ═══════════════════════════════════════════════════════════════
     t_wall = load_time + proc_time + agg_time + (reassign_time or 0.0)
     avg_proc = sum(t["processing_time"] for t in worker_timings) / num_workers
-    avg_init = (
-        sum(t["init_time"] for t in worker_timings) / num_workers if prewarm else None
-    )
+    avg_init = sum(t["init_time"] for t in worker_timings) / num_workers if prewarm else None
 
     _print_timing_summary(
         load_time,

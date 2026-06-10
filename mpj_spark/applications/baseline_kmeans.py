@@ -69,9 +69,7 @@ def run_baseline_kmeans(
 
     # ── Build SparkSession ────────────────────────────────────────────
     try:
-        spark = build_spark_session(
-            "Baseline-KMeans", cores_override=cores, num_workers=1
-        )
+        spark = build_spark_session("Baseline-KMeans", cores_override=cores, num_workers=1)
     except TypeError:
         spark = build_spark_session("Baseline-KMeans", cores)
 
@@ -88,7 +86,7 @@ def run_baseline_kmeans(
         try:
             vals = [float(x) for x in line.strip().split(",") if x.strip()]
             return (
-                Row(**dict(zip(feature_cols, vals)))
+                Row(**dict(zip(feature_cols, vals, strict=False)))
                 if len(vals) == num_features
                 else None
             )
@@ -101,9 +99,7 @@ def run_baseline_kmeans(
 
     # ── Assemble + Train ─────────────────────────────────────────────
     t_proc_start = time.perf_counter()
-    assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
-    )
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     df_vec = assembler.transform(df).select("features").cache()
     model = KMeans(
         k=k, maxIter=max_iter, seed=42, featuresCol="features", initMode="k-means||"

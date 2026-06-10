@@ -9,9 +9,10 @@
 #   - Objective 1c: correctness of data distribution to workers
 # =============================================================
 import os
-import pytest
-from mpj_spark.core.file_manager import MPJSparkFileManager
 
+import pytest
+
+from mpj_spark.core.file_manager import MPJSparkFileManager
 
 # =============================================================
 # Fixtures
@@ -153,7 +154,7 @@ class TestDynamicPartitionCompleteness:
 
     def _read_partition_lines(self, meta):
         """Read all non-empty lines from a partition file."""
-        with open(meta["partition_path"], "r", encoding="utf-8") as fh:
+        with open(meta["partition_path"], encoding="utf-8") as fh:
             return [ln.rstrip("\n") for ln in fh if ln.strip()]
 
     def test_no_lines_lost(self, file_manager, tmp_path):
@@ -178,9 +179,7 @@ class TestDynamicPartitionCompleteness:
         all_lines = []
         for meta in result:
             all_lines.extend(self._read_partition_lines(meta))
-        assert len(all_lines) == len(
-            set(all_lines)
-        ), "Duplicate lines found across partitions"
+        assert len(all_lines) == len(set(all_lines)), "Duplicate lines found across partitions"
 
     def test_uneven_split_covered(self, file_manager, tmp_path):
         """

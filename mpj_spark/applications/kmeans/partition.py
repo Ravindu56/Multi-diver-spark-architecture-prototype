@@ -57,9 +57,8 @@
 
 from __future__ import annotations
 
-import os
 import logging
-from typing import Tuple
+import os
 
 from pyspark.sql import SparkSession
 
@@ -79,7 +78,7 @@ def partition_and_init_spark(
     cores_override: int | None = None,
     memory_fraction: float = 0.75,
     shared_storage_path: str = SHARED_STORAGE_PATH,
-) -> Tuple[str, SparkSession]:
+) -> tuple[str, SparkSession]:
     """
     Partition the dataset on rank 0 and scatter metadata; every rank
     creates its own isolated PySpark session over its data shard.
@@ -144,8 +143,7 @@ def partition_and_init_spark(
 
     if my_metadata is None:
         raise RuntimeError(
-            f"[rank {rank}] received None from scatter — "
-            "num_workers may be less than MPI size."
+            f"[rank {rank}] received None from scatter — " "num_workers may be less than MPI size."
         )
 
     partition_path: str = my_metadata["partition_path"]

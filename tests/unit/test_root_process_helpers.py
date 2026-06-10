@@ -31,17 +31,16 @@
 import os
 import queue  # <-- threading Queue, not multiprocessing
 import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
 from mpj_spark.core.root_process import (
+    compute_global_seed_centres,
     dynamic_partition,
     reassign_pass_root,
-    compute_global_seed_centres,
 )
-
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures
@@ -64,24 +63,18 @@ def small_csv(tmp_path):
 
 class TestDynamicPartitionHelper:
     def test_returns_list_of_paths(self, small_csv, tmp_path):
-        paths = dynamic_partition(
-            small_csv, num_partitions=3, output_dir=str(tmp_path / "out")
-        )
+        paths = dynamic_partition(small_csv, num_partitions=3, output_dir=str(tmp_path / "out"))
         assert isinstance(paths, list)
         assert len(paths) == 3
 
     def test_all_paths_exist_on_disk(self, small_csv, tmp_path):
-        paths = dynamic_partition(
-            small_csv, num_partitions=2, output_dir=str(tmp_path / "out")
-        )
+        paths = dynamic_partition(small_csv, num_partitions=2, output_dir=str(tmp_path / "out"))
         for p in paths:
             assert os.path.isfile(p), f"Partition file missing: {p}"
 
     def test_no_lines_lost(self, small_csv, tmp_path):
         """Union of all partition lines == original file lines."""
-        paths = dynamic_partition(
-            small_csv, num_partitions=4, output_dir=str(tmp_path / "out")
-        )
+        paths = dynamic_partition(small_csv, num_partitions=4, output_dir=str(tmp_path / "out"))
         with open(small_csv, encoding="utf-8") as f:
             original = set(f.readlines())
         recovered = set()
@@ -97,15 +90,11 @@ class TestDynamicPartitionHelper:
         assert os.path.isdir(output_dir)
 
     def test_single_partition_returns_one_path(self, small_csv, tmp_path):
-        paths = dynamic_partition(
-            small_csv, num_partitions=1, output_dir=str(tmp_path / "out")
-        )
+        paths = dynamic_partition(small_csv, num_partitions=1, output_dir=str(tmp_path / "out"))
         assert len(paths) == 1
 
     def test_paths_are_strings(self, small_csv, tmp_path):
-        paths = dynamic_partition(
-            small_csv, num_partitions=2, output_dir=str(tmp_path / "out")
-        )
+        paths = dynamic_partition(small_csv, num_partitions=2, output_dir=str(tmp_path / "out"))
         for p in paths:
             assert isinstance(p, str)
 
@@ -277,9 +266,7 @@ class TestComputeGlobalSeedCentres:
             patch(f"{MODULE}.Process", return_value=mock_proc),
             pytest.raises(RuntimeError, match="subprocess exited with code 1"),
         ):
-            compute_global_seed_centres(
-                input_file=str(tmp_path / "d.csv"), k=2, total_cores=2
-            )
+            compute_global_seed_centres(input_file=str(tmp_path / "d.csv"), k=2, total_cores=2)
 
     def test_worker_error_status_raises_runtime_error(self, tmp_path):
         mock_q = MagicMock()
@@ -294,6 +281,4 @@ class TestComputeGlobalSeedCentres:
             patch(f"{MODULE}.Process", return_value=mock_proc),
             pytest.raises(RuntimeError, match="seeding worker failed"),
         ):
-            compute_global_seed_centres(
-                input_file=str(tmp_path / "d.csv"), k=2, total_cores=2
-            )
+            compute_global_seed_centres(input_file=str(tmp_path / "d.csv"), k=2, total_cores=2)

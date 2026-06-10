@@ -8,15 +8,16 @@
 #   - Objective 1b: cross-driver parameter synchronization
 #   - Objective 1c: correctness on iterative ML workloads
 # =============================================================
-import pytest
-import numpy as np
 from multiprocessing import Queue
+
+import numpy as np
+import pytest
 
 from mpj_spark.core.gossip_aggregator import (
     GossipAggregator,
     _hungarian_align,
-    _weighted_avg,
     _per_worker_drift,
+    _weighted_avg,
 )
 from tests.unit.conftest import push_worker_state
 
@@ -268,9 +269,7 @@ class TestGossipAggregatorEdgeCases:
         agg = GossipAggregator(num_workers=2, verbose=False)
         result = agg.aggregate(q)
         for entry in result["round_log"]:
-            assert {"round", "fanout", "max_drift", "per_worker_drift"}.issubset(
-                entry.keys()
-            )
+            assert {"round", "fanout", "max_drift", "per_worker_drift"}.issubset(entry.keys())
 
 
 class TestGossipAggregatorSeedCentres:

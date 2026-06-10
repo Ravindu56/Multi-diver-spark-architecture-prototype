@@ -113,9 +113,7 @@ def test_broadcast_convergence_converged():
 
     comm = FakeComm()
     result = broadcast_convergence(comm=comm, rank=0, shift=1e-6, tol=1e-4, iteration=3)
-    assert (
-        result is True
-    ), f"Expected True (shift=1e-6 < tol=1e-4, iter=3), got {result}"
+    assert result is True, f"Expected True (shift=1e-6 < tol=1e-4, iter=3), got {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +132,7 @@ def test_broadcast_convergence_bcast_call_count():
     broadcast_convergence(comm=comm, rank=0, shift=1e-6, tol=1e-4, iteration=3)
 
     assert comm.bcast_calls == 2, (
-        f"Expected 2 Bcast calls (one per broadcast_convergence call), "
-        f"got {comm.bcast_calls}"
+        f"Expected 2 Bcast calls (one per broadcast_convergence call), " f"got {comm.bcast_calls}"
     )
 
 

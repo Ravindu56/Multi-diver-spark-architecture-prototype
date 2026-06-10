@@ -83,7 +83,6 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +155,8 @@ class KMeansMetricsCollector:
     def __init__(self, rank: int, output_dir: str = "./metrics") -> None:
         self.rank = rank
         self.output_dir = Path(output_dir)
-        self._iterations: List[Dict] = []
-        self._run: Optional[Dict] = None
+        self._iterations: list[dict] = []
+        self._run: dict | None = None
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------------
@@ -192,8 +191,7 @@ class KMeansMetricsCollector:
         }
         self._iterations.append(row)
         logger.debug(
-            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  "
-            "shift=%.6f  wcss=%.2f",
+            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  " "shift=%.6f  wcss=%.2f",
             self.rank,
             iteration,
             spark_time_s,
@@ -228,8 +226,7 @@ class KMeansMetricsCollector:
             "throughput": throughput,
         }
         logger.info(
-            "[rank %d] Run complete: %d iters, converged=%s, "
-            "total=%.2fs, throughput=%.0f pts/s",
+            "[rank %d] Run complete: %d iters, converged=%s, " "total=%.2fs, throughput=%.0f pts/s",
             self.rank,
             iterations_run,
             converged,
@@ -241,7 +238,7 @@ class KMeansMetricsCollector:
     # Derived metrics
     # -----------------------------------------------------------------------
 
-    def sync_overhead_pct(self) -> List[float]:
+    def sync_overhead_pct(self) -> list[float]:
         """
         Synchronization Overhead (%) per iteration.
 
@@ -264,7 +261,7 @@ class KMeansMetricsCollector:
             result.append(round(pct, 4))
         return result
 
-    def convergence_rate(self) -> List[float]:
+    def convergence_rate(self) -> list[float]:
         """
         Centroid shift series across all recorded iterations.
 
@@ -280,7 +277,7 @@ class KMeansMetricsCollector:
         """
         return [row["centroid_shift"] for row in self._iterations]
 
-    def wcss_series(self) -> List[float]:
+    def wcss_series(self) -> list[float]:
         """
         Global WCSS values across iterations.
         Should be monotonically non-increasing for correct Allreduce sync.
@@ -289,7 +286,7 @@ class KMeansMetricsCollector:
         """
         return [row["global_wcss"] for row in self._iterations]
 
-    def summary_table(self) -> List[Dict]:
+    def summary_table(self) -> list[dict]:
         """
         Return a list of dicts enriched with sync_overhead_pct for
         display or logging.  Each dict contains all _ITER_FIELDS plus
@@ -297,7 +294,7 @@ class KMeansMetricsCollector:
         """
         overheads = self.sync_overhead_pct()
         table = []
-        for row, overhead in zip(self._iterations, overheads):
+        for row, overhead in zip(self._iterations, overheads, strict=False):
             enriched = dict(row)
             enriched["sync_overhead_pct"] = overhead
             table.append(enriched)
@@ -325,7 +322,7 @@ class KMeansMetricsCollector:
         with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            for row, overhead in zip(self._iterations, overheads):
+            for row, overhead in zip(self._iterations, overheads, strict=False):
                 writer.writerow({**row, "sync_overhead_pct": overhead})
 
         logger.info("[rank %d] Metrics CSV written → %s", self.rank, path)
@@ -402,7 +399,7 @@ class KMeansMetricsCollector:
         out = Path(output_dir)
 
         # Load all per-rank CSVs
-        all_rows: Dict[int, List[Dict]] = {}  # rank → list of row dicts
+        all_rows: dict[int, list[dict]] = {}  # rank → list of row dicts
         for r in range(num_ranks):
             csv_path = out / f"kmeans_metrics_rank{r}.csv"
             if not csv_path.exists():
