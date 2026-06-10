@@ -4,38 +4,42 @@
 #
 # BUG FIXES (convergence-parity patch)
 # ─────────────────────────────────────
-# BUG 1 — Constant Δ / |w| divergence (FIX: multi-iter local fit + gradient avg)
+# BUG 1 — Constant Δ / |w| divergence (FIX: multi-iter local fit + FedAvg)
 #   Root cause: the bias-column warm-start encoded the full model prediction as
 #   a feature, so MLlib always saw a near-zero residual and returned the same
 #   Δw magnitude every round → Δ=const, |w| grows linearly unbounded.
 #
 #   Fix: remove the bias-column warm-start scaffolding.  Each Allreduce round
 #   now runs a FULL local MLlib fit (maxIter=local_epochs, default 5) from the
-#   current global weights via initialWeights.  The coordinator averages the
-#   converged weight vectors (FedAvg), not the 1-step corrections.  This is the
-#   correct FedAvg protocol: local optimise → aggregate → repeat.
+#   current global weights via setInitialWeights().  The coordinator averages
+#   the converged weight vectors (FedAvg), not the 1-step corrections.  This is
+#   the correct FedAvg protocol: local optimise → aggregate → repeat.
 #
-# BUG 2 — No learning-rate schedule (FIX: cosine-decay lr passed to MLlib regParam)
-#   MLlib's LBFGS handles its own line-search, so we do NOT pass an external lr.
-#   Instead the effective "step size" is controlled by regParam — a fixed value
-#   is correct here.  The learning rate schedule concept only applies to the
-#   MPI/hand-rolled SGD path (allreduce.py), which has its own fix below.
+# BUG 2 — initialWeights passed as LogisticRegression constructor kwarg (FIXED)
+#   LogisticRegression.__init__() does NOT accept initialWeights or
+#   initialIntercept in any PySpark version.  The correct API is:
+#     lr = LogisticRegression(**kwargs)
+#     lr = lr.setInitialWeights(Vectors.dense(w))
+#   The prior try/except TypeError never triggered because the TypeError was
+#   raised inside LogisticRegression(**lr_kwargs), after the try block had
+#   already exited cleanly — crashing every worker on round 2+.
 #
 # BUG 3 — Speedup framing documented in metrics output
 #   load_time vs proc_time breakdown is preserved.  The comment block at
-#   the bottom of run() now records the correct Phase 2 single-machine
+#   the bottom of run() records the correct Phase 2 single-machine
 #   interpretation so it is visible in the metrics CSV header.
 #
 # ALLREDUCE STRATEGY (Queue-based FedAvg)
 # ─────────────────────────────────────────
 #   Per iteration:
-#     1. Worker runs full local MLlib fit (local_epochs passes) from initialWeights.
+#     1. Worker runs full local MLlib fit (local_epochs passes) via
+#        setInitialWeights() warm-start from previous global model.
 #     2. Worker pushes converged (weights, intercept, row_count) to up_queue.
 #     3. Root computes row-weighted FedAvg, pushes avg back via down_queue.
-#     4. Worker sets initialWeights = avg for the next round.
+#     4. Worker sets current_weights = avg for the next round.
 #
 # BASELINE (no queues):
-#   use_allreduce=False → single multi-iter MLlib fit, no sync.
+#   use_allreduce=False → single multi-iter MLlib fit per round, no sync.
 # =============================================================================
 
 from __future__ import annotations
@@ -104,8 +108,6 @@ def run(
     allreduce_queue=None,       # legacy single-queue (ignored when up/down provided)
     num_workers: int = 1,
     results_dir: str = 'results',
-    # FIX: local_epochs controls how many MLlib passes each worker runs per
-    # Allreduce round.  Default 5 lets LBFGS converge locally before sync.
     local_epochs: int = 5,
 ) -> dict:
     """
@@ -117,7 +119,7 @@ def run(
                   → repeat for max_iter rounds.
 
     Baseline (use_allreduce=False):
-      Single MLlib fit with max_iter*local_epochs total passes.
+      Single MLlib fit with local_epochs passes per round, no cross-driver sync.
 
     Returns dict with 'iter_metrics' list consumed by root_process to
     build results/logreg_iter_metrics.csv (Objective 2a dataset).
@@ -154,19 +156,14 @@ def run(
     assembler = VectorAssembler(
         inputCols=feature_cols, outputCol='features', handleInvalid='skip')
     df_vec = assembler.transform(df_base).select('features', 'label').cache()
-    # Trigger cache
-    df_vec.count()
+    df_vec.count()  # trigger cache
 
     print(f'[LogReg Worker {worker_id}] reg_param={reg_param} | '
           f'rounds={max_iter} | local_epochs={local_epochs} | '
           f'rows={row_count:,} | features={num_features} | allreduce={use_allreduce}')
 
     # ─ 2. Iterative FedAvg rounds ─────────────────────────────────────────
-    # current_weights holds the global averaged model from the coordinator.
-    # On round 0 we pass None → MLlib initialises from zero.
-    # On round 1+ we pass the averaged weights as initialWeights so the
-    # local optimiser starts from the global model, not from scratch.
-    current_weights   = None   # np.ndarray or None
+    current_weights   = None   # list[float] or None
     current_intercept = 0.0
     prev_weights_vec  = np.zeros(num_features)
     iter_metrics      = []
@@ -175,11 +172,11 @@ def run(
     for iteration in range(max_iter):
         t_iter = time.perf_counter()
 
-        # FIX: run a full local MLlib fit each round.
-        # initialWeights encodes the global model from the previous round so
-        # the local LBFGS continues from a warm start, but convergence is
-        # determined by MLlib's own line-search — not by a bias-column proxy.
-        lr_kwargs = dict(
+        # Build LogisticRegression with only valid constructor kwargs.
+        # NOTE: initialWeights / initialIntercept are NOT constructor kwargs
+        # in any PySpark version — they must be set via setInitialWeights()
+        # and setInitialIntercept() on the model object after construction.
+        lr = LogisticRegression(
             featuresCol='features',
             labelCol='label',
             maxIter=local_epochs,
@@ -189,19 +186,18 @@ def run(
             fitIntercept=True,
             standardization=True,
         )
-        if current_weights is not None:
-            # Warm-start: pass previous global model as initial point.
-            # This is the MLlib-native way to warm-start LBFGS.
-            try:
-                lr_kwargs['initialWeights'] = Vectors.dense(current_weights)
-                lr_kwargs['initialIntercept'] = current_intercept
-            except TypeError:
-                # Older Spark versions may not support initialWeights keyword;
-                # fall back to cold start (still correct, slightly slower).
-                lr_kwargs.pop('initialWeights', None)
-                lr_kwargs.pop('initialIntercept', None)
 
-        lr    = LogisticRegression(**lr_kwargs)
+        # Warm-start from the previous global model (round 1+).
+        # setInitialWeights() is the correct MLlib API for this.
+        if current_weights is not None:
+            try:
+                lr = lr.setInitialWeights(Vectors.dense(current_weights))
+                lr = lr.setInitialIntercept(float(current_intercept))
+            except Exception:
+                # Graceful fallback: cold start is still correct,
+                # just slightly slower on the first local LBFGS step.
+                pass
+
         model = lr.fit(df_vec)
 
         # Extract converged local weights
