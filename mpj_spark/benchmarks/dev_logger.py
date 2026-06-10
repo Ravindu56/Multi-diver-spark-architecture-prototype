@@ -19,11 +19,11 @@
 #   with open('logs/dev/dev_runs.jsonl') as f:
 #       runs = [json.loads(line) for line in f]
 # ============================================================
-import os
-import json
 import datetime
-import platform
+import json
 import multiprocessing
+import os
+import platform
 
 LOG_DIR = os.path.join("logs", "dev")
 JSONL_FILE = os.path.join(LOG_DIR, "dev_runs.jsonl")
@@ -47,9 +47,7 @@ class DevLogger:
         os.makedirs(log_dir, exist_ok=True)
 
     # ----------------------------------------------------------
-    def log_run(
-        self, run_config: dict, multi_timing: dict, std_timing: dict = None
-    ) -> str:
+    def log_run(self, run_config: dict, multi_timing: dict, std_timing: dict = None) -> str:
         """
         Record one complete test run.
 
@@ -87,9 +85,7 @@ class DevLogger:
                 "app": run_config.get("app", "wordcount"),
                 "prewarm": run_config.get("prewarm", True),
                 "cores_per_entity": run_config.get("cores_per_entity"),
-                "jvm_mode": "pre-warmed"
-                if run_config.get("prewarm", True)
-                else "cold-start",
+                "jvm_mode": "pre-warmed" if run_config.get("prewarm", True) else "cold-start",
             },
             "multi_driver": {
                 "load_time": round(multi_timing.get("load_time", 0.0), 4),
@@ -116,9 +112,7 @@ class DevLogger:
 
             record["speedup"] = {
                 "load": sp(std_timing["load_time"], multi_timing["load_time"]),
-                "processing": sp(
-                    std_timing["processing_time"], multi_timing["processing_time"]
-                ),
+                "processing": sp(std_timing["processing_time"], multi_timing["processing_time"]),
                 "total": sp(std_timing["total_time"], multi_timing["total_time"]),
             }
 
@@ -176,7 +170,7 @@ class DevLogger:
         """
         if not os.path.exists(self.jsonl_path):
             return []
-        with open(self.jsonl_path, "r", encoding="utf-8") as f:
+        with open(self.jsonl_path, encoding="utf-8") as f:
             return [json.loads(line) for line in f if line.strip()]
 
     # ----------------------------------------------------------

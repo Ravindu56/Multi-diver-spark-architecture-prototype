@@ -39,7 +39,7 @@ from pyspark.ml.clustering import KMeans
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.linalg import Vectors, VectorUDT
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField
+from pyspark.sql.types import StructField, StructType
 
 # One anchor per centroid is sufficient when initSteps=1:
 # the single oversampling pass already concentrates candidates
@@ -60,9 +60,7 @@ def _inject_seed_anchors(spark, df_vec, seed_centres: list) -> object:
     (k rows vs ~1.4M partition rows).
     """
     schema = StructType([StructField("features", VectorUDT(), False)])
-    anchor_rows = [
-        (Vectors.dense(list(c)),) for c in seed_centres for _ in range(_ANCHOR_WEIGHT)
-    ]
+    anchor_rows = [(Vectors.dense(list(c)),) for c in seed_centres for _ in range(_ANCHOR_WEIGHT)]
     df_anchors = spark.createDataFrame(anchor_rows, schema)
     return df_anchors.union(df_vec)  # anchors FIRST so they are sampled early
 
@@ -107,9 +105,7 @@ def run(
     df = df_raw.dropna()
 
     # ─ 2. Assemble feature vector -----------------------------------------
-    assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
-    )
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     df_vec = assembler.transform(df).select("features")
     row_count = df_vec.count()  # real row count before any anchors
 

@@ -233,9 +233,7 @@ def mpj_root_process(input_file_path, num_workers):
     file_manager = MPJSparkFileManager()
 
     load_start = time.time()
-    partition_metadata_list = file_manager.dynamic_partition(
-        input_file_path, num_workers
-    )
+    partition_metadata_list = file_manager.dynamic_partition(input_file_path, num_workers)
     load_end = time.time()
     load_time = load_end - load_start
 
@@ -262,9 +260,7 @@ def mpj_root_process(input_file_path, num_workers):
         )
         workers.append(p)
         p.start()
-        print(
-            f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) with independent Spark Driver"
-        )
+        print(f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) with independent Spark Driver")
 
     # === PHASE 3: Wait for all workers ===
     print(f"\n[ROOT] Phase 3: Waiting for {num_workers} workers to complete...")
@@ -475,12 +471,8 @@ The partition size affects network bandwidth during data transfer between comput
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="MPJ-SPARK Multi-Driver WordCount Prototype"
-    )
-    parser.add_argument(
-        "--workers", type=int, default=4, help="Number of MPJ workers (default: 4)"
-    )
+    parser = argparse.ArgumentParser(description="MPJ-SPARK Multi-Driver WordCount Prototype")
+    parser.add_argument("--workers", type=int, default=4, help="Number of MPJ workers (default: 4)")
     parser.add_argument("--input", type=str, default=None, help="Input text file path")
     parser.add_argument(
         "--generate",
@@ -488,9 +480,7 @@ if __name__ == "__main__":
         default=50,
         help="Generate test dataset of N MB (default: 50)",
     )
-    parser.add_argument(
-        "--compare", action="store_true", help="Run comparison with standard Spark"
-    )
+    parser.add_argument("--compare", action="store_true", help="Run comparison with standard Spark")
 
     args = parser.parse_args()
 
@@ -510,9 +500,7 @@ if __name__ == "__main__":
         print("\n" + "=" * 70)
         print("  COMPARISON: Multi-Driver vs Standard Spark")
         print("=" * 70)
-        print(
-            f"  {'Metric':<25} {'Multi-Driver':>15} {'Standard Spark':>15} {'Speedup':>10}"
-        )
+        print(f"  {'Metric':<25} {'Multi-Driver':>15} {'Standard Spark':>15} {'Speedup':>10}")
         print(f"  {'-' * 65}")
         print(
             f"  {'Load Time (sec)':<25} {multi_timing['load_time']:>15.4f} {std_timing['load_time']:>15.4f} {std_timing['load_time'] / max(multi_timing['load_time'], 0.001):>9.2f}x"

@@ -48,9 +48,7 @@ from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
 
 
 def _build_schema(num_features: int) -> StructType:
-    fields = [
-        StructField(f"f{i}", DoubleType(), nullable=True) for i in range(num_features)
-    ]
+    fields = [StructField(f"f{i}", DoubleType(), nullable=True) for i in range(num_features)]
     fields.append(StructField("label", DoubleType(), nullable=True))
     return StructType(fields)
 
@@ -133,9 +131,7 @@ def run(
     # Resolve queue handles: prefer explicit up/down; fall back to legacy
     # single-queue mode (up == down) for any caller that hasn't migrated.
     _up = allreduce_up_queue if allreduce_up_queue is not None else allreduce_queue
-    _down = (
-        allreduce_down_queue if allreduce_down_queue is not None else allreduce_queue
-    )
+    _down = allreduce_down_queue if allreduce_down_queue is not None else allreduce_queue
     use_allreduce = _up is not None and _down is not None
 
     # ─ 1. Load CSV with explicit schema ───────────────────────────────────────────
@@ -165,9 +161,7 @@ def run(
     )
 
     # ─ 2. Assemble feature vector ───────────────────────────────────────────────
-    assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
-    )
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     df_vec = assembler.transform(df).select("features", "label").cache()
 
     # ─ 3. Iterative Allreduce training ──────────────────────────────────────────
@@ -275,9 +269,7 @@ def run(
     )
 
     return {
-        "weight_vector": current_weights
-        if current_weights is not None
-        else weight_vector,
+        "weight_vector": current_weights if current_weights is not None else weight_vector,
         "intercept": current_intercept,
         "train_accuracy": train_accuracy,
         "row_count": row_count,

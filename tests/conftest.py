@@ -14,12 +14,11 @@ import pytest
 @pytest.fixture(scope="module")
 def spark():
     """Return a local[1] SparkSession; stop it after the test module."""
-    pyspark = pytest.importorskip("pyspark", reason="pyspark not installed")
+    pytest.importorskip("pyspark", reason="pyspark not installed")
     from pyspark.sql import SparkSession
 
     session = (
-        SparkSession.builder
-        .master("local[1]")
+        SparkSession.builder.master("local[1]")
         .appName("logreg-unit-tests")
         .config("spark.ui.enabled", "false")
         .config("spark.driver.memory", "512m")

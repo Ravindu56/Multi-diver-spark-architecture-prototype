@@ -6,7 +6,7 @@ import json
 import os
 import socket
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "dev")
 RUNS_JSONL = os.path.join(LOGS_DIR, "dev_runs.jsonl")
@@ -51,7 +51,7 @@ class DevLogger:
     ):
         _ensure_dir()
         self._run_id = str(uuid.uuid4())[:8]
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         hostname = socket.gethostname()
 
         record = {
@@ -96,7 +96,7 @@ class DevLogger:
         _ensure_dir()
         record = {
             "run_id": self._run_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "worker_id": worker_id,
             "init_time": round(init_time, 4),
             "load_time": round(load_time, 4),

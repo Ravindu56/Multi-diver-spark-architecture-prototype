@@ -244,9 +244,7 @@ def main():
         print(f"[main] LogReg reg_param : {args.logreg_reg_param}")
         print(f"[main] LogReg features  : {args.logreg_features}")
     if args.baseline_threads:
-        print(
-            f"[main] Baseline threads : {args.baseline_threads}  [fair comparison mode]"
-        )
+        print(f"[main] Baseline threads : {args.baseline_threads}  [fair comparison mode]")
     if args.gossip:
         print(
             f"[main] Gossip mode      : ON  "

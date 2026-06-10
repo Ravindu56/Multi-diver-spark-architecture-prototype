@@ -13,17 +13,16 @@
 # NO Spark is needed for these tests — allreduce.py has zero PySpark imports
 # at the top level; Spark only enters through run_logreg_allreduce().
 
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from mpj_spark.applications.logreg.allreduce import allreduce_gradients
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_comm_allreduce(num_ranks: int):
     """
@@ -31,6 +30,7 @@ def _make_comm_allreduce(num_ranks: int):
     sendbuf * num_ranks into recvbuf, simulating MPI.SUM over num_ranks ranks.
     Buffer-level protocol: args are ([send, MPI.DOUBLE], [recv, MPI.DOUBLE], op=MPI.SUM).
     """
+
     def _allreduce(sendbuf_pair, recvbuf_pair, op=None):
         send_arr = sendbuf_pair[0]
         recv_arr = recvbuf_pair[0]
@@ -45,8 +45,8 @@ def _make_comm_allreduce(num_ranks: int):
 # allreduce_gradients — weight update correctness
 # ---------------------------------------------------------------------------
 
-class TestAllreduceGradients:
 
+class TestAllreduceGradients:
     def test_weight_update_single_rank(self):
         """With 1 rank, global_grad == grad_local and w_new = w - lr * grad."""
         comm = _make_comm_allreduce(num_ranks=1)
@@ -54,9 +54,9 @@ class TestAllreduceGradients:
         grad_local = np.array([1.0, 2.0, 3.0, 4.0])
         lr = 0.1
 
-        w_new, global_grad = allreduce_gradients(comm, size=1, w=w,
-                                                  grad_local=grad_local,
-                                                  learning_rate=lr)
+        w_new, global_grad = allreduce_gradients(
+            comm, size=1, w=w, grad_local=grad_local, learning_rate=lr
+        )
 
         np.testing.assert_allclose(global_grad, grad_local)
         np.testing.assert_allclose(w_new, -lr * grad_local)
@@ -72,9 +72,9 @@ class TestAllreduceGradients:
         grad_local = np.array([0.5, 1.0, 1.5])
         lr = 0.01
 
-        w_new, global_grad = allreduce_gradients(comm, size=3, w=w,
-                                                  grad_local=grad_local,
-                                                  learning_rate=lr)
+        w_new, global_grad = allreduce_gradients(
+            comm, size=3, w=w, grad_local=grad_local, learning_rate=lr
+        )
 
         np.testing.assert_allclose(global_grad, grad_local, rtol=1e-10)
         expected_w = w - lr * global_grad
@@ -86,8 +86,7 @@ class TestAllreduceGradients:
         w = np.zeros(2)
         grad_local = np.array([0.1, 0.2])
 
-        allreduce_gradients(comm, size=2, w=w,
-                             grad_local=grad_local, learning_rate=0.05)
+        allreduce_gradients(comm, size=2, w=w, grad_local=grad_local, learning_rate=0.05)
 
         assert comm.Allreduce.call_count == 1
 
@@ -98,9 +97,9 @@ class TestAllreduceGradients:
         w = np.zeros(D)
         grad_local = np.random.default_rng(0).uniform(size=D)
 
-        w_new, global_grad = allreduce_gradients(comm, size=2, w=w,
-                                                  grad_local=grad_local,
-                                                  learning_rate=0.01)
+        w_new, global_grad = allreduce_gradients(
+            comm, size=2, w=w, grad_local=grad_local, learning_rate=0.01
+        )
 
         assert w_new.shape == (D,)
         assert global_grad.shape == (D,)
@@ -111,9 +110,7 @@ class TestAllreduceGradients:
         w = np.array([1.0, -2.0, 3.0])
         grad_local = np.zeros(3)
 
-        w_new, _ = allreduce_gradients(comm, size=2, w=w,
-                                        grad_local=grad_local,
-                                        learning_rate=0.1)
+        w_new, _ = allreduce_gradients(comm, size=2, w=w, grad_local=grad_local, learning_rate=0.1)
 
         np.testing.assert_array_equal(w_new, w)
 
@@ -123,9 +120,7 @@ class TestAllreduceGradients:
         w = np.array([5.0, 5.0])
         grad_local = np.array([1.0, 1.0])
 
-        w_new, _ = allreduce_gradients(comm, size=1, w=w,
-                                        grad_local=grad_local,
-                                        learning_rate=10.0)
+        w_new, _ = allreduce_gradients(comm, size=1, w=w, grad_local=grad_local, learning_rate=10.0)
 
         assert np.all(w_new < w)
 
@@ -137,6 +132,7 @@ class TestAllreduceGradients:
 # function.  We test the convergence arithmetic directly via a thin wrapper
 # that isolates the delta < tol check, and separately verify the Allreduce
 # and bcast call patterns on the mock comm.
+
 
 class TestCheckLossConvergenceMath:
     """
@@ -154,9 +150,7 @@ class TestCheckLossConvergenceMath:
         def _map(fn):
             mapped = MagicMock()
             results = [fn(r) for r in rows]
-            mapped.reduce.side_effect = lambda f: (
-                __import__('functools').reduce(f, results)
-            )
+            mapped.reduce.side_effect = lambda f: (__import__("functools").reduce(f, results))
             return mapped
 
         mock_rdd.map.side_effect = _map
@@ -165,6 +159,7 @@ class TestCheckLossConvergenceMath:
 
     def _make_comm_rank0(self, num_ranks=1):
         """Comm mock that simulates rank-0 Allreduce + bcast for size=num_ranks."""
+
         def _allreduce(send_pair, recv_pair, op=None):
             recv_pair[0][:] = send_pair[0] * num_ranks
 
@@ -198,9 +193,14 @@ class TestCheckLossConvergenceMath:
         prev_loss = expected_loss + 5e-5
 
         converged, global_loss = check_loss_convergence(
-            comm=comm, rank=0, size=1,
-            data_rdd=mock_rdd, w=w,
-            prev_loss=prev_loss, tol=1e-4, epoch=1,
+            comm=comm,
+            rank=0,
+            size=1,
+            data_rdd=mock_rdd,
+            w=w,
+            prev_loss=prev_loss,
+            tol=1e-4,
+            epoch=1,
         )
 
         assert converged is True
@@ -219,9 +219,14 @@ class TestCheckLossConvergenceMath:
         w = np.zeros(2)
         # Set prev_loss = 0.0 so delta = ~0.693 >> tol=1e-4
         converged, _ = check_loss_convergence(
-            comm=comm, rank=0, size=1,
-            data_rdd=mock_rdd, w=w,
-            prev_loss=0.0, tol=1e-4, epoch=1,
+            comm=comm,
+            rank=0,
+            size=1,
+            data_rdd=mock_rdd,
+            w=w,
+            prev_loss=0.0,
+            tol=1e-4,
+            epoch=1,
         )
 
         assert converged is False
@@ -236,9 +241,14 @@ class TestCheckLossConvergenceMath:
         w = np.zeros(1)
 
         check_loss_convergence(
-            comm=comm, rank=0, size=1,
-            data_rdd=mock_rdd, w=w,
-            prev_loss=float("inf"), tol=1e-4, epoch=1,
+            comm=comm,
+            rank=0,
+            size=1,
+            data_rdd=mock_rdd,
+            w=w,
+            prev_loss=float("inf"),
+            tol=1e-4,
+            epoch=1,
         )
 
         assert comm.bcast.call_count == 1

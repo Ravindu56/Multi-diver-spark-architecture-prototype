@@ -28,7 +28,7 @@ TAG_PONG = 43
 _NEEDS_MULTI_RANK = pytest.mark.skipif(
     size < 2,
     reason="Multi-rank MPI test — re-launch with: "
-           "mpirun --oversubscribe -n 3 python -m pytest tests/phase3/test_mpi_verify.py",
+    "mpirun --oversubscribe -n 3 python -m pytest tests/phase3/test_mpi_verify.py",
 )
 
 
@@ -86,6 +86,7 @@ def test_mpi_allreduce_numpy_sum():
     comm.Allreduce(local_arr, result, op=MPI.SUM)
     expected_sum = float(size * (size - 1) // 2)
     np.testing.assert_allclose(
-        result, np.full(3, expected_sum),
+        result,
+        np.full(3, expected_sum),
         err_msg=f"Allreduce numpy: expected {expected_sum}, got {result}",
     )

@@ -70,15 +70,11 @@ class MPJSparkFileManager:
         file_size = os.path.getsize(input_file_path)
 
         partition_paths = [
-            os.path.join(self.partitions_dir, f"partition_{i}.txt")
-            for i in range(num_workers)
+            os.path.join(self.partitions_dir, f"partition_{i}.txt") for i in range(num_workers)
         ]
 
         # Open all partition writers at once (1 MB write buffer each)
-        writers = [
-            open(p, "w", encoding="utf-8", buffering=1024 * 1024)
-            for p in partition_paths
-        ]
+        writers = [open(p, "w", encoding="utf-8", buffering=1024 * 1024) for p in partition_paths]
         line_counts = [0] * num_workers
 
         try:
@@ -143,9 +139,7 @@ class KeyValueStructure:
 # ============================================================
 # COMPONENT 3: MPJ Worker Process (Independent Spark Driver)
 # ============================================================
-def mpj_worker_process(
-    worker_id, partition_metadata, result_queue, timing_queue, num_workers
-):
+def mpj_worker_process(worker_id, partition_metadata, result_queue, timing_queue, num_workers):
     """
     Paper Reference: Section IV.A (MPJ Workers) + Algorithm 1
 
@@ -275,9 +269,7 @@ def mpj_root_process(input_file_path, num_workers):
     file_manager = MPJSparkFileManager()
 
     load_start = time.time()
-    partition_metadata_list = file_manager.dynamic_partition(
-        input_file_path, num_workers
-    )
+    partition_metadata_list = file_manager.dynamic_partition(input_file_path, num_workers)
     load_end = time.time()
     load_time = load_end - load_start
 
@@ -305,10 +297,7 @@ def mpj_root_process(input_file_path, num_workers):
         )
         workers.append(p)
         p.start()
-        print(
-            f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) "
-            f"→ independent Spark Driver"
-        )
+        print(f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) " f"→ independent Spark Driver")
 
     # ── PHASE 3: Wait for Parallel Execution ────────────────────────────
     print(f"\n[ROOT] Phase 3: Waiting for {num_workers} workers to complete...")
@@ -385,12 +374,8 @@ def mpj_root_process(input_file_path, num_workers):
 
     # H3 fix: separate driver init from true processing time
     if worker_timings:
-        avg_driver_init = sum(wt["driver_init_time"] for wt in worker_timings) / len(
-            worker_timings
-        )
-        avg_actual_proc = sum(wt["processing_time"] for wt in worker_timings) / len(
-            worker_timings
-        )
+        avg_driver_init = sum(wt["driver_init_time"] for wt in worker_timings) / len(worker_timings)
+        avg_actual_proc = sum(wt["processing_time"] for wt in worker_timings) / len(worker_timings)
     else:
         avg_driver_init = 0
         avg_actual_proc = 0
@@ -598,12 +583,8 @@ def generate_test_dataset(output_path, target_size_mb=100):
 # MAIN EXECUTION
 # ============================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="MPJ-SPARK Multi-Driver WordCount Prototype v2.0"
-    )
-    parser.add_argument(
-        "--workers", type=int, default=4, help="Number of MPJ workers (default: 4)"
-    )
+    parser = argparse.ArgumentParser(description="MPJ-SPARK Multi-Driver WordCount Prototype v2.0")
+    parser.add_argument("--workers", type=int, default=4, help="Number of MPJ workers (default: 4)")
     parser.add_argument(
         "--input", type=str, default=None, help="Input text file path (skip generation)"
     )
@@ -639,9 +620,7 @@ if __name__ == "__main__":
         print(f"\n{'=' * 70}")
         print("  COMPARISON: Multi-Driver v2.0  vs  Standard Spark")
         print(f"{'=' * 70}")
-        print(
-            f"  {'Metric':<28} {'Multi-Driver':>14} {'Std Spark':>12} {'Speedup':>10}"
-        )
+        print(f"  {'Metric':<28} {'Multi-Driver':>14} {'Std Spark':>12} {'Speedup':>10}")
         print(f"  {'-' * 66}")
         metrics = [
             ("Load Time (sec)", multi_timing["load_time"], std_timing["load_time"]),

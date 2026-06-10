@@ -43,6 +43,7 @@ os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 import argparse  # noqa: E402
+
 from mpi4py import MPI  # noqa: E402
 
 # ── MPI communicator globals ──────────────────────────────────────────────
@@ -136,8 +137,7 @@ class MpiRootFanoutQueue:
 
     def empty(self):
         return len(self._recv_buf) == 0 and not any(
-            comm.Iprobe(source=w, tag=self._tag)
-            for w in range(1, self._num_workers + 1)
+            comm.Iprobe(source=w, tag=self._tag) for w in range(1, self._num_workers + 1)
         )
 
 
@@ -315,9 +315,7 @@ if __name__ == "__main__":
             help="Generate N MB synthetic dataset if --input not found",
         )
         parser.add_argument("--workers", type=int, default=size - 1)
-        parser.add_argument(
-            "--app", default="wordcount", choices=["wordcount", "kmeans", "logreg"]
-        )
+        parser.add_argument("--app", default="wordcount", choices=["wordcount", "kmeans", "logreg"])
         parser.add_argument("--compare", action="store_true")
         parser.add_argument("--no-prewarm", action="store_true")
         parser.add_argument("--cores", type=int, default=None)

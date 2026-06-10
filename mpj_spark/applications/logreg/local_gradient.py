@@ -85,7 +85,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Tuple
 
 import numpy as np
 from pyspark import RDD
@@ -102,6 +101,7 @@ logger = logging.getLogger(__name__)
 # cores_override= to build_spark_session() (already done in partition.py).
 # Exposed here so allreduce.py can assert the value matches at runtime.
 # ---------------------------------------------------------------------------
+
 
 def cores_per_worker(size: int) -> int:
     """
@@ -131,7 +131,8 @@ def cores_per_worker(size: int) -> int:
 # STEP 4a — Data Loading
 # ---------------------------------------------------------------------------
 
-def parse_row(line: str, num_features: int) -> Tuple[np.ndarray, float] | None:
+
+def parse_row(line: str, num_features: int) -> tuple[np.ndarray, float] | None:
     """
     Parse one CSV line into (feature_vector, label).
 
@@ -158,9 +159,9 @@ def parse_row(line: str, num_features: int) -> Tuple[np.ndarray, float] | None:
         parts = line.strip().split(",")
         if len(parts) != num_features + 1:
             return None
-        vals = [float(p) for p in parts]       # raises ValueError for header
+        vals = [float(p) for p in parts]  # raises ValueError for header
         features = np.array(vals[:-1], dtype=np.float64)  # all but last
-        label    = float(vals[-1])
+        label = float(vals[-1])
         return features, label
     except (ValueError, IndexError):
         return None  # silently drop header row and malformed lines
@@ -194,9 +195,9 @@ def load_and_cache_rdd(spark: SparkSession, partition_path: str, num_features: i
 
     data_rdd = (
         sc.textFile(partition_path)
-          .map(lambda line: parse_row(line, _num_features))
-          .filter(lambda row: row is not None)
-          .cache()
+        .map(lambda line: parse_row(line, _num_features))
+        .filter(lambda row: row is not None)
+        .cache()
     )
 
     # Trigger the cache: force Spark to read the file and materialise the RDD
@@ -215,10 +216,11 @@ def load_and_cache_rdd(spark: SparkSession, partition_path: str, num_features: i
 # STEP 4b — Local Gradient Computation (core of this file)
 # ---------------------------------------------------------------------------
 
+
 def compute_gradient_spark(
     data_rdd: RDD,
     w: np.ndarray,
-) -> Tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int]:
     """
     Compute the local gradient of the log-loss over this rank's data shard.
 
@@ -268,7 +270,7 @@ def compute_gradient_spark(
     """
     _w = w  # local alias so Spark can serialise the closure cleanly
 
-    def local_grad(row: Tuple[np.ndarray, float]) -> np.ndarray:
+    def local_grad(row: tuple[np.ndarray, float]) -> np.ndarray:
         """
         Per-sample gradient: x * (sigmoid(x · w) - y)
 
@@ -291,9 +293,7 @@ def compute_gradient_spark(
     # the only difference is the map function (local_grad vs split/flatMap)
     # and the reduce function (np.add vs int addition).
     grad_sum = (
-        data_rdd
-        .map(local_grad)
-        .reduce(lambda a, b: a + b)   # np.ndarray + np.ndarray element-wise
+        data_rdd.map(local_grad).reduce(lambda a, b: a + b)  # np.ndarray + np.ndarray element-wise
     )
 
     # Count is already known from load_and_cache_rdd but we re-read it here

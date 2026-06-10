@@ -27,7 +27,7 @@ size = comm.Get_size()
 _NEEDS_MPI = pytest.mark.skipif(
     size < 2,
     reason="MPI partition tests require >= 2 MPI ranks — "
-           "re-launch with: mpirun --oversubscribe -n 3 python -m pytest tests/phase3/test_kmeans_partition.py",
+    "re-launch with: mpirun --oversubscribe -n 3 python -m pytest tests/phase3/test_kmeans_partition.py",
 )
 
 # ---------------------------------------------------------------------------
@@ -61,6 +61,7 @@ _dataset_path = comm.bcast(_dataset_path, root=0)
 # Session fixture for Spark JVM tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def spark_partition_session():
     """Partition the dataset and start Spark; yield (partition_path, spark)."""
@@ -80,6 +81,7 @@ def spark_partition_session():
 # Driven through the public partition_and_init_spark() API.
 # ---------------------------------------------------------------------------
 
+
 @_NEEDS_MPI
 def test_scatter_metadata_keys(spark_partition_session):
     """
@@ -87,9 +89,9 @@ def test_scatter_metadata_keys(spark_partition_session):
     for every rank, confirming comm.scatter() distributed metadata correctly.
     """
     partition_path, _ = spark_partition_session
-    assert isinstance(partition_path, str) and len(partition_path) > 0, (
-        f"[rank {rank}] Expected a non-empty partition path, got: {partition_path!r}"
-    )
+    assert (
+        isinstance(partition_path, str) and len(partition_path) > 0
+    ), f"[rank {rank}] Expected a non-empty partition path, got: {partition_path!r}"
 
 
 @_NEEDS_MPI
@@ -100,9 +102,9 @@ def test_partition_file_exists(spark_partition_session):
     and the file manager wrote to a path visible to all ranks.
     """
     partition_path, _ = spark_partition_session
-    assert os.path.exists(partition_path), (
-        f"[rank {rank}] Partition file not found: {partition_path}"
-    )
+    assert os.path.exists(
+        partition_path
+    ), f"[rank {rank}] Partition file not found: {partition_path}"
 
 
 @_NEEDS_MPI
@@ -129,14 +131,15 @@ def test_total_lines_equal_input(spark_partition_session):
         local_lines = sum(1 for _ in f)
     total = comm.reduce(local_lines, op=MPI.SUM, root=0)
     if rank == 0:
-        assert total == _DATASET_LINES, (
-            f"Total partitioned lines ({total}) != input lines ({_DATASET_LINES})"
-        )
+        assert (
+            total == _DATASET_LINES
+        ), f"Total partitioned lines ({total}) != input lines ({_DATASET_LINES})"
 
 
 # ---------------------------------------------------------------------------
 # Tests 5–6 — Spark JVM session (skipped if size < 2)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(
     MPI.COMM_WORLD.Get_size() < 2,

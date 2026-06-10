@@ -67,7 +67,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Tuple
 
 from pyspark.sql import SparkSession
 
@@ -84,7 +83,7 @@ def _detect_num_features(input_file: str) -> int:
     Assumes format: f0,f1,...,f{N-1},label  (last column is always 'label').
     Returns N (number of feature columns, excluding the label).
     """
-    with open(input_file, "r", encoding="utf-8") as fh:
+    with open(input_file, encoding="utf-8") as fh:
         for raw_line in fh:
             line = raw_line.strip()
             if not line:
@@ -113,7 +112,7 @@ def partition_and_init_spark(
     cores_override: int | None = None,
     memory_fraction: float = 0.75,
     shared_storage_path: str = SHARED_STORAGE_PATH,
-) -> Tuple[str, SparkSession, int]:
+) -> tuple[str, SparkSession, int]:
     """
     Step 1 & 2 entry point for the LogReg MPI-Allreduce runner.
 

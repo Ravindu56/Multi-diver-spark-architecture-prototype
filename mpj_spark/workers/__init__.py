@@ -1,6 +1,6 @@
 # mpj_spark/workers/__init__.py
-from .worker_process import worker_process
 from .spark_session import build_spark_session
+from .worker_process import worker_process
 
 mpj_worker_process = worker_process
 

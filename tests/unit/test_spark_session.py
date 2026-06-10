@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────
 # Helper: fluent SparkSession builder mock
 # ─────────────────────────────────────────────────────────────
@@ -65,6 +64,7 @@ class TestGetTotalRamMb:
         with patch.dict(sys.modules, {"psutil": fake_psutil}):
             # Re-import to pick up the patched sys.modules entry
             import importlib
+
             import mpj_spark.workers.spark_session as ss
 
             importlib.reload(ss)

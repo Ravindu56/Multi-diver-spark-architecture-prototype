@@ -60,18 +60,18 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from mpj_spark.config import (
-    SHARED_STORAGE_PATH,
+from mpj_spark.config import (  # noqa: E402
     KMEANS_DATASET_PATH,
-    LOGREG_DATASET_PATH,
     KMEANS_DATASET_SIZE_MB,
-    LOGREG_DATASET_SIZE_MB,
     KMEANS_NUM_FEATURES,
+    LOGREG_DATASET_PATH,
+    LOGREG_DATASET_SIZE_MB,
     LOGREG_NUM_FEATURES,
+    SHARED_STORAGE_PATH,
 )
-from mpj_spark.utils.dataset_generator import (
-    generate_numeric_dataset,
+from mpj_spark.utils.dataset_generator import (  # noqa: E402
     generate_classification_dataset,
+    generate_numeric_dataset,
 )
 
 
@@ -171,6 +171,7 @@ def ensure_logreg_dataset(
 # ---------------------------------------------------------------------------
 # Public helper: called from allreduce.py __main__ blocks as a guard
 # ---------------------------------------------------------------------------
+
 
 def ensure_dataset(workload: str, input_file: str | None = None, **kwargs) -> str:
     """
@@ -294,11 +295,11 @@ if __name__ == "__main__":
     print()
     print("Run K-Means:")
     print(
-        f"  mpirun -n 3 python -m mpj_spark.applications.kmeans.allreduce \\\'\n"
+        f"  mpirun -n 3 python -m mpj_spark.applications.kmeans.allreduce \\'\n"
         f"      --input {KMEANS_DATASET_PATH} --k 5 --max-iter 20"
     )
     print("\nRun LogReg:")
     print(
-        f"  mpirun -n 3 python -m mpj_spark.applications.logreg.allreduce \\\'\n"
+        f"  mpirun -n 3 python -m mpj_spark.applications.logreg.allreduce \\'\n"
         f"      --input {LOGREG_DATASET_PATH} --epochs 30 --lr 0.01"
     )
