@@ -11,10 +11,51 @@ try:
     from pyspark.ml.classification import LogisticRegression
     from pyspark.ml.feature import VectorAssembler
     from pyspark.sql import SparkSession
+    from pyspark.sql.types import DoubleType, StructField, StructType
 except ImportError:  # pragma: no cover
     SparkSession = None
     LogisticRegression = None
     VectorAssembler = None
+    StructType = StructField = DoubleType = None
+
+
+def _sniff_csv_header(input_file: str) -> tuple[bool, int]:
+    """
+    Peek at the first non-blank line of *input_file* to decide whether
+    the CSV has a named header row.
+
+    Returns
+    -------
+    has_header : bool  — True when the first line contains non-numeric text
+    n_cols     : int   — total number of comma-separated columns in that line
+                         (features + 1 label column)
+
+    Strategy
+    --------
+    Try to parse every token in the first line as float.
+    - All-float  → headerless data row  → has_header=False
+    - Any non-float → named header row  → has_header=True
+
+    This is the same heuristic used by logreg/partition.py's
+    _detect_num_features() and is robust to any column naming scheme.
+    """
+    with open(input_file, encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            tokens = line.split(",")
+            all_numeric = True
+            for tok in tokens:
+                try:
+                    float(tok)
+                except ValueError:
+                    all_numeric = False
+                    break
+            return (not all_numeric), len(tokens)
+    raise RuntimeError(
+        f"Cannot sniff CSV header from '{input_file}': file appears empty."
+    )
 
 
 def _baseline_heap_gb(thread_count: int) -> int:
@@ -85,6 +126,16 @@ def run_baseline_logreg(
     workers cache their (smaller) partitions safely because each sees
     only 1/N of the data.
 
+    Header detection
+    ----------------
+    The baseline auto-detects whether the input CSV has a named header row
+    by peeking at the first line (_sniff_csv_header).  This makes it robust
+    to both:
+      - datasets generated with header=True  (e.g. logreg_data.csv)
+      - datasets generated with header=False (e.g. logreg_data_noniid.csv)
+    Without this, Spark promotes float values as column names and
+    dropna() / VectorAssembler raise UNRESOLVED_COLUMN.
+
     IMPORTANT: all JVM-backed model attributes (coefficients, intercept)
     must be materialised as plain Python objects BEFORE spark.stop().
     """
@@ -111,6 +162,11 @@ def run_baseline_logreg(
         f"[heap={heap_gb}g]{parity_label}"
     )
 
+    # ------------------------------------------------------------------
+    # Detect whether the CSV has a named header row BEFORE starting Spark
+    # ------------------------------------------------------------------
+    has_header, n_cols = _sniff_csv_header(input_file)
+
     t_load_start = time.perf_counter()
     spark = (
         SparkSession.builder.appName("MPJ-Baseline-LogReg")
@@ -126,13 +182,27 @@ def run_baseline_logreg(
     )
     spark.sparkContext.setLogLevel("ERROR")
 
-    df_raw = spark.read.csv(input_file, inferSchema=True, header=True)
-    df = df_raw.dropna()
-    feature_cols = [c for c in df.columns if c != "label"]
+    if has_header:
+        # Named header present — let Spark infer schema and column names.
+        df_raw = spark.read.csv(input_file, inferSchema=True, header=True)
+        df = df_raw.dropna()
+        feature_cols = [c for c in df.columns if c != "label"]
+    else:
+        # Headerless file — synthesise schema: f0, f1, ..., f{N-2}, label.
+        # n_cols includes the label column, so there are n_cols-1 features.
+        n_features = n_cols - 1
+        schema_fields = [StructField(f"f{i}", DoubleType(), True) for i in range(n_features)]
+        schema_fields.append(StructField("label", DoubleType(), True))
+        schema = StructType(schema_fields)
+        df_raw = spark.read.csv(input_file, schema=schema, header=False)
+        df = df_raw.dropna()
+        feature_cols = [f"f{i}" for i in range(n_features)]
+
     row_count = df.count()
     load_time = time.perf_counter() - t_load_start
 
-    print(f"  [Baseline-LogReg] {row_count:,} rows loaded  ({load_time:.3f}s)")
+    header_mode = "with header" if has_header else "headerless (schema synthesised)"
+    print(f"  [Baseline-LogReg] {row_count:,} rows loaded  ({load_time:.3f}s)  [{header_mode}]")
 
     assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     # NOTE: intentionally NOT calling .cache() here — see docstring above.
