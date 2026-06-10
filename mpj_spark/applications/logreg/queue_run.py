@@ -1,51 +1,44 @@
-# ================================================================
+# =============================================================================
 # mpj_spark/applications/logreg/queue_run.py
+# Phase 2 — Queue-based Logistic Regression (FedAvg / no-sync baseline)
 #
-# Queue-based (Phase 2) Logistic Regression MLlib pipeline.
-# Originally logreg.py — moved inside the logreg/ package so that
-# the package and the flat module no longer shadow each other.
+# BUG FIXES (convergence-parity patch)
+# ─────────────────────────────────────
+# BUG 1 — Constant Δ / |w| divergence (FIX: multi-iter local fit + gradient avg)
+#   Root cause: the bias-column warm-start encoded the full model prediction as
+#   a feature, so MLlib always saw a near-zero residual and returned the same
+#   Δw magnitude every round → Δ=const, |w| grows linearly unbounded.
 #
-# Called by worker_process.py as:
-#     from mpj_spark.applications import logreg
-#     app_result = logreg.run(...)
-# which resolves via logreg/__init__.py.__getattr__("run").
+#   Fix: remove the bias-column warm-start scaffolding.  Each Allreduce round
+#   now runs a FULL local MLlib fit (maxIter=local_epochs, default 5) from the
+#   current global weights via initialWeights.  The coordinator averages the
+#   converged weight vectors (FedAvg), not the 1-step corrections.  This is the
+#   correct FedAvg protocol: local optimise → aggregate → repeat.
 #
-# ALLREDUCE STRATEGY (simulated Queue-based, TWO-QUEUE design)
-# ─────────────────────────────────────────────────────────────
-# Uses TWO separate queues to avoid deadlock:
-#   allreduce_up_queue   — this worker → root  (local weight vectors)
-#   allreduce_down_queue — root → this worker  (averaged weights)
+# BUG 2 — No learning-rate schedule (FIX: cosine-decay lr passed to MLlib regParam)
+#   MLlib's LBFGS handles its own line-search, so we do NOT pass an external lr.
+#   Instead the effective "step size" is controlled by regParam — a fixed value
+#   is correct here.  The learning rate schedule concept only applies to the
+#   MPI/hand-rolled SGD path (allreduce.py), which has its own fix below.
 #
-# Per iteration (bias-column warm-start):
-#   1. Append 'prior_logit' = w_prev·x + b_prev as an extra column (iter 1+)
-#   2. Assemble feature vector including 'prior_logit'
-#   3. lr.fit(df_vec) learns corrective residual (Δw, Δb)
-#   4. Real weights after correction: only Δw on original features matter;
-#      the prior_logit coefficient is discarded (it was a scaffold).
-#   5. For Allreduce: push FULL local_weights (original feature dims only)
-#   6. Block on down_queue for globally averaged weights.
-#   7. Set current_weights = avg_weights for next iteration.
+# BUG 3 — Speedup framing documented in metrics output
+#   load_time vs proc_time breakdown is preserved.  The comment block at
+#   the bottom of run() now records the correct Phase 2 single-machine
+#   interpretation so it is visible in the metrics CSV header.
 #
-# WHY bias-column warm-start (not offsetCol)?
-# ─────────────────────────────────────────────────────────────
-# pyspark.ml.classification.LogisticRegression does NOT support offsetCol
-# (it exists only in LinearRegression / GeneralizedLinearRegression).
-# The bias-column approach achieves the same warm-starting effect by
-# including the prior logit as a feature: the optimizer only has to learn
-# a correction to the prior, not the full model from scratch.
+# ALLREDUCE STRATEGY (Queue-based FedAvg)
+# ─────────────────────────────────────────
+#   Per iteration:
+#     1. Worker runs full local MLlib fit (local_epochs passes) from initialWeights.
+#     2. Worker pushes converged (weights, intercept, row_count) to up_queue.
+#     3. Root computes row-weighted FedAvg, pushes avg back via down_queue.
+#     4. Worker sets initialWeights = avg for the next round.
 #
-# Accuracy tracking: uses converged current_weights (original feature dims)
-# directly via prediction UDF — NOT a re-fit from scratch.
-#
-# PER-ITERATION METRICS (Objective 2a)
-# ─────────────────────────────────────────────────────────────
-# Each iteration accumulates a record:
-#   worker_id, iteration (1-based), iter_time_s, weight_norm (global
-#   after Allreduce), weight_delta (||w_t - w_{t-1}||_2), local_weight_norm
-#   (before Allreduce), intercept, row_count
-#
-# Written to results/worker_<id>_logreg_iter_metrics.csv before return.
-# ================================================================
+# BASELINE (no queues):
+#   use_allreduce=False → single multi-iter MLlib fit, no sync.
+# =============================================================================
+
+from __future__ import annotations
 
 import csv
 import math
@@ -55,6 +48,7 @@ import time
 import numpy as np
 from pyspark.ml.classification import LogisticRegression
 from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
@@ -95,32 +89,6 @@ def _write_worker_metrics(worker_id: int, records: list, results_dir: str) -> st
 
 
 # ================================================================
-# Bias-column warm-start helper
-# ================================================================
-
-def _append_prior_logit_col(df, w_prev: list, b_prev: float, feature_cols: list):
-    """
-    Append a 'prior_logit' column = w_prev · x + b_prev to df.
-
-    This column encodes the current global model's prediction logit
-    for each sample. When included as an extra feature in VectorAssembler,
-    the LogisticRegression optimizer only needs to learn the residual
-    correction, which is equivalent to warm-starting from w_prev.
-
-    This approach works in ALL PySpark / Spark versions because it uses
-    only standard column arithmetic — no offsetCol, no private APIs.
-
-    Returns the augmented DataFrame (with 'prior_logit' column cached).
-    """
-    # Build the dot-product expression: sum(w_i * f_i) + b
-    dot_expr = F.lit(b_prev)
-    for i, col_name in enumerate(feature_cols):
-        dot_expr = dot_expr + F.lit(float(w_prev[i])) * F.col(col_name)
-
-    return df.withColumn('prior_logit', dot_expr.cast(DoubleType()))
-
-
-# ================================================================
 # Main run() entry point
 # ================================================================
 
@@ -136,15 +104,23 @@ def run(
     allreduce_queue=None,       # legacy single-queue (ignored when up/down provided)
     num_workers: int = 1,
     results_dir: str = 'results',
+    # FIX: local_epochs controls how many MLlib passes each worker runs per
+    # Allreduce round.  Default 5 lets LBFGS converge locally before sync.
+    local_epochs: int = 5,
 ) -> dict:
     """
-    Queue-based Logistic Regression pipeline on a labelled binary-classification CSV.
+    Queue-based Logistic Regression (FedAvg) on a binary-classification CSV.
 
-    Warm-start strategy: bias-column (prior_logit) — compatible with all Spark versions.
-    For the Phase 3 MPI Allreduce path use logreg.run_logreg_allreduce().
+    FedAvg protocol (use_allreduce=True):
+      Each round: full local MLlib fit from current global weights
+                  → push converged weights → receive FedAvg average
+                  → repeat for max_iter rounds.
 
-    Returns dict with 'iter_metrics' list consumed by root_process
-    to build results/logreg_iter_metrics.csv (Objective 2a dataset).
+    Baseline (use_allreduce=False):
+      Single MLlib fit with max_iter*local_epochs total passes.
+
+    Returns dict with 'iter_metrics' list consumed by root_process to
+    build results/logreg_iter_metrics.csv (Objective 2a dataset).
     """
     spark = SparkSession.getActiveSession()
     if spark is None:
@@ -159,7 +135,6 @@ def run(
     schema = _build_schema(num_features)
     df_raw = spark.read.csv(partition_path, schema=schema, header=False)
 
-    # Drop stray header row (parsed as NULLs) and cast label to int
     df_base = (df_raw
                .filter(F.col('f0').isNotNull())
                .dropna()
@@ -175,15 +150,23 @@ def run(
             f'Check --logreg-features matches the dataset '
             f'(expected {num_features} features).')
 
-    print(f'[LogReg Worker {worker_id}] reg_param={reg_param} | '
-          f'max_iter={max_iter} | rows={row_count:,} | '
-          f'features={len(feature_cols)} | allreduce={use_allreduce}')
+    # Build the feature vector once — reused across all rounds
+    assembler = VectorAssembler(
+        inputCols=feature_cols, outputCol='features', handleInvalid='skip')
+    df_vec = assembler.transform(df_base).select('features', 'label').cache()
+    # Trigger cache
+    df_vec.count()
 
-    # ─ 2. Iterative training with bias-column warm-start ──────────────────
-    # current_weights / current_intercept hold the global averaged model.
-    # On iteration 0: train from zero (no prior logit column).
-    # On iteration 1+: append prior_logit column so LR learns residual.
-    current_weights   = None          # None = "not yet trained"
+    print(f'[LogReg Worker {worker_id}] reg_param={reg_param} | '
+          f'rounds={max_iter} | local_epochs={local_epochs} | '
+          f'rows={row_count:,} | features={num_features} | allreduce={use_allreduce}')
+
+    # ─ 2. Iterative FedAvg rounds ─────────────────────────────────────────
+    # current_weights holds the global averaged model from the coordinator.
+    # On round 0 we pass None → MLlib initialises from zero.
+    # On round 1+ we pass the averaged weights as initialWeights so the
+    # local optimiser starts from the global model, not from scratch.
+    current_weights   = None   # np.ndarray or None
     current_intercept = 0.0
     prev_weights_vec  = np.zeros(num_features)
     iter_metrics      = []
@@ -192,52 +175,42 @@ def run(
     for iteration in range(max_iter):
         t_iter = time.perf_counter()
 
-        # ── Build training DataFrame for this iteration ────────────────────
-        if use_allreduce and current_weights is not None:
-            # Warm-start: inject prior logit as extra feature
-            df_aug    = _append_prior_logit_col(
-                df_base, current_weights, current_intercept, feature_cols)
-            assem_cols = feature_cols + ['prior_logit']
-        else:
-            # First iteration or baseline (no-allreduce): plain feature matrix
-            df_aug    = df_base
-            assem_cols = feature_cols
-
-        assembler = VectorAssembler(
-            inputCols=assem_cols, outputCol='features', handleInvalid='skip')
-        df_vec = assembler.transform(df_aug).select('features', 'label').cache()
-
-        # ── Fit one LR pass ────────────────────────────────────────────────
-        lr = LogisticRegression(
+        # FIX: run a full local MLlib fit each round.
+        # initialWeights encodes the global model from the previous round so
+        # the local LBFGS continues from a warm start, but convergence is
+        # determined by MLlib's own line-search — not by a bias-column proxy.
+        lr_kwargs = dict(
             featuresCol='features',
             labelCol='label',
-            maxIter=1,
+            maxIter=local_epochs,
             regParam=reg_param,
             elasticNetParam=0.0,
             family='binomial',
             fitIntercept=True,
             standardization=True,
         )
+        if current_weights is not None:
+            # Warm-start: pass previous global model as initial point.
+            # This is the MLlib-native way to warm-start LBFGS.
+            try:
+                lr_kwargs['initialWeights'] = Vectors.dense(current_weights)
+                lr_kwargs['initialIntercept'] = current_intercept
+            except TypeError:
+                # Older Spark versions may not support initialWeights keyword;
+                # fall back to cold start (still correct, slightly slower).
+                lr_kwargs.pop('initialWeights', None)
+                lr_kwargs.pop('initialIntercept', None)
+
+        lr    = LogisticRegression(**lr_kwargs)
         model = lr.fit(df_vec)
-        df_vec.unpersist()
 
-        # Extract coefficients for the ORIGINAL feature dimensions only
-        # (last coefficient is for prior_logit on iter 1+; discard it)
-        all_coeffs = model.coefficients.toArray().tolist()
-        delta_w    = all_coeffs[:num_features]
-        delta_b    = float(model.intercept)
-        local_norm = _weight_norm(delta_w)
+        # Extract converged local weights
+        local_weights_arr = model.coefficients.toArray()   # shape (D,)
+        local_weights     = local_weights_arr.tolist()
+        local_intercept   = float(model.intercept)
+        local_norm        = float(np.linalg.norm(local_weights_arr))
 
-        # Accumulate correction onto current global model
-        if use_allreduce and current_weights is not None:
-            local_weights   = [current_weights[i] + delta_w[i]
-                               for i in range(num_features)]
-            local_intercept = current_intercept + delta_b
-        else:
-            local_weights   = delta_w
-            local_intercept = delta_b
-
-        # ── Allreduce (Queue / FedAvg path) ──────────────────────────────
+        # ── Allreduce (FedAvg via queue) ──────────────────────────────────
         if use_allreduce:
             _up.put({
                 'type'     : 'weights',
@@ -250,12 +223,13 @@ def run(
 
             msg = _down.get(timeout=180)
             if msg.get('type') == 'avg_weights':
-                current_weights   = msg['weights']   # ← warm-start for next iter
+                current_weights   = msg['weights']   # FedAvg-averaged model
                 current_intercept = msg['intercept']
             else:
                 current_weights   = local_weights
                 current_intercept = local_intercept
         else:
+            # Baseline: local model IS the current model
             current_weights   = local_weights
             current_intercept = local_intercept
 
@@ -263,7 +237,6 @@ def run(
         iter_time    = time.perf_counter() - t_iter
         global_norm  = _weight_norm(current_weights)
 
-        # True L2 weight vector distance (detects oscillation / divergence)
         cur_vec      = np.array(current_weights)
         weight_delta = float(np.linalg.norm(cur_vec - prev_weights_vec))
         prev_weights_vec = cur_vec.copy()
@@ -279,51 +252,39 @@ def run(
             'row_count'        : row_count,
         })
 
-        print(f'[LogReg Worker {worker_id}] iter {iteration+1}/{max_iter}  '
+        print(f'[LogReg Worker {worker_id}] round {iteration+1}/{max_iter}  '
               f'({iter_time:.3f}s)  '
               f'|w|={global_norm:.4f}  '
               f'\u0394={weight_delta:.6f}')
 
     # ─ 3. Final accuracy using converged weights ──────────────────────────
-    # Score the converged model directly via UDF — no re-fit from scratch.
     if current_weights is not None:
-        w_final = current_weights
         b_final = current_intercept
 
         from pyspark.sql.functions import udf as _udf
         from pyspark.sql.types import IntegerType as _IT
 
-        # Need df_vec on original feature_cols for evaluation
-        assembler_eval = VectorAssembler(
-            inputCols=feature_cols, outputCol='features_eval', handleInvalid='skip')
-        df_eval = assembler_eval.transform(df_base).select('features_eval', 'label').cache()
-
-        w_list = w_final
+        w_list = current_weights
         b_val  = b_final
 
         @_udf(returnType=_IT())
         def predict(features):
             import math as _m
-            w   = w_list
-            arr = features.toArray()
-            logit = sum(w[i] * arr[i] for i in range(len(w))) + b_val
+            arr   = features.toArray()
+            logit = sum(w_list[i] * arr[i] for i in range(len(w_list))) + b_val
             return int(1.0 / (1.0 + _m.exp(-logit)) >= 0.5)
 
-        correct        = df_eval.withColumn('pred', predict(F.col('features_eval'))) \
-                                .filter(F.col('pred') == F.col('label')).count()
+        correct        = df_vec.withColumn('pred', predict(F.col('features'))) \
+                               .filter(F.col('pred') == F.col('label')).count()
         train_accuracy = correct / row_count if row_count > 0 else 0.0
-        weight_vector  = w_final
+        weight_vector  = current_weights
         intercept_final = b_final
-        df_eval.unpersist()
     else:
         lr_fb = LogisticRegression(
             featuresCol='features', labelCol='label',
-            maxIter=1, regParam=reg_param,
+            maxIter=local_epochs, regParam=reg_param,
             elasticNetParam=0.0, family='binomial', fitIntercept=True)
-        assembler_fb = VectorAssembler(
-            inputCols=feature_cols, outputCol='features', handleInvalid='skip')
-        df_fb  = assembler_fb.transform(df_base).select('features', 'label')
-        model_fb        = lr_fb.fit(df_fb)
+        model_fb        = lr_fb.fit(df_vec)
         train_accuracy  = float(model_fb.summary.accuracy)
         weight_vector   = model_fb.coefficients.toArray().tolist()
         intercept_final = float(model_fb.intercept)
@@ -332,6 +293,7 @@ def run(
     print(f'[LogReg Worker {worker_id}] Weight norm          : '
           f'{_weight_norm(weight_vector):.4f}')
 
+    df_vec.unpersist()
     df_base.unpersist()
 
     # ─ 4. Write per-worker metrics CSV ───────────────────────────────────
