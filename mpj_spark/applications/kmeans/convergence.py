@@ -159,16 +159,14 @@ def broadcast_convergence(
         converged_flag = np.array([1 if converged else 0], dtype=np.int32)
         if converged:
             logger.info(
-                "[rank 0] Convergence declared at iteration %d "
-                "(shift=%.8f < tol=%.2e)",
+                "[rank 0] Convergence declared at iteration %d " "(shift=%.8f < tol=%.2e)",
                 iteration,
                 shift,
                 tol,
             )
         else:
             logger.debug(
-                "[rank 0] Not converged at iteration %d "
-                "(shift=%.8f, tol=%.2e, iter_guard=%s)",
+                "[rank 0] Not converged at iteration %d " "(shift=%.8f, tol=%.2e, iter_guard=%s)",
                 iteration,
                 shift,
                 tol,

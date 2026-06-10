@@ -59,7 +59,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, Tuple
 
 import numpy as np
 
@@ -77,7 +76,7 @@ def allreduce_gradients(
     w: np.ndarray,
     grad_local: np.ndarray,
     learning_rate: float,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Synchronous SGD weight update via MPI Allreduce.
 
@@ -139,7 +138,7 @@ def check_loss_convergence(
     prev_loss: float,
     tol: float,
     epoch: int,
-) -> Tuple[bool, float]:
+) -> tuple[bool, float]:
     """
     Compute global cross-entropy loss and broadcast a convergence flag.
 
@@ -178,7 +177,7 @@ def check_loss_convergence(
     _w = w
     _eps = 1e-15
 
-    def local_loss_fn(row: Tuple[np.ndarray, float]) -> float:
+    def local_loss_fn(row: tuple[np.ndarray, float]) -> float:
         x, y = row
         p = 1.0 / (1.0 + np.exp(-float(np.dot(x, _w))))
         # Clip to avoid log(0)
@@ -186,9 +185,7 @@ def check_loss_convergence(
         return -(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
 
     # Compute local mean cross-entropy via Spark action
-    local_loss_sum = float(
-        data_rdd.map(local_loss_fn).reduce(lambda a, b: a + b)
-    )
+    local_loss_sum = float(data_rdd.map(local_loss_fn).reduce(lambda a, b: a + b))
     n_local = data_rdd.count()
     local_loss = local_loss_sum / float(n_local) if n_local > 0 else 0.0
 
@@ -234,7 +231,7 @@ def run_logreg_allreduce(
     seed: int = 42,
     cores_override: int | None = None,
     metrics_output_dir: str = "./metrics",
-) -> Dict:
+) -> dict:
     """
     Full multi-driver Logistic Regression with synchronous Allreduce
     gradient sync and per-epoch metrics collection.
@@ -252,13 +249,13 @@ def run_logreg_allreduce(
     Post   : record_run + to_csv + to_json + aggregate_across_ranks
              data_rdd.unpersist() + spark.stop()
     """
-    from mpj_spark.applications.logreg.partition import partition_and_init_spark
     from mpj_spark.applications.logreg.local_gradient import (
-        load_and_cache_rdd,
         compute_gradient_spark,
         cores_per_worker,
+        load_and_cache_rdd,
     )
     from mpj_spark.applications.logreg.metrics import LogRegMetricsCollector
+    from mpj_spark.applications.logreg.partition import partition_and_init_spark
 
     t_total_start = time.perf_counter()
 
@@ -422,6 +419,7 @@ if __name__ == "__main__":
     import sys
 
     from mpi4py import MPI
+
     from mpj_spark.config import LOGREG_DATASET_PATH
 
     # Step 1: MPI init FIRST — before any imports that touch Spark
@@ -439,7 +437,7 @@ if __name__ == "__main__":
         required=False,
         default=LOGREG_DATASET_PATH,
         help="Path to the input CSV file (shared/NFS path visible to all ranks). "
-             f"Defaults to LOGREG_DATASET_PATH from config: {LOGREG_DATASET_PATH}",
+        f"Defaults to LOGREG_DATASET_PATH from config: {LOGREG_DATASET_PATH}",
     )
     parser.add_argument(
         "--epochs",
@@ -483,6 +481,7 @@ if __name__ == "__main__":
     # Resolve the input path: if user did not pass --input, the default
     # from config is used. If the file is still missing, generate it now.
     from scripts.generate_datasets import ensure_dataset
+
     resolved_input = ensure_dataset("logreg", input_file=args.input)
 
     logging.basicConfig(
@@ -532,10 +531,7 @@ if __name__ == "__main__":
         table = result["metrics"]
         if table:
             headers = list(table[0].keys())
-            col_w = {
-                h: max(len(h), max(len(str(r[h])) for r in table))
-                for h in headers
-            }
+            col_w = {h: max(len(h), max(len(str(r[h])) for r in table)) for h in headers}
             header_line = "  ".join(h.ljust(col_w[h]) for h in headers)
             print(header_line)
             print("-" * len(header_line))

@@ -17,9 +17,7 @@ import time
 from mpj_spark.workers.spark_session import build_spark_session
 
 
-def run_baseline(
-    input_file_path: str, num_workers: int = 1, cores_override: int = None
-) -> tuple:
+def run_baseline(input_file_path: str, num_workers: int = 1, cores_override: int = None) -> tuple:
     """
     Standard single-driver Spark WordCount.
     Used as the comparison baseline against multi-driver.
@@ -48,8 +46,7 @@ def run_baseline(
     print("\n" + "=" * 70)
     print("  Standard Spark (Single Driver) — BASELINE")
     print(
-        f"  Thread budget: local[{cores}]  "
-        f"({TOTAL_CORES} total cores ÷ {num_workers} workers)"
+        f"  Thread budget: local[{cores}]  " f"({TOTAL_CORES} total cores ÷ {num_workers} workers)"
     )
     print("=" * 70)
 

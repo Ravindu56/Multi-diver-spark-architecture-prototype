@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List
 
 import numpy as np
 
@@ -66,7 +65,7 @@ def allreduce_centroids(
     comm.Allreduce([local_counts, MPI.DOUBLE], [global_counts, MPI.DOUBLE], op=MPI.SUM)
 
     global_centroids = np.zeros((k, d), dtype=np.float64)
-    empty_clusters: List[int] = []
+    empty_clusters: list[int] = []
 
     for j in range(k):
         if global_counts[j] >= _EMPTY_CLUSTER_THRESHOLD:
@@ -109,20 +108,21 @@ def run_kmeans_allreduce(
     seed: int = 42,
     cores_override: int | None = None,
     metrics_output_dir: str = "./metrics",
-) -> Dict:
+) -> dict:
     """
     Full multi-driver K-Means with synchronous Allreduce centroid sync
     and per-iteration metrics collection (Step 6).
     """
     from mpi4py import MPI
-    from mpj_spark.applications.kmeans.partition import partition_and_init_spark
-    from mpj_spark.applications.kmeans.local_iteration import (
-        load_partition_rdd,
-        init_centroids,
-        compute_local_stats,
-    )
+
     from mpj_spark.applications.kmeans.convergence import check_and_broadcast
+    from mpj_spark.applications.kmeans.local_iteration import (
+        compute_local_stats,
+        init_centroids,
+        load_partition_rdd,
+    )
     from mpj_spark.applications.kmeans.metrics import KMeansMetricsCollector
+    from mpj_spark.applications.kmeans.partition import partition_and_init_spark
 
     t_total_start = time.perf_counter()
 
@@ -160,9 +160,7 @@ def run_kmeans_allreduce(
 
         t_sync_start = time.perf_counter()
 
-        new_centroids = allreduce_centroids(
-            comm, rank, local_sums, local_counts, points_rdd
-        )
+        new_centroids = allreduce_centroids(comm, rank, local_sums, local_counts, points_rdd)
 
         global_wcss_arr = np.array([local_wcss], dtype=np.float64)
         global_wcss_buf = np.zeros(1, dtype=np.float64)
@@ -190,8 +188,7 @@ def run_kmeans_allreduce(
         )
 
         logger.info(
-            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  "
-            "shift=%.6f  wcss=%.2f",
+            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  " "shift=%.6f  wcss=%.2f",
             rank,
             iteration,
             spark_time,
@@ -384,9 +381,7 @@ if __name__ == "__main__":
         table = result["metrics"]
         if table:
             headers = list(table[0].keys())
-            col_w = {
-                h: max(len(h), max(len(str(r[h])) for r in table)) for h in headers
-            }
+            col_w = {h: max(len(h), max(len(str(r[h])) for r in table)) for h in headers}
             header_line = "  ".join(h.ljust(col_w[h]) for h in headers)
             print(header_line)
             print("-" * len(header_line))

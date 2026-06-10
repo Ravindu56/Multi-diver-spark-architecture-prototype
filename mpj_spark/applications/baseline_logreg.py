@@ -8,9 +8,9 @@ import math
 import time
 
 try:
-    from pyspark.sql import SparkSession
     from pyspark.ml.classification import LogisticRegression
     from pyspark.ml.feature import VectorAssembler
+    from pyspark.sql import SparkSession
 except ImportError:  # pragma: no cover
     SparkSession = None
     LogisticRegression = None
@@ -102,9 +102,7 @@ def run_baseline_logreg(
     # Parity-adjusted iteration count
     effective_iter = parity_iter if parity_iter is not None else max_iter
     parity_label = (
-        f"  [parity: {num_workers}×{max_iter}={parity_iter}]"
-        if parity_iter is not None
-        else ""
+        f"  [parity: {num_workers}×{max_iter}={parity_iter}]" if parity_iter is not None else ""
     )
 
     print(
@@ -136,9 +134,7 @@ def run_baseline_logreg(
 
     print(f"  [Baseline-LogReg] {row_count:,} rows loaded  ({load_time:.3f}s)")
 
-    assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
-    )
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     # NOTE: intentionally NOT calling .cache() here — see docstring above.
     df_vec = assembler.transform(df).select("features", "label")
 

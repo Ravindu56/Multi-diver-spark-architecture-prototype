@@ -18,41 +18,35 @@ import numpy as np
 import pytest
 
 from mpj_spark.applications.logreg.local_gradient import (
+    compute_gradient_spark,
     cores_per_worker,
     parse_row,
-    compute_gradient_spark,
 )
-
 
 # ---------------------------------------------------------------------------
 # cores_per_worker — pure arithmetic, no fixtures needed
 # ---------------------------------------------------------------------------
 
-class TestCoresPerWorker:
 
+class TestCoresPerWorker:
     def test_single_rank_gets_all_cores(self):
-        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count",
-                   return_value=8):
+        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count", return_value=8):
             assert cores_per_worker(1) == 8
 
     def test_even_split_across_ranks(self):
-        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count",
-                   return_value=8):
+        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count", return_value=8):
             assert cores_per_worker(4) == 2
 
     def test_floor_division_rounds_down(self):
-        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count",
-                   return_value=7):
+        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count", return_value=7):
             assert cores_per_worker(3) == 2
 
     def test_minimum_is_one(self):
-        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count",
-                   return_value=2):
+        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count", return_value=2):
             assert cores_per_worker(100) == 1
 
     def test_cpu_count_none_defaults_to_four(self):
-        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count",
-                   return_value=None):
+        with patch("mpj_spark.applications.logreg.local_gradient.os.cpu_count", return_value=None):
             assert cores_per_worker(2) == 2
 
 
@@ -60,8 +54,8 @@ class TestCoresPerWorker:
 # parse_row — pure text parsing, no fixtures needed
 # ---------------------------------------------------------------------------
 
-class TestParseRow:
 
+class TestParseRow:
     def test_valid_row_returns_features_and_label(self):
         row = parse_row("1.0,2.0,3.0,1.0", num_features=3)
         assert row is not None
@@ -99,6 +93,7 @@ class TestParseRow:
 # ---------------------------------------------------------------------------
 # compute_gradient_spark — requires Spark fixture
 # ---------------------------------------------------------------------------
+
 
 class TestComputeGradientSpark:
     """Uses a real local[1] SparkSession via the spark conftest fixture."""
@@ -149,8 +144,7 @@ class TestComputeGradientSpark:
         assert n == 7
 
     def test_gradient_is_finite_for_extreme_weights(self, spark):
-        rows = [(np.array([0.5, -0.5]), 1.0),
-                (np.array([0.3,  0.7]), 0.0)]
+        rows = [(np.array([0.5, -0.5]), 1.0), (np.array([0.3, 0.7]), 0.0)]
         rdd = self._make_rdd(spark, rows)
         w = np.array([1e6, -1e6])
         grad, _ = compute_gradient_spark(rdd, w)

@@ -4,12 +4,13 @@
 import math
 import os
 import time
-from multiprocessing import Queue, Process, Event
+from datetime import UTC
+from multiprocessing import Event, Process, Queue
 
 from mpj_spark.core.file_manager import MPJSparkFileManager
 from mpj_spark.core.key_value import KeyValueStructure
-from mpj_spark.workers.worker_process import worker_process
 from mpj_spark.utils.dev_logger import DevLogger
+from mpj_spark.workers.worker_process import worker_process
 
 SEP = "=" * 70
 DASH = "─" * 70
@@ -45,9 +46,9 @@ def _seeding_worker(
     seed: int,
 ):
     try:
-        from pyspark.sql import SparkSession
         from pyspark.ml.clustering import KMeans
         from pyspark.ml.feature import VectorAssembler
+        from pyspark.sql import SparkSession
 
         spark = (
             SparkSession.builder.appName("MPJ-Root-Seeding")
@@ -224,8 +225,7 @@ def run_logreg_allreduce(
     import numpy as np
 
     print(
-        f"  [LogReg Allreduce] Starting — "
-        f"{num_workers} workers × {num_iterations} iterations"
+        f"  [LogReg Allreduce] Starting — " f"{num_workers} workers × {num_iterations} iterations"
     )
 
     final_weights = None
@@ -354,13 +354,12 @@ def aggregate_logreg_results(
     Aggregate per-worker LogisticRegression results and write
     results/logreg_iter_metrics.csv (Objective 2a profiling dataset).
     """
+    from datetime import datetime
+
     import numpy as np
-    from datetime import datetime, timezone
 
     total_rows = sum(r["row_count"] for r in worker_results)
-    avg_accuracy = sum(
-        r["train_accuracy"] * r["row_count"] / total_rows for r in worker_results
-    )
+    avg_accuracy = sum(r["train_accuracy"] * r["row_count"] / total_rows for r in worker_results)
 
     if allreduce_result is not None:
         final_weights = allreduce_result["weight_vector"]
@@ -389,7 +388,7 @@ def aggregate_logreg_results(
     _info(f"Weight preview   : [{w_preview}{'...' if len(final_weights) > 5 else ''}]")
 
     # ── Write merged per-iteration metrics CSV (Objective 2a) ───────────
-    _run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    _run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     _nw = num_workers or len(worker_results)
     _rp = reg_param or 0.0
     _nf = num_features or (len(final_weights) if final_weights else 0)
@@ -447,9 +446,7 @@ def reassign_pass_root(
     """
     import numpy as np
 
-    print(
-        f"  [Reassign] Broadcasting gossip-final centroids to {num_workers} workers ..."
-    )
+    print(f"  [Reassign] Broadcasting gossip-final centroids to {num_workers} workers ...")
     for _ in range(num_workers):
         reassign_queue.put({"type": "reassign", "centres": gossip_centres})
 
@@ -462,13 +459,13 @@ def reassign_pass_root(
     while received < num_workers:
         try:
             msg = reassign_queue.get_nowait()
-        except Exception:
+        except Exception as err:
             # queue.Empty (both threading and multiprocessing raise this)
             if time.monotonic() > deadline:
                 raise RuntimeError(
                     f"[Reassign] timed out waiting for worker stats "
                     f"({received}/{num_workers} received)"
-                )
+                ) from err
             time.sleep(0.01)
             continue
 
@@ -491,9 +488,7 @@ def reassign_pass_root(
         else:
             corrected.append(gossip_centres[j])
 
-    print(
-        f"  [Reassign] Recomputed {k} exact global centroids from {total_rows:,} rows"
-    )
+    print(f"  [Reassign] Recomputed {k} exact global centroids from {total_rows:,} rows")
     for i, c in enumerate(corrected):
         preview = ", ".join(f"{v:.3f}" for v in c[:4])
         print(f"  [Reassign] C{i}: [{preview}...]")
@@ -574,9 +569,7 @@ def _print_timing_summary(
     if prewarm_init is not None:
         print(f"  {'Avg Worker JVM Init (excl.)':<28} {prewarm_init:>8.4f} s")
     if gossip_info:
-        rounds = gossip_info.get("rounds_run") or gossip_info.get(
-            "iterations_done", "—"
-        )
+        rounds = gossip_info.get("rounds_run") or gossip_info.get("iterations_done", "—")
         converged = gossip_info.get("converged", "—")
         print(f"  {'Allreduce Rounds / Iters':<28} {str(rounds):>8}")
         if converged != "—":
@@ -615,16 +608,14 @@ def run_root(
     # so the multiprocessing path ignores them without TypeError.
     **_mpi_kwargs,
 ):
-    from mpj_spark.config import TOTAL_CORES, DATA_DIR
+    from mpj_spark.config import DATA_DIR, TOTAL_CORES
 
     logger = DevLogger(worker_id="root")
 
     # Log any MPI-layer kwargs that were passed but are unused here
     if _mpi_kwargs:
         ignored = ", ".join(_mpi_kwargs.keys())
-        print(
-            f"  [run_root] MPI-layer kwargs ignored in multiprocessing path: {ignored}"
-        )
+        print(f"  [run_root] MPI-layer kwargs ignored in multiprocessing path: {ignored}")
 
     do_seed = use_global_seed and use_gossip and app == "kmeans"
     do_reassign = use_reassign and use_gossip and app == "kmeans"
@@ -660,18 +651,12 @@ def run_root(
     else:
         title_extra = ""
 
-    _hdr(
-        f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n{title_extra}"
-    )
+    _hdr(f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n{title_extra}")
 
     cores = (
-        max(1, cores_override)
-        if cores_override
-        else max(1, math.ceil(TOTAL_CORES / num_workers))
+        max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / num_workers))
     )
-    print(
-        f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)"
-    )
+    print(f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)")
 
     seed_centres = None
     seed_time = None
@@ -844,9 +829,7 @@ def run_root(
                 seed_centres=seed_centres,
             )
             gossip_info = agg
-            _ok(
-                f"Gossip done  rounds={agg['rounds_run']}  converged={agg['converged']}"
-            )
+            _ok(f"Gossip done  rounds={agg['rounds_run']}  converged={agg['converged']}")
         else:
             agg = aggregate_kmeans_results(worker_results)
 
@@ -854,9 +837,9 @@ def run_root(
         _info(f"Total WCSS : {agg['total_wcss']:.4f}")
 
     elif app == "logreg":
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        _run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         agg = aggregate_logreg_results(
             worker_results,
             allreduce_result=allreduce_result,
@@ -907,9 +890,7 @@ def run_root(
 
     t_wall = load_time + proc_time + agg_time + (reassign_time or 0.0)
     avg_proc = sum(t["processing_time"] for t in worker_timings) / num_workers
-    avg_init = (
-        sum(t["init_time"] for t in worker_timings) / num_workers if prewarm else None
-    )
+    avg_init = sum(t["init_time"] for t in worker_timings) / num_workers if prewarm else None
 
     _print_timing_summary(
         load_time,

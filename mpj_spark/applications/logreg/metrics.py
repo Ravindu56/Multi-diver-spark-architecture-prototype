@@ -47,7 +47,7 @@ import csv
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class LogRegMetricsCollector:
     """Collect and persist per-epoch metrics for the LogReg Allreduce runner."""
 
     # Ordered column names for the per-epoch CSV
-    EPOCH_FIELDS: List[str] = [
+    EPOCH_FIELDS: list[str] = [
         "epoch",
         "spark_time_s",
         "sync_time_s",
@@ -71,8 +71,8 @@ class LogRegMetricsCollector:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        self._epochs: List[Dict[str, Any]] = []
-        self._run: Dict[str, Any] = {}
+        self._epochs: list[dict[str, Any]] = []
+        self._run: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Per-epoch recording
@@ -149,7 +149,7 @@ class LogRegMetricsCollector:
         logger.info("[rank %d] Run JSON written: %s", self.rank, path)
         return path
 
-    def summary_table(self) -> List[Dict[str, Any]]:
+    def summary_table(self) -> list[dict[str, Any]]:
         """Return the list of per-epoch dicts (used by the CLI summary printer)."""
         return list(self._epochs)
 
@@ -162,7 +162,7 @@ class LogRegMetricsCollector:
         output_dir: str,
         num_ranks: int,
         output_filename: str = "logreg_all_ranks_epochs.csv",
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Concatenate per-rank epoch CSVs into a single aggregated file.
         Adds a "rank" column so each row can be traced back to its origin.
@@ -178,13 +178,13 @@ class LogRegMetricsCollector:
         -------
         Path to the aggregated CSV, or None if no rank files were found.
         """
-        all_rows: List[Dict[str, Any]] = []
+        all_rows: list[dict[str, Any]] = []
         for r in range(num_ranks):
             path = os.path.join(output_dir, f"logreg_rank{r}_epochs.csv")
             if not os.path.exists(path):
                 logger.warning("Aggregation: rank %d CSV not found at %s", r, path)
                 continue
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 reader = csv.DictReader(fh)
                 for row in reader:
                     row["rank"] = str(r)

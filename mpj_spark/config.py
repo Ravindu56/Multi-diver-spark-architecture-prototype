@@ -1,8 +1,8 @@
 # ============================================================
 # config.py — Central configuration for MPJ-SPARK prototype
 # ============================================================
-import os
 import multiprocessing
+import os
 
 # --- Shared Storage ---
 SHARED_STORAGE_PATH = os.environ.get("MPJ_SHARED_STORAGE", "./shared_storage")
@@ -39,13 +39,9 @@ DEFAULT_NUM_WORKERS = 4
 # ── Data directory ─────────────────────────────────────────────────────
 # All generated datasets and partition files are stored here.
 # Path is relative to project root (where main.py lives).
-DATA_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
-)
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
-LOG_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
-)
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 
 # ── Spark defaults ─────────────────────────────────────────────────────
 SPARK_LOG_LEVEL = "ERROR"  # suppress verbose Spark INFO/WARN output

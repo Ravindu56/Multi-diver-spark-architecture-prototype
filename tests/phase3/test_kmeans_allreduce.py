@@ -265,8 +265,9 @@ def test_run_kmeans_allreduce_return_keys():
         "rank",
         "total_time_s",
     }
-    from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
     import inspect
+
+    from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
 
     src = inspect.getsource(run_kmeans_allreduce)
     for key in required_keys:

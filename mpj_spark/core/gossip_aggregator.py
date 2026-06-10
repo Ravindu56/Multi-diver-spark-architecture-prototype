@@ -19,20 +19,20 @@
 #   from previous behaviour for runs without global seeding.
 # ================================================================
 
-import time
 import random
+import time
+from typing import Any
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from typing import List, Dict, Any, Optional
-
 
 # ── helpers ───────────────────────────────────────────────────────
 
 
 def _hungarian_align(
-    reference: List[List[float]],
-    candidate: List[List[float]],
-) -> List[List[float]]:
+    reference: list[list[float]],
+    candidate: list[list[float]],
+) -> list[list[float]]:
     """
     Re-order candidate centroids to best match reference ordering
     using the Hungarian algorithm (O(k^3), negligible for k<=50).
@@ -46,30 +46,28 @@ def _hungarian_align(
 
 
 def _weighted_avg(
-    centres_a: List[List[float]],
+    centres_a: list[list[float]],
     rows_a: int,
-    centres_b: List[List[float]],
+    centres_b: list[list[float]],
     rows_b: int,
-) -> List[List[float]]:
+) -> list[list[float]]:
     """
     Weighted average of two centroid sets by row counts.
     B is Hungarian-aligned to A before averaging.
     """
     aligned_b = _hungarian_align(centres_a, centres_b)
     total = rows_a + rows_b
-    merged = (rows_a / total) * np.array(centres_a) + (rows_b / total) * np.array(
-        aligned_b
-    )
+    merged = (rows_a / total) * np.array(centres_a) + (rows_b / total) * np.array(aligned_b)
     return merged.tolist()
 
 
 def _per_worker_drift(
-    old_centres: List[List[List[float]]],
-    new_centres: List[List[List[float]]],
-) -> List[float]:
+    old_centres: list[list[list[float]]],
+    new_centres: list[list[list[float]]],
+) -> list[float]:
     reference = old_centres[0]
     drifts = []
-    for old_w, new_w in zip(old_centres, new_centres):
+    for old_w, new_w in zip(old_centres, new_centres, strict=False):
         aligned_old = _hungarian_align(reference, old_w)
         aligned_new = _hungarian_align(reference, new_w)
         a = np.array(aligned_old)
@@ -110,7 +108,7 @@ class GossipAggregator:
         self.fanout = max(1, min(initial_fanout, num_workers - 1))
         self.rng = random.Random(seed)
         self.verbose = verbose
-        self.round_log: List[Dict[str, Any]] = []
+        self.round_log: list[dict[str, Any]] = []
 
     # ── public API ────────────────────────────────────────────────
 
@@ -118,8 +116,8 @@ class GossipAggregator:
         self,
         gossip_queue,
         timeout_per_worker: float = 60.0,
-        seed_centres: Optional[List[List[float]]] = None,
-    ) -> Dict[str, Any]:
+        seed_centres: list[list[float]] | None = None,
+    ) -> dict[str, Any]:
         """
         Collect worker states, run adaptive gossip rounds, return
         global centroid result.
@@ -159,9 +157,7 @@ class GossipAggregator:
         for rnd in range(1, self.max_rounds + 1):
             rounds_run = rnd
 
-            old_centres = [
-                list(states[wid]["centres"]) for wid in sorted(states.keys())
-            ]
+            old_centres = [list(states[wid]["centres"]) for wid in sorted(states.keys())]
 
             worker_ids = list(states.keys())
             self.rng.shuffle(worker_ids)
@@ -175,13 +171,9 @@ class GossipAggregator:
                         states[pid]["centres"],
                         states[pid]["row_count"],
                     )
-                    states[wid]["row_count"] = (
-                        states[wid]["row_count"] + states[pid]["row_count"]
-                    )
+                    states[wid]["row_count"] = states[wid]["row_count"] + states[pid]["row_count"]
 
-            new_centres = [
-                list(states[wid]["centres"]) for wid in sorted(states.keys())
-            ]
+            new_centres = [list(states[wid]["centres"]) for wid in sorted(states.keys())]
             drifts = _per_worker_drift(old_centres, new_centres)
             max_drift = max(drifts)
 
@@ -234,7 +226,7 @@ class GossipAggregator:
         self,
         gossip_queue,
         timeout: float,
-    ) -> Dict[int, Dict]:
+    ) -> dict[int, dict]:
         states = {}
         for _ in range(self.num_workers):
             item = gossip_queue.get(timeout=timeout)
@@ -251,8 +243,8 @@ class GossipAggregator:
     def _pick_peers(
         self,
         worker_id: int,
-        all_ids: List[int],
-    ) -> List[int]:
+        all_ids: list[int],
+    ) -> list[int]:
         candidates = [i for i in all_ids if i != worker_id]
         n = min(self.fanout, len(candidates))
         return self.rng.sample(candidates, n)
@@ -260,7 +252,7 @@ class GossipAggregator:
     def _adapt_fanout(
         self,
         current_drift: float,
-        prev_drift: Optional[float],
+        prev_drift: float | None,
         fanout: int,
     ) -> int:
         if prev_drift is None or prev_drift == 0.0:
@@ -278,9 +270,9 @@ class GossipAggregator:
 
     def _global_merge(
         self,
-        states: Dict[int, Dict],
-        seed_reference: Optional[List[List[float]]] = None,
-    ) -> Dict[str, Any]:
+        states: dict[int, dict],
+        seed_reference: list[list[float]] | None = None,
+    ) -> dict[str, Any]:
         """
         Final weighted average of all post-gossip states.
 
@@ -331,7 +323,7 @@ class GossipAggregator:
 
     def _print_summary(
         self,
-        final: Dict,
+        final: dict,
         rounds_run: int,
         converged: bool,
         agg_time: float,

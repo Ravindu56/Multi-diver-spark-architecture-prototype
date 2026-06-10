@@ -124,9 +124,7 @@ def test_compute_local_stats_shapes(spark, points_rdd):
         k,
         D,
     ), f"local_sums: expected ({k}, {D}), got {local_sums.shape}"
-    assert local_counts.shape == (
-        k,
-    ), f"local_counts: expected ({k},), got {local_counts.shape}"
+    assert local_counts.shape == (k,), f"local_counts: expected ({k},), got {local_counts.shape}"
 
 
 # ---------------------------------------------------------------------------

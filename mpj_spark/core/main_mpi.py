@@ -169,9 +169,7 @@ def _run_root(args):
 
     P3-02: rank 0 is the root; no multiprocessing.Process is created.
     """
-    assert (
-        rank == 0
-    ), f"_run_root() called on rank {rank} — must only be called by rank 0."
+    assert rank == 0, f"_run_root() called on rank {rank} — must only be called by rank 0."
     assert size >= 2, (
         f"Need at least 2 MPI ranks (got {size}). "
         "Launch with: mpirun -np <1+N> python -m mpj_spark.core.main_mpi"
@@ -186,10 +184,7 @@ def _run_root(args):
         )
     num_workers = size - 1
 
-    print(
-        f"\n[main_mpi] MPI_COMM_WORLD size={size}  "
-        f"root=rank-0  workers=ranks-1..{size - 1}"
-    )
+    print(f"\n[main_mpi] MPI_COMM_WORLD size={size}  " f"root=rank-0  workers=ranks-1..{size - 1}")
 
     # Auto-generate dataset if the input file does not exist (rank 0 only)
     if not os.path.exists(args.input):
@@ -197,9 +192,7 @@ def _run_root(args):
             f"[main_mpi] Input file '{args.input}' not found. "
             f"Auto-generating {args.generate} MB synthetic dataset ..."
         )
-        _repo_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..")
-        )
+        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         if _repo_root not in sys.path:
             sys.path.insert(0, _repo_root)
         from mpj_spark_prototype_v2 import generate_test_dataset  # noqa
@@ -247,9 +240,7 @@ def _run_worker():
     P3-02: each worker rank is an independent Spark driver process;
     no multiprocessing.Process is created here.
     """
-    assert (
-        rank >= 1
-    ), f"_run_worker() called on rank {rank} — must only be called by rank >= 1."
+    assert rank >= 1, f"_run_worker() called on rank {rank} — must only be called by rank >= 1."
 
     from mpj_spark.workers.worker_mpi import run_worker_mpi
 

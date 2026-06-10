@@ -22,16 +22,15 @@
 # =============================================================
 import queue as _threading_queue  # synchronous threading Queue for in-process tests
 
-import pytest
 import numpy as np
+import pytest
 
 from mpj_spark.core.root_process import (
-    align_centres_hungarian,
     aggregate_kmeans_results,
-    run_logreg_allreduce,
     aggregate_logreg_results,
+    align_centres_hungarian,
+    run_logreg_allreduce,
 )
-
 
 # =============================================================
 # Section 1: align_centres_hungarian()
@@ -310,9 +309,7 @@ class TestRunLogregAllreduce:
         messages = []
         while not down_q.empty():
             messages.append(down_q.get_nowait())
-        assert (
-            len(messages) == N
-        ), f"Expected {N} broadcast messages, got {len(messages)}"
+        assert len(messages) == N, f"Expected {N} broadcast messages, got {len(messages)}"
         msg = messages[0]
         assert {"type", "iteration", "weights", "intercept"}.issubset(msg.keys())
         assert msg["type"] == "avg_weights"

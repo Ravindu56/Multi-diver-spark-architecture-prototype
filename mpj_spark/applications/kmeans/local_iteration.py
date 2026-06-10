@@ -66,7 +66,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Tuple
 
 import numpy as np
 from pyspark import RDD
@@ -231,7 +230,7 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
 def compute_local_stats(
     points_rdd: RDD,
     centroids: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Compute LOCAL centroid sums and point counts for this rank's data shard.
 
@@ -316,9 +315,7 @@ def compute_local_stats(
     # One Spark action: mapPartitions → reduceByKey → collect
     # Result: list of (cluster_id, (sum_vec, count)) for clusters with >= 1 point
     raw_results = (
-        points_rdd.mapPartitions(_map_partition)
-        .reduceByKey(_reduce_partition_stats)
-        .collect()
+        points_rdd.mapPartitions(_map_partition).reduceByKey(_reduce_partition_stats).collect()
     )
 
     # Assemble into dense K-indexed arrays.

@@ -45,12 +45,8 @@ def print_timing(tc: TimingCollector, worker_timings: list = None):
         )
         print(f"  Avg Worker Init         : {avg_init:>8.4f} s  (per worker)")
     else:
-        print(
-            f"  Driver Init    (T_Init) : {avg_init:>8.4f} s  (avg per worker, cold-start)"
-        )
-    print(
-        f"  Processing     (T_Proc) : {avg_proc:>8.4f} s  (avg per worker, pure compute)"
-    )
+        print(f"  Driver Init    (T_Init) : {avg_init:>8.4f} s  (avg per worker, cold-start)")
+    print(f"  Processing     (T_Proc) : {avg_proc:>8.4f} s  (avg per worker, pure compute)")
     print(f"  Aggregation    (T_Agg)  : {agg:>8.4f} s  ({pct(agg):>5.1f}% of total)")
     print(f"  Wall-clock parallel     : {parallel:>8.4f} s  (post-barrier computation)")
     print(f"  Total Execution Time    : {total:>8.4f} s")

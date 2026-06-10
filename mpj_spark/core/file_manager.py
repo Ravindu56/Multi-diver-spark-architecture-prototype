@@ -20,9 +20,10 @@
 #   Peak RAM: O(N open file handles + 1 line buffer) ≈ negligible
 #   Result: T_Load ≈ 0.20 s at 500 MB (matches 50 MB behaviour)
 # ============================================================
-import os
 import math
+import os
 import shutil
+
 from mpj_spark.config import SHARED_STORAGE_PATH
 
 
@@ -43,7 +44,7 @@ class MPJSparkFileManager:
         """Read full input file; return (content, file_size_bytes).
         NOTE: kept for API compatibility — not used by dynamic_partition().
         """
-        with open(input_file_path, "r", encoding="utf-8") as fh:
+        with open(input_file_path, encoding="utf-8") as fh:
             content = fh.read()
         return content, os.path.getsize(input_file_path)
 
@@ -98,8 +99,7 @@ class MPJSparkFileManager:
         # Handle empty file gracefully — produce zero-line partition files
         if total_lines == 0:
             part_paths = [
-                os.path.join(self.partitions_dir, f"partition_{i}.txt")
-                for i in range(num_workers)
+                os.path.join(self.partitions_dir, f"partition_{i}.txt") for i in range(num_workers)
             ]
             for p in part_paths:
                 open(p, "w", encoding="utf-8").close()
@@ -119,8 +119,7 @@ class MPJSparkFileManager:
 
         # Pre-build partition paths and open all output files at once
         part_paths = [
-            os.path.join(self.partitions_dir, f"partition_{i}.txt")
-            for i in range(num_workers)
+            os.path.join(self.partitions_dir, f"partition_{i}.txt") for i in range(num_workers)
         ]
         line_counts = [0] * num_workers
 
@@ -130,7 +129,7 @@ class MPJSparkFileManager:
         ]
 
         try:
-            with open(input_file_path, "r", encoding="utf-8") as src:
+            with open(input_file_path, encoding="utf-8") as src:
                 for line_num, line in enumerate(src):
                     # Round-robin: line 0→p0, line 1→p1, ..., line N→p0, ...
                     pid = line_num % num_workers
