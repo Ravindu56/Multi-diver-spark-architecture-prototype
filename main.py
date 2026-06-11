@@ -24,15 +24,10 @@
 #   --compare:
 #       Runs single-driver baseline_logreg and prints comparison table.
 #       Works with all --sync modes.
-#
-# CHANGES IN THIS COMMIT
-# ----------------------
-#   Added:
-#     --sync {queue,mpi,none}  execution-mode selector
-#   Unchanged:
-#     All existing flags (--workers, --app, --generate, --input,
-#     --compare, --kmeans-*, --logreg-*, --gossip-*, --log-history)
-#     behave identically to before.
+#       For a fair academic benchmark, combine with --baseline-master:
+#       python main.py --app logreg --workers 3 --sync mpi \
+#           --input data.csv --compare \
+#           --baseline-master spark://spark-master:7077
 #
 # LOG HISTORY
 #   python main.py --log-history
@@ -76,6 +71,27 @@ def parse_args():
             '  mpi   : Phase 3 MPI Allreduce via mpirun\n'
             '  none  : no synchronization; workers run independently\n'
             'Ignored for wordcount and kmeans.'
+        ),
+    )
+
+    # ── BASELINE MASTER ───────────────────────────────────────────
+    p.add_argument(
+        '--baseline-master',
+        type=str,
+        default=None,
+        metavar='URL',
+        help=(
+            'Spark master URL for the single-driver baseline (--compare mode).\n'
+            'Default: None  → local[N]  (single-machine dev mode)\n'
+            'For a fair academic benchmark, point at a Spark standalone\n'
+            'cluster with the same hardware budget as the multi-driver setup:\n'
+            '  --baseline-master spark://spark-master:7077\n'
+            'In standalone mode the baseline session is configured with:\n'
+            '  spark.executor.instances = --workers\n'
+            '  spark.executor.cores     = cores per worker\n'
+            '  spark.executor.memory    = RAM per worker\n'
+            'This ensures only the execution architecture differs between\n'
+            'the baseline and the multi-driver conditions.'
         ),
     )
 
@@ -134,7 +150,8 @@ def _run_mpi_logreg(args, dataset_path: str) -> None:
     the Phase 3 allreduce.py runner handles everything.
 
     If --compare is set, runs the single-driver baseline_logreg first
-    and prints a comparison table after mpirun completes.
+    (using --baseline-master if provided) and prints a comparison table
+    after mpirun completes.
     """
     # ── Validate mpi4py ───────────────────────────────────────────────
     try:
@@ -156,17 +173,17 @@ def _run_mpi_logreg(args, dataset_path: str) -> None:
     if args.compare:
         print('\n[main] Running single-driver baseline first ...')
         from mpj_spark.applications.baseline_logreg import run_baseline_logreg
-        from mpj_spark.config import TOTAL_CORES
         parity_iter = args.workers * args.logreg_iter
         _br, baseline_timing = run_baseline_logreg(
-            input_file      = dataset_path,
-            num_workers     = args.workers,
-            cores_override  = args.cores,
-            max_iter        = args.logreg_iter,
-            reg_param       = args.logreg_reg_param,
-            num_features    = args.logreg_features,
-            baseline_threads= args.baseline_threads,
-            parity_iter     = parity_iter,
+            input_file       = dataset_path,
+            num_workers      = args.workers,
+            cores_override   = args.cores,
+            max_iter         = args.logreg_iter,
+            reg_param        = args.logreg_reg_param,
+            num_features     = args.logreg_features,
+            baseline_threads = args.baseline_threads,
+            parity_iter      = parity_iter,
+            baseline_master  = args.baseline_master,
         )
 
     # ── Build mpirun command ───────────────────────────────────────────────
@@ -176,10 +193,10 @@ def _run_mpi_logreg(args, dataset_path: str) -> None:
         '--allow-run-as-root',
         sys.executable,
         '-m', 'mpj_spark.applications.logreg.allreduce',
-        '--input',   dataset_path,
-        '--epochs',  str(args.logreg_iter),
-        '--lr',      str(args.logreg_reg_param),
-        '--features',str(args.logreg_features),
+        '--input',    dataset_path,
+        '--epochs',   str(args.logreg_iter),
+        '--lr',       str(args.logreg_reg_param),
+        '--features', str(args.logreg_features),
     ]
 
     print(f'\n[main] Launching MPI Allreduce: {" ".join(cmd)}')
@@ -198,6 +215,7 @@ def _run_mpi_logreg(args, dataset_path: str) -> None:
         SEP = '=' * 60
         print(f'\n{SEP}')
         print(f'  Baseline vs MPI Allreduce  |  workers={args.workers}')
+        print(f'  Baseline mode: {baseline_timing.get("mode", "local")}')
         print(SEP)
         print(f'  {"Metric":<26} {"Baseline":>12} {"MPI":>12} {"Speedup":>8}')
         print(f'  {"-"*26} {"-"*12} {"-"*12} {"-"*8}')
@@ -237,15 +255,8 @@ def _run_nosync_logreg(args, dataset_path: str) -> None:
     Multi-driver logreg with no cross-driver synchronization.
     Workers run independently; root collects and row-weight-averages
     the final weight vectors (no Allreduce rounds).
-
-    Implemented by calling run_root() with logreg_iter=1 and
-    passing allreduce_up/down queues=None via a special config flag
-    so queue_run.run() takes the baseline (no-allreduce) code path.
     """
     from mpj_spark.core.root_process import run_root
-    # Force no-sync: logreg_iter=1 and no queues created.
-    # run_root detects do_logreg_allreduce = False when
-    # _NOSYNC env var is set; workers receive no down_queue and skip FedAvg.
     os.environ['MPJ_LOGREG_NOSYNC'] = '1'
     try:
         run_root(
@@ -259,6 +270,7 @@ def _run_nosync_logreg(args, dataset_path: str) -> None:
             logreg_reg_param = args.logreg_reg_param,
             logreg_features  = args.logreg_features,
             baseline_threads = args.baseline_threads,
+            baseline_master  = args.baseline_master,
         )
     finally:
         os.environ.pop('MPJ_LOGREG_NOSYNC', None)
@@ -280,7 +292,6 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # ── Resolve sync mode default ──────────────────────────────────────────
-    # If --sync not specified: queue for logreg, ignored for others.
     sync_mode = args.sync
     if sync_mode is None:
         sync_mode = 'queue' if args.app == 'logreg' else 'queue'
@@ -331,6 +342,10 @@ def main():
         print(f'[main] LogReg features  : {args.logreg_features}')
     if args.baseline_threads:
         print(f'[main] Baseline threads : {args.baseline_threads}  [fair comparison mode]')
+    if args.baseline_master:
+        print(f'[main] Baseline master  : {args.baseline_master}  [standalone cluster]')
+    else:
+        print(f'[main] Baseline master  : local[N]  [dev mode — use --baseline-master for benchmark]')
     if args.gossip:
         print(f'[main] Gossip mode      : ON  '
               f'(threshold={args.gossip_threshold}, '
@@ -339,15 +354,13 @@ def main():
 
     # ── Dispatch to execution path ──────────────────────────────────────────
     if args.app == 'logreg' and sync_mode == 'mpi':
-        # ── Phase 3: MPI Allreduce ───────────────────────────────────────
         _run_mpi_logreg(args, dataset_path)
 
     elif args.app == 'logreg' and sync_mode == 'none':
-        # ── No-sync multi-driver ──────────────────────────────────────────
         _run_nosync_logreg(args, dataset_path)
 
     else:
-        # ── Phase 2: Queue/FedAvg (default) + kmeans + wordcount ──────────
+        # Phase 2: Queue/FedAvg (default) + kmeans + wordcount
         from mpj_spark.core.root_process import run_root
         run_root(
             input_file       = dataset_path,
@@ -359,6 +372,7 @@ def main():
             kmeans_k         = args.kmeans_k,
             kmeans_iter      = args.kmeans_iter,
             baseline_threads = args.baseline_threads,
+            baseline_master  = args.baseline_master,
             use_gossip       = args.gossip,
             gossip_threshold = args.gossip_threshold,
             gossip_max_rounds= args.gossip_max_rounds,
