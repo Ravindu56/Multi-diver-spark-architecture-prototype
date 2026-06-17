@@ -1,5 +1,5 @@
 pyspark
-mpi4py
+mpi4py>=3.1          # OpenMPI must be installed at OS level — see README Phase 3 Prerequisites
 pytest>=8.0
 pytest-cov>=5.0
 numpy>=1.24
