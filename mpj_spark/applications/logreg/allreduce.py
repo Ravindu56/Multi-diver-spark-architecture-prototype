@@ -2,50 +2,30 @@
 # mpj_spark/applications/logreg/allreduce.py
 # Phase 3 — MPI Allreduce LogReg runner
 #
-# BUG FIX (convergence-parity patch)
-# ───────────────────────────────────
+# CHANGE LOG (global standardisation fix — call-site update)
+# -----------------------------------------------------------
+# load_and_cache_rdd() now requires comm and rank parameters so it can call
+# _broadcast_global_stats() before caching the RDD.  The call site here is
+# updated from:
+#     data_rdd = load_and_cache_rdd(spark, partition_path, num_features)
+# to:
+#     data_rdd = load_and_cache_rdd(spark, partition_path, num_features, comm, rank)
+# No other logic in this file is changed.
+#
+# CHANGE LOG (convergence-parity patch)
+# ───────────────────────────────────────
 # BUG — |w| divergence: allreduce_gradients() was applying a FIXED learning
-#   rate with no decay.  On a 10-feature synthetic dataset, the fixed lr=0.01
-#   causes the weight norm to grow without bound across 30 iterations because
-#   the gradient step overshoots the optimum on later iterations when the loss
-#   surface is flat (norm of gradient ≈ 0 but the step is still lr * grad).
-#
-#   Fix: introduce a cosine-decay learning-rate schedule.  The effective lr at
-#   epoch t is:
-#       lr_t = lr_min + 0.5*(lr_max - lr_min)*(1 + cos(π*t/T))
-#   This starts at lr_max, decays smoothly to lr_min by epoch T, preventing
-#   overshooting in later rounds while still taking large steps early on.
-#
-#   Additionally, L2 regularisation is now applied INSIDE the gradient step
-#   (weight decay form):
-#       w_new = w - lr_t * (grad_avg + reg_param * w)
-#   Previously reg_param was not applied in allreduce_gradients(), which
-#   diverges from the baseline MLlib fit that uses regParam=0.01.  This
-#   change makes the MPI path numerically equivalent to the MLlib baseline.
-#
-# PAPER NOTE (Bug 2 / speedup framing):
-#   The timing metrics recorded here (spark_time_s, sync_time_s) are the
-#   correct Phase 2 single-machine numbers.  Speedup vs. baseline should be
-#   compared on load_time_s only for the Phase 2 prototype report.  The
-#   proc_time slowdown on a single machine is expected (shared-core contention)
-#   and should be reported as such, not as a regression.
+#   rate with no decay.  Fix: cosine-decay LR schedule + L2 weight-decay
+#   regularisation applied inside the gradient step.
 #
 # RETURN VALUE FIX (Issue #10 / validate_parity.py integration)
 # ───────────────────────────────────────────────────────────────
-# run_logreg_allreduce() was calling collector.record_run(w=w, ...) but
-# LogRegMetricsCollector.record_run() has no 'w' parameter and returns None.
-# The function now returns an explicit dict:
-#   {
-#     'weights'    : list[float]   — final weight vector
-#     'intercept'  : float         — 0.0 (bias folded into w; no separate term)
-#     'run_summary': dict          — epochs_run, converged, total_time_s
-#   }
+# run_logreg_allreduce() returns explicit dict:
+#   { 'weights', 'intercept', 'run_summary' }
 #
 # METRICS KWARG FIX
 # ─────────────────
-# record_epoch() kwargs corrected to match LogRegMetricsCollector signature:
-#   w_norm  → weight_norm
-#   loss    → global_loss
+# record_epoch() kwargs corrected to match LogRegMetricsCollector signature.
 # =============================================================================
 
 from __future__ import annotations
@@ -60,17 +40,14 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# Learning-rate schedule
+# Learning-rate schedule  (unchanged)
 # ===========================================================================
 
 def _cosine_lr(epoch: int, max_epochs: int, lr_max: float, lr_min: float = 1e-4) -> float:
     """
     Cosine-decay learning rate schedule.
 
-        lr_t = lr_min + 0.5*(lr_max - lr_min)*(1 + cos(π*t/T))
-
-    Returns lr_max at epoch 0, decays to lr_min at epoch max_epochs.
-    Prevents overshooting on later iterations when the gradient norm is small.
+        lr_t = lr_min + 0.5*(lr_max - lr_min)*(1 + cos(pi*t/T))
     """
     if max_epochs <= 1:
         return lr_max
@@ -79,7 +56,7 @@ def _cosine_lr(epoch: int, max_epochs: int, lr_max: float, lr_min: float = 1e-4)
 
 
 # ===========================================================================
-# STEP 5a — Allreduce gradient synchronisation + weight update
+# STEP 5a — Allreduce gradient synchronisation + weight update  (unchanged)
 # ===========================================================================
 
 def allreduce_gradients(
@@ -93,50 +70,23 @@ def allreduce_gradients(
     """
     Synchronous SGD weight update via MPI Allreduce.
 
-    FIX: L2 regularisation (weight decay) is now applied in the update step:
-        w_new = w - lr * (grad_avg + reg_param * w)
-    This matches the MLlib baseline (regParam=0.01) and prevents the weight
-    vector from growing unbounded in the absence of adaptive learning rate.
-
-    The caller is responsible for passing the scheduled learning_rate (see
-    _cosine_lr) so this function stays stateless.
-
-    Parameters
-    ----------
-    comm          : mpi4py.MPI.Intracomm
-    size          : int — MPI world size
-    w             : np.ndarray (D,) — current weight vector
-    grad_local    : np.ndarray (D,) — normalised local gradient from
-                    compute_gradient_spark() (already /n_local)
-    learning_rate : float — scheduled lr for this epoch (use _cosine_lr)
-    reg_param     : float — L2 regularisation coefficient (default 0.01,
-                    must match the baseline regParam for comparability)
-
-    Returns
-    -------
-    w_new       : np.ndarray (D,) — updated weight vector (same on all ranks)
-    global_grad : np.ndarray (D,) — averaged global gradient (for logging)
+    w_new = w - lr * (grad_avg + reg_param * w)
     """
     from mpi4py import MPI
 
     global_grad = np.zeros_like(grad_local)
-
     comm.Allreduce(
         [grad_local, MPI.DOUBLE],
         [global_grad, MPI.DOUBLE],
         op=MPI.SUM,
     )
     global_grad /= float(size)
-
-    # FIX: weight-decay form — equivalent to L2-regularised gradient step
-    # w_new = w - lr * (grad_avg + reg_param * w)
     w_new = w - learning_rate * (global_grad + reg_param * w)
-
     return w_new, global_grad
 
 
 # ===========================================================================
-# STEP 5b — Loss Allreduce + convergence broadcast
+# STEP 5b — Loss Allreduce + convergence broadcast  (unchanged)
 # ===========================================================================
 
 def check_loss_convergence(
@@ -151,9 +101,6 @@ def check_loss_convergence(
 ) -> tuple[bool, float]:
     """
     Compute global cross-entropy loss and broadcast a convergence flag.
-
-    Each rank computes local mean cross-entropy; Allreduce sums, rank 0
-    checks delta and broadcasts stop flag to all ranks.
     """
     from mpi4py import MPI
 
@@ -209,15 +156,16 @@ def run_logreg_allreduce(
     """
     Multi-driver Logistic Regression with synchronous Allreduce gradient sync.
 
-    FIX: cosine-decay learning rate schedule replaces the fixed lr.
-         L2 weight-decay regularisation is applied in allreduce_gradients().
+    FIX (this commit): load_and_cache_rdd() now standardises features using
+    global mean/std broadcast from rank 0, matching MLlib's default
+    StandardScaler behaviour.
 
     Returns
     -------
     dict with keys:
-        'weights'    : list[float]  — final weight vector (length = num_features)
-        'intercept'  : float        — 0.0  (bias is folded into w; no separate term)
-        'run_summary': dict         — epochs_run, converged, total_time_s
+        'weights'    : list[float]  -- final weight vector
+        'intercept'  : float        -- 0.0
+        'run_summary': dict         -- epochs_run, converged, total_time_s
     """
     from mpj_spark.applications.logreg.local_gradient import (
         compute_gradient_spark,
@@ -241,10 +189,11 @@ def run_logreg_allreduce(
         cores_override=_cores,
     )
 
-    # Step 4a — load + cache RDD
-    data_rdd = load_and_cache_rdd(spark, partition_path, num_features)
+    # Step 4a — load, standardise (global stats via Bcast), and cache RDD
+    # FIX: pass comm and rank so _broadcast_global_stats() can be called
+    data_rdd = load_and_cache_rdd(spark, partition_path, num_features, comm, rank)
 
-    # Weight init: zeros (same as MLlib default)
+    # Weight init: zeros in normalised feature space
     w = np.zeros(num_features, dtype=np.float64)
 
     comm.Barrier()
@@ -262,7 +211,7 @@ def run_logreg_allreduce(
         grad_local, _ = compute_gradient_spark(data_rdd, w)
         spark_time_s  = time.perf_counter() - t_spark
 
-        # Step 5 — allreduce + loss check (FIX: scheduled lr + reg_param)
+        # Step 5 — allreduce + loss check
         t_sync = time.perf_counter()
         lr_t   = _cosine_lr(epoch, max_epochs, lr_max=learning_rate)
         w, global_grad = allreduce_gradients(
@@ -275,9 +224,6 @@ def run_logreg_allreduce(
         grad_norm    = float(np.linalg.norm(global_grad))
         prev_loss    = global_loss
 
-        # FIX: use correct kwarg names matching LogRegMetricsCollector.record_epoch()
-        #   weight_norm= (not w_norm=)
-        #   global_loss= (not loss=)
         collector.record_epoch(
             epoch=epoch,
             spark_time_s=spark_time_s,
@@ -303,7 +249,6 @@ def run_logreg_allreduce(
 
     total_time_s = time.perf_counter() - t_total_start
 
-    # Record run-level metrics (no 'w' param — collector stores timing only)
     collector.record_run(
         total_time_s=total_time_s,
         epochs_run=epoch + 1,
@@ -319,11 +264,9 @@ def run_logreg_allreduce(
     data_rdd.unpersist()
     spark.stop()
 
-    # Return explicit dict with weights so driver.py / validate_parity.py
-    # can extract them without touching Spark internals after spark.stop().
     return {
         "weights": w.tolist(),
-        "intercept": 0.0,  # bias folded into w; no separate intercept term
+        "intercept": 0.0,
         "run_summary": {
             "epochs_run": epoch + 1,
             "converged": converged,
