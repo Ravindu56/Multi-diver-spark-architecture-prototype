@@ -394,7 +394,7 @@ class TestAggregateLogregResults:
             workers, allreduce_result=allreduce, results_dir=str(tmp_path)
         )
         np.testing.assert_array_almost_equal(result["weight_vector"], [9.9, 9.9])
-        assert result["agg_mode"] == "Allreduce (FedAvg)"
+        assert result["agg_mode"] == "Allreduce \u2014 FedAvg per-iteration (M2)"
 
     def test_no_allreduce_uses_row_weighted_mean(self, tmp_path):
         """
@@ -408,7 +408,7 @@ class TestAggregateLogregResults:
         ]
         result = aggregate_logreg_results(workers, results_dir=str(tmp_path))
         assert result["weight_vector"][0] == pytest.approx(1.0)
-        assert result["agg_mode"] == "Row-weighted mean (no Allreduce)"
+        assert result["agg_mode"] == "Post-hoc row-weighted average \u2014 no sync (M1)"
 
     def test_weight_norm_is_positive(self, tmp_path):
         workers = [

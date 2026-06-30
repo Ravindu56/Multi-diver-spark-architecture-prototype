@@ -393,6 +393,8 @@ class TestBaselineLogregCoreBudget:
       1. baseline_threads  (explicit fair-comparison budget)
       2. cores_override    (manual flag)
       3. auto formula      (TOTAL_CORES / num_workers)
+
+    _sniff_csv_header is patched so tests never touch the filesystem.
     """
 
     def _run(
@@ -440,6 +442,12 @@ class TestBaselineLogregCoreBudget:
                 "mpj_spark.applications.baseline_logreg.LogisticRegression",
                 return_value=lr_inst,
             ),
+            # Prevent _sniff_csv_header from opening 'fake.csv' on disk.
+            # Return (has_header=False, n_cols=3) — headerless 2-feature CSV.
+            patch(
+                "mpj_spark.applications.baseline_logreg._sniff_csv_header",
+                return_value=(False, 3),
+            ),
         ):
             builder = mock_ss.builder
             builder.appName.return_value = builder
@@ -486,7 +494,11 @@ class TestBaselineLogregCoreBudget:
 
 
 class TestBaselineLogregReturnShape:
-    """Return-value contracts for run_baseline_logreg()."""
+    """Return-value contracts for run_baseline_logreg().
+
+    _sniff_csv_header is patched in every helper so tests are
+    fully filesystem-independent.
+    """
 
     def _run_success(self):
         fake_spark = MagicMock()
@@ -526,6 +538,10 @@ class TestBaselineLogregReturnShape:
             patch(
                 "mpj_spark.applications.baseline_logreg.LogisticRegression",
                 return_value=lr_inst,
+            ),
+            patch(
+                "mpj_spark.applications.baseline_logreg._sniff_csv_header",
+                return_value=(False, 3),
             ),
         ):
             builder = mock_ss.builder
@@ -567,6 +583,10 @@ class TestBaselineLogregReturnShape:
             patch(
                 "mpj_spark.applications.baseline_logreg.LogisticRegression",
                 return_value=lr_inst,
+            ),
+            patch(
+                "mpj_spark.applications.baseline_logreg._sniff_csv_header",
+                return_value=(False, 2),
             ),
         ):
             builder = mock_ss.builder

@@ -11,10 +11,48 @@ try:
     from pyspark.ml.classification import LogisticRegression
     from pyspark.ml.feature import VectorAssembler
     from pyspark.sql import SparkSession
+    from pyspark.sql.types import DoubleType, StructField, StructType
 except ImportError:  # pragma: no cover
     SparkSession = None
     LogisticRegression = None
     VectorAssembler = None
+    StructType = StructField = DoubleType = None
+
+
+def _sniff_csv_header(input_file: str) -> tuple[bool, int]:
+    """
+    Peek at the first non-blank line of *input_file* to decide whether
+    the CSV has a named header row.
+
+    Returns
+    -------
+    has_header : bool  — True when the first line contains non-numeric text
+    n_cols     : int   — total number of comma-separated columns in that line
+                         (features + 1 label column)
+
+    Strategy
+    --------
+    Try to parse every token in the first line as float.
+    - All-float  → headerless data row  → has_header=False
+    - Any non-float → named header row  → has_header=True
+    """
+    with open(input_file, encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            tokens = line.split(",")
+            all_numeric = all(_is_float(tok) for tok in tokens)
+            return (not all_numeric), len(tokens)
+    raise RuntimeError(f"Cannot sniff CSV header from '{input_file}': file appears empty.")
+
+
+def _is_float(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
 
 
 def _baseline_heap_gb(thread_count: int) -> int:
@@ -23,11 +61,6 @@ def _baseline_heap_gb(thread_count: int) -> int:
 
     Formula: 512 MB base + 256 MB per thread, rounded up to the next
     integer GB, capped at 80% of system RAM, minimum 2 GB.
-
-    This is needed because the baseline runs on the full (unpartitioned)
-    dataset with potentially many threads doing treeAggregate passes.
-    The multi-driver workers each see only 1/N of the data, so their
-    per-JVM memory pressure is much lower.
     """
     try:
         import psutil
@@ -36,9 +69,25 @@ def _baseline_heap_gb(thread_count: int) -> int:
         cap_gb = max(2, int(total_ram_gb * 0.80))
     except ImportError:
         cap_gb = 8
-
     raw_gb = math.ceil(0.5 + 0.25 * thread_count)
     return min(max(2, raw_gb), cap_gb)
+
+
+def _executor_memory_gb(num_workers: int) -> int:
+    """
+    Per-executor heap for a standalone-cluster baseline.
+
+    Mirrors build_spark_session() logic: allocate 75% of total RAM
+    divided equally across workers, floored at 2 GB.
+    """
+    try:
+        import psutil
+
+        total_ram_gb = psutil.virtual_memory().total / (1024**3)
+    except ImportError:
+        total_ram_gb = 16.0
+    per_worker_gb = max(2, int(total_ram_gb * 0.75 / num_workers))
+    return per_worker_gb
 
 
 def run_baseline_logreg(
@@ -50,14 +99,29 @@ def run_baseline_logreg(
     num_features: int = 10,
     baseline_threads: int = None,
     parity_iter: int = None,
+    baseline_master: str = None,
 ):
     """
     Single-driver Spark LogisticRegression baseline for --compare mode.
 
-    Returns (result_dict, timing_dict).  On OOM or Spark failure the fit
-    is skipped and result_dict contains accuracy=None with an oom_error key
-    so the comparison table can print a meaningful fallback rather than
-    crashing the full run.
+    baseline_master
+    ---------------
+    When None (default), the session uses local[N] — suitable for
+    single-machine development but NOT a fair academic benchmark.
+
+    For fair comparison against the multi-driver Docker cluster, pass
+    a Spark standalone master URL::
+
+        baseline_master="spark://spark-master:7077"
+
+    In standalone mode the session is configured with:
+        spark.executor.instances = num_workers
+        spark.executor.cores     = cores_per_worker
+        spark.executor.memory    = heap_per_worker
+
+    This gives the baseline exactly the same hardware budget as the
+    multi-driver framework (same worker count, same cores, same RAM),
+    so the only variable is the execution architecture.
 
     parity_iter
     -----------
@@ -66,24 +130,11 @@ def run_baseline_logreg(
 
         parity_iter = num_workers × logreg_iter
 
-    This ensures the comparison is fair on compute: the multi-driver run
-    distributes (num_workers × logreg_iter) gradient steps across workers
-    (one per Allreduce round on a 1/num_workers data shard), so the
-    baseline must also perform that many steps on the full dataset.
-
-    Memory note — why .cache() is NOT used here
-    --------------------------------------------
-    Calling df_vec.cache() forces the full VectorAssembler output (dense
-    feature matrix + label column, ~4 bytes × rows × features per column)
-    into the JVM MemoryStore via putIteratorAsValues.  On a 500 MB CSV
-    with 20 features this can exceed 2–3 GB of heap, causing OOM during
-    the first treeAggregate pass inside LogisticRegression.train().
-
-    MLlib's L-BFGS solver re-scans the RDD on every iteration anyway via
-    treeAggregate — explicit caching provides no speed benefit for a
-    single sequential fit call and only adds memory pressure.  The
-    workers cache their (smaller) partitions safely because each sees
-    only 1/N of the data.
+    Header detection
+    ----------------
+    Auto-detects whether the input CSV has a named header row by peeking
+    at the first line (_sniff_csv_header).  Robust to both header=True
+    and header=False datasets.
 
     IMPORTANT: all JVM-backed model attributes (coefficients, intercept)
     must be materialised as plain Python objects BEFORE spark.stop().
@@ -97,45 +148,93 @@ def run_baseline_logreg(
     else:
         thread_count = max(1, math.ceil(TOTAL_CORES / num_workers))
 
-    heap_gb = _baseline_heap_gb(thread_count)
-
     # Parity-adjusted iteration count
     effective_iter = parity_iter if parity_iter is not None else max_iter
     parity_label = (
         f"  [parity: {num_workers}×{max_iter}={parity_iter}]" if parity_iter is not None else ""
     )
 
-    print(
-        f"  [Baseline-LogReg] local[{thread_count}]  "
-        f"max_iter={effective_iter}  reg_param={reg_param}  "
-        f"[heap={heap_gb}g]{parity_label}"
+    # ------------------------------------------------------------------ #
+    # Detect whether the CSV has a named header row BEFORE starting Spark #
+    # ------------------------------------------------------------------ #
+    has_header, n_cols = _sniff_csv_header(input_file)
+
+    # ------------------------------------------------------------------ #
+    # Build SparkSession — local[N] for dev, standalone for benchmark     #
+    # ------------------------------------------------------------------ #
+    use_standalone = baseline_master is not None and baseline_master.strip().startswith(
+        ("spark://", "yarn", "k8s://")
     )
+
+    if use_standalone:
+        executor_mem_gb = _executor_memory_gb(num_workers)
+        master_url = baseline_master.strip()
+        mode_tag = f"standalone({master_url})"
+        print(
+            f"  [Baseline-LogReg] {mode_tag}  "
+            f"executors={num_workers}  cores/exec={thread_count}  "
+            f"mem/exec={executor_mem_gb}g  "
+            f"max_iter={effective_iter}  reg_param={reg_param}"
+            f"{parity_label}"
+        )
+        builder = (
+            SparkSession.builder.appName("MPJ-Baseline-LogReg")
+            .master(master_url)
+            .config("spark.ui.enabled", "false")
+            # Match multi-driver worker budget exactly
+            .config("spark.executor.instances", str(num_workers))
+            .config("spark.executor.cores", str(thread_count))
+            .config("spark.executor.memory", f"{executor_mem_gb}g")
+            .config("spark.sql.shuffle.partitions", str(num_workers * thread_count * 2))
+            .config("spark.memory.fraction", "0.8")
+            .config("spark.memory.storageFraction", "0.2")
+        )
+    else:
+        # local[N] — single-machine dev / single-node benchmark
+        heap_gb = _baseline_heap_gb(thread_count)
+        mode_tag = f"local[{thread_count}]"
+        print(
+            f"  [Baseline-LogReg] {mode_tag}  "
+            f"max_iter={effective_iter}  reg_param={reg_param}  "
+            f"[heap={heap_gb}g]{parity_label}"
+        )
+        builder = (
+            SparkSession.builder.appName("MPJ-Baseline-LogReg")
+            .master(f"local[{thread_count}]")
+            .config("spark.ui.enabled", "false")
+            .config("spark.sql.shuffle.partitions", str(thread_count * 2))
+            .config("spark.driver.memory", f"{heap_gb}g")
+            .config("spark.memory.fraction", "0.8")
+            .config("spark.memory.storageFraction", "0.2")
+        )
 
     t_load_start = time.perf_counter()
-    spark = (
-        SparkSession.builder.appName("MPJ-Baseline-LogReg")
-        .master(f"local[{thread_count}]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", str(thread_count * 2))
-        .config("spark.driver.memory", f"{heap_gb}g")
-        # Push more heap toward execution (gradient treeAggregate),
-        # less toward storage (RDD cache) — consistent with no-cache strategy.
-        .config("spark.memory.fraction", "0.8")
-        .config("spark.memory.storageFraction", "0.2")
-        .getOrCreate()
-    )
+    spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
-    df_raw = spark.read.csv(input_file, inferSchema=True, header=True)
-    df = df_raw.dropna()
-    feature_cols = [c for c in df.columns if c != "label"]
+    # ------------------------------------------------------------------ #
+    # Load dataset with correct header mode                               #
+    # ------------------------------------------------------------------ #
+    if has_header:
+        df_raw = spark.read.csv(input_file, inferSchema=True, header=True)
+        df = df_raw.dropna()
+        feature_cols = [c for c in df.columns if c != "label"]
+    else:
+        n_features = n_cols - 1
+        schema_fields = [StructField(f"f{i}", DoubleType(), True) for i in range(n_features)]
+        schema_fields.append(StructField("label", DoubleType(), True))
+        schema = StructType(schema_fields)
+        df_raw = spark.read.csv(input_file, schema=schema, header=False)
+        df = df_raw.dropna()
+        feature_cols = [f"f{i}" for i in range(n_features)]
+
     row_count = df.count()
     load_time = time.perf_counter() - t_load_start
-
-    print(f"  [Baseline-LogReg] {row_count:,} rows loaded  ({load_time:.3f}s)")
+    header_mode = "with header" if has_header else "headerless (schema synthesised)"
+    print(f"  [Baseline-LogReg] {row_count:,} rows loaded  " f"({load_time:.3f}s)  [{header_mode}]")
 
     assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
-    # NOTE: intentionally NOT calling .cache() here — see docstring above.
+    # NOTE: intentionally NOT calling .cache() — see module docstring.
     df_vec = assembler.transform(df).select("features", "label")
 
     t_proc_start = time.perf_counter()
@@ -164,17 +263,22 @@ def run_baseline_logreg(
 
         print(
             f"  [Baseline-LogReg] Accuracy={accuracy:.4f}  "
-            f"|w|={weight_norm:.4f}  ({time.perf_counter() - t_proc_start:.3f}s)"
+            f"|w|={weight_norm:.4f}  "
+            f"({time.perf_counter() - t_proc_start:.3f}s)"
         )
 
     except Exception as exc:
         oom_error = str(exc)[:200]
+        hint = (
+            f"SPARK_EXECUTOR_MEMORY={executor_mem_gb + 2}g"
+            if use_standalone
+            else f"SPARK_DRIVER_MEMORY={_baseline_heap_gb(thread_count) + 2}g"
+        )
         print(
             f"\n  [Baseline-LogReg] [WARN] fit() failed — "
             f"comparison table will show N/A for baseline.\n"
             f"  Cause: {oom_error}\n"
-            f"  Tip  : reduce --generate size, or set "
-            f"SPARK_DRIVER_MEMORY={heap_gb + 2}g before running.\n"
+            f"  Tip  : {hint}\n"
         )
 
     proc_time = time.perf_counter() - t_proc_start
@@ -186,6 +290,7 @@ def run_baseline_logreg(
         "total_time": load_time + proc_time,
         "effective_iter": effective_iter,
         "parity_iter": parity_iter,
+        "mode": mode_tag,
     }
     result = {
         "weight_vector": weight_vector,
