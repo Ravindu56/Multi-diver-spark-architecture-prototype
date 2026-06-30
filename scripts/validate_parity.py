@@ -121,9 +121,13 @@ def run_logreg_parity(max_iter: int, tol: float) -> list[dict]:
     _banner("[PARITY] Logistic Regression — Running single-driver Spark BASELINE")
     baseline_result = None
     if rank == 0:
+        # cores_override=None → run_baseline_logreg falls back to its
+        # default thread-budget formula (TOTAL_CORES // num_workers).
+        # Return key is "weight_vector" (not "weights") — see baseline_logreg.py.
         baseline_result, _ = run_baseline_logreg(
             LOGREG_DATASET_PATH,
             num_workers=size - 1,
+            cores_override=None,
             max_iter=max_iter,
         )
     baseline_result = comm.bcast(baseline_result, root=0)
@@ -139,7 +143,8 @@ def run_logreg_parity(max_iter: int, tol: float) -> list[dict]:
 
     records: list[dict] = []
     if rank == 0:
-        base_w = np.array(baseline_result["weights"])
+        # baseline returns "weight_vector"; mpj driver returns "weights"
+        base_w = np.array(baseline_result["weight_vector"])
         mpj_w = np.array(mpj_result["weights"])
         w_delta = float(np.linalg.norm(base_w - mpj_w))
         records.append({**_check("weight_vector_l2_delta", w_delta, tol), "workload": "logreg"})
