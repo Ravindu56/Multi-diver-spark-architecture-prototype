@@ -33,9 +33,11 @@ def __getattr__(name: str):
         # Phase 2 Queue-based path — used by worker_process.py for both
         # baseline (no queues) and multi-driver FedAvg (with queues).
         from mpj_spark.applications.logreg.queue_run import run
+
         return run
     if name == "run_logreg_allreduce":
         # Phase 3 MPI Allreduce path.
         from mpj_spark.applications.logreg.allreduce import run_logreg_allreduce
+
         return run_logreg_allreduce
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

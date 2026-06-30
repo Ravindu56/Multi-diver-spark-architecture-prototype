@@ -85,6 +85,7 @@ logger = logging.getLogger(__name__)
 # STEP 3 — SparkSession Init Contract
 # ---------------------------------------------------------------------------
 
+
 def cores_per_worker(size: int) -> int:
     """
     Return the number of CPU cores to allocate per Spark session.
@@ -100,6 +101,7 @@ def cores_per_worker(size: int) -> int:
 # ---------------------------------------------------------------------------
 # STEP 4a — Global statistics broadcast (standardisation)
 # ---------------------------------------------------------------------------
+
 
 def _broadcast_global_stats(
     comm,
@@ -155,9 +157,7 @@ def _broadcast_global_stats(
     D = num_features
 
     # Step 1: each rank aggregates its local (sum_x, sum_x2, n) via Spark
-    zero_val = (np.zeros(D, dtype=np.float64),
-                np.zeros(D, dtype=np.float64),
-                0)
+    zero_val = (np.zeros(D, dtype=np.float64), np.zeros(D, dtype=np.float64), 0)
 
     def seq_op(acc, row):
         x, _ = row
@@ -166,49 +166,45 @@ def _broadcast_global_stats(
     def comb_op(a, b):
         return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
-    local_sum_x, local_sum_x2, local_n = data_rdd_raw.aggregate(
-        zero_val, seq_op, comb_op
-    )
+    local_sum_x, local_sum_x2, local_n = data_rdd_raw.aggregate(zero_val, seq_op, comb_op)
 
     # Step 2: reduce all ranks' stats to rank 0 using MPI.SUM
     # Pack into a single flat buffer: [sum_x (D), sum_x2 (D), n (1)]
     send_buf = np.empty(2 * D + 1, dtype=np.float64)
-    send_buf[:D]       = local_sum_x
-    send_buf[D:2*D]    = local_sum_x2
-    send_buf[2*D]      = float(local_n)
+    send_buf[:D] = local_sum_x
+    send_buf[D : 2 * D] = local_sum_x2
+    send_buf[2 * D] = float(local_n)
 
     recv_buf = np.zeros(2 * D + 1, dtype=np.float64)
-    comm.Reduce([send_buf, MPI.DOUBLE], [recv_buf, MPI.DOUBLE],
-                op=MPI.SUM, root=0)
+    comm.Reduce([send_buf, MPI.DOUBLE], [recv_buf, MPI.DOUBLE], op=MPI.SUM, root=0)
 
     # Step 3: rank 0 computes global mean + std
     if rank == 0:
-        total_n      = max(recv_buf[2*D], 1.0)  # guard against empty dataset
-        global_mean  = recv_buf[:D]   / total_n
-        global_var   = recv_buf[D:2*D] / total_n - global_mean ** 2
-        global_std   = np.sqrt(np.clip(global_var, 0.0, None))
-        global_std   = np.where(global_std < 1e-8, 1.0, global_std)  # floor
+        total_n = max(recv_buf[2 * D], 1.0)  # guard against empty dataset
+        global_mean = recv_buf[:D] / total_n
+        global_var = recv_buf[D : 2 * D] / total_n - global_mean**2
+        global_std = np.sqrt(np.clip(global_var, 0.0, None))
+        global_std = np.where(global_std < 1e-8, 1.0, global_std)  # floor
 
         logger.info(
-            "[rank 0] Global feature stats computed  "
-            "n=%.0f  mean[:3]=%s  std[:3]=%s",
+            "[rank 0] Global feature stats computed  " "n=%.0f  mean[:3]=%s  std[:3]=%s",
             total_n,
             np.round(global_mean[:3], 4),
             np.round(global_std[:3], 4),
         )
     else:
         global_mean = np.zeros(D, dtype=np.float64)
-        global_std  = np.ones(D,  dtype=np.float64)
+        global_std = np.ones(D, dtype=np.float64)
 
     # Step 4: Bcast mean and std as a single flat buffer
     stats_buf = np.empty(2 * D, dtype=np.float64)
     if rank == 0:
-        stats_buf[:D]  = global_mean
-        stats_buf[D:]  = global_std
+        stats_buf[:D] = global_mean
+        stats_buf[D:] = global_std
     comm.Bcast([stats_buf, MPI.DOUBLE], root=0)
 
     global_mean = stats_buf[:D].copy()
-    global_std  = stats_buf[D:].copy()
+    global_std = stats_buf[D:].copy()
 
     logger.info(
         "[rank %d] Standardisation params received  mean[:3]=%s  std[:3]=%s",
@@ -222,6 +218,7 @@ def _broadcast_global_stats(
 # ---------------------------------------------------------------------------
 # STEP 4a — Data Loading (with standardisation)
 # ---------------------------------------------------------------------------
+
 
 def parse_row(line: str, num_features: int) -> tuple[np.ndarray, float] | None:
     """
@@ -295,20 +292,19 @@ def load_and_cache_rdd(
 
     # Step 3: apply standardisation and build the final cached RDD
     _mean = global_mean
-    _std  = global_std
+    _std = global_std
 
-    data_rdd = (
-        raw_rdd
-        .map(lambda row: ((row[0] - _mean) / _std, row[1]))
-        .cache()
-    )
+    data_rdd = raw_rdd.map(lambda row: ((row[0] - _mean) / _std, row[1])).cache()
 
     n = data_rdd.count()  # trigger standardised cache
-    raw_rdd.unpersist()   # release the un-standardised cache
+    raw_rdd.unpersist()  # release the un-standardised cache
 
     logger.info(
         "[rank %d] Loaded, standardised, and cached %d rows from '%s' (%d features)",
-        rank, n, partition_path, num_features,
+        rank,
+        n,
+        partition_path,
+        num_features,
     )
     return data_rdd
 
@@ -316,6 +312,7 @@ def load_and_cache_rdd(
 # ---------------------------------------------------------------------------
 # STEP 4b — Local Gradient Computation (unchanged)
 # ---------------------------------------------------------------------------
+
 
 def compute_gradient_spark(
     data_rdd: RDD,

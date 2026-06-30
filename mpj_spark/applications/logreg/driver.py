@@ -51,7 +51,7 @@ def run_logreg_driver(
         rank=rank,
         size=size,
         input_file=dataset_path,
-        max_epochs=max_iter,        # correct kwarg name
+        max_epochs=max_iter,  # correct kwarg name
         learning_rate=learning_rate,
         tol=tol,
         metrics_output_dir=metrics_output_dir,

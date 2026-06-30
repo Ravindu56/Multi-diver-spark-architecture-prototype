@@ -27,10 +27,8 @@ Acceptance criteria (Issue #14)
 from __future__ import annotations
 
 import collections
-import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -40,6 +38,7 @@ import pytest
 # ---------------------------------------------------------------------------
 try:
     from mpi4py import MPI
+
     _mpi_size = MPI.COMM_WORLD.Get_size()
 except ImportError:
     _mpi_size = 1
@@ -47,8 +46,8 @@ except ImportError:
 _NEEDS_MPI = pytest.mark.skipif(
     _mpi_size < 2,
     reason="WordCount MPI regression test requires mpirun -n 5 (mpi_size >= 2). "
-           "Skipped in single-rank CI. Run: mpirun --oversubscribe -n 5 pytest "
-           "tests/phase3/test_wordcount_mpi_vs_baseline.py -v"
+    "Skipped in single-rank CI. Run: mpirun --oversubscribe -n 5 pytest "
+    "tests/phase3/test_wordcount_mpi_vs_baseline.py -v",
 )
 
 # ---------------------------------------------------------------------------
@@ -78,6 +77,7 @@ _TOP_N = 5  # number of most-frequent words to compare
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_input_file(tmp_dir: Path) -> Path:
     """Write the fixed input to a temp file and return its path."""
     p = tmp_dir / "wordcount_input.txt"
@@ -93,8 +93,7 @@ def _count_words_baseline(input_path: Path) -> dict[str, int]:
     from pyspark.sql import SparkSession
 
     spark = (
-        SparkSession.builder
-        .master("local[2]")
+        SparkSession.builder.master("local[2]")
         .appName("WordCount-baseline-test")
         .config("spark.ui.enabled", "false")
         .config("spark.driver.host", "127.0.0.1")
@@ -104,8 +103,7 @@ def _count_words_baseline(input_path: Path) -> dict[str, int]:
     try:
         rdd = spark.sparkContext.textFile(str(input_path))
         counts = (
-            rdd
-            .flatMap(lambda line: line.strip().split())
+            rdd.flatMap(lambda line: line.strip().split())
             .filter(bool)
             .map(lambda w: (w.lower(), 1))
             .reduceByKey(lambda a, b: a + b)
@@ -147,6 +145,7 @@ def _top_n(counts: dict[str, int], n: int) -> dict[str, int]:
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestWordCountMpiVsBaseline:
     """MPI multi-driver WordCount must produce identical top-N results as single-driver baseline."""
 
@@ -170,10 +169,15 @@ class TestWordCountMpiVsBaseline:
         cmd = [
             "mpirun",
             "--oversubscribe",
-            "-n", "5",
-            sys.executable, "-m", "mpj_spark.core.main_mpi",
-            "--input", str(input_file),
-            "--app", "wordcount",
+            "-n",
+            "5",
+            sys.executable,
+            "-m",
+            "mpj_spark.core.main_mpi",
+            "--input",
+            str(input_file),
+            "--app",
+            "wordcount",
         ]
         result = subprocess.run(
             cmd,
@@ -213,22 +217,30 @@ class TestWordCountMpiVsBaseline:
         baseline_counts = _count_words_baseline(input_file)
 
         cmd = [
-            "mpirun", "--oversubscribe", "-n", "5",
-            sys.executable, "-m", "mpj_spark.core.main_mpi",
-            "--input", str(input_file),
-            "--app", "wordcount",
+            "mpirun",
+            "--oversubscribe",
+            "-n",
+            "5",
+            sys.executable,
+            "-m",
+            "mpj_spark.core.main_mpi",
+            "--input",
+            str(input_file),
+            "--app",
+            "wordcount",
         ]
         result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            cwd=str(_PROJECT_ROOT), timeout=120,
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(_PROJECT_ROOT),
+            timeout=120,
         )
         assert result.returncode == 0
         mpi_counts = _parse_mpi_stdout(result.stdout)
 
         missing = set(baseline_counts.keys()) - set(mpi_counts.keys())
-        assert not missing, (
-            f"Words present in baseline but missing from MPI output: {missing}"
-        )
+        assert not missing, f"Words present in baseline but missing from MPI output: {missing}"
 
     def test_skipped_in_single_rank(self) -> None:
         """

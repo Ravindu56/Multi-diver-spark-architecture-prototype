@@ -37,15 +37,14 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
 
-
 # ================================================================
 # Helpers
 # ================================================================
 
+
 def _build_schema(num_features: int) -> StructType:
-    fields = [StructField(f'f{i}', DoubleType(), nullable=True)
-              for i in range(num_features)]
-    fields.append(StructField('label', DoubleType(), nullable=True))
+    fields = [StructField(f"f{i}", DoubleType(), nullable=True) for i in range(num_features)]
+    fields.append(StructField("label", DoubleType(), nullable=True))
     return StructType(fields)
 
 
@@ -55,14 +54,17 @@ def _weight_norm(weights) -> float:
 
 def _write_worker_metrics(worker_id: int, records: list, results_dir: str) -> str:
     os.makedirs(results_dir, exist_ok=True)
-    path = os.path.join(
-        results_dir, f'worker_{worker_id}_nosync_logreg_metrics.csv'
-    )
+    path = os.path.join(results_dir, f"worker_{worker_id}_nosync_logreg_metrics.csv")
     fieldnames = [
-        'worker_id', 'iteration', 'iter_time_s',
-        'weight_norm', 'weight_delta', 'intercept', 'row_count',
+        "worker_id",
+        "iteration",
+        "iter_time_s",
+        "weight_norm",
+        "weight_delta",
+        "intercept",
+        "row_count",
     ]
-    with open(path, 'w', newline='') as f:
+    with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(records)
@@ -73,6 +75,7 @@ def _write_worker_metrics(worker_id: int, records: list, results_dir: str) -> st
 # Main entry point
 # ================================================================
 
+
 def run(
     partition_path: str,
     max_iter: int = 10,
@@ -81,7 +84,7 @@ def run(
     seed: int = 42,
     worker_id: int = 0,
     num_workers: int = 1,
-    results_dir: str = 'results',
+    results_dir: str = "results",
     local_epochs: int = 5,
     # Accept (and ignore) queue kwargs so worker_process can call
     # nosync_run.run() and queue_run.run() with the same signature.
@@ -120,42 +123,37 @@ def run(
     """
     spark = SparkSession.getActiveSession()
     if spark is None:
-        raise RuntimeError(
-            f'[NoSync Worker {worker_id}] No active SparkSession found.'
-        )
+        raise RuntimeError(f"[NoSync Worker {worker_id}] No active SparkSession found.")
 
     # ── 1. Load partition ─────────────────────────────────────────────
     schema = _build_schema(num_features)
     df_raw = spark.read.csv(partition_path, schema=schema, header=False)
     df_base = (
-        df_raw
-        .filter(F.col('f0').isNotNull())
+        df_raw.filter(F.col("f0").isNotNull())
         .dropna()
-        .withColumn('label', F.col('label').cast(IntegerType()))
+        .withColumn("label", F.col("label").cast(IntegerType()))
         .cache()
     )
 
-    feature_cols = [f'f{i}' for i in range(num_features)]
+    feature_cols = [f"f{i}" for i in range(num_features)]
     row_count = df_base.count()
 
     if row_count == 0:
         raise RuntimeError(
-            f'[NoSync Worker {worker_id}] Partition is empty after cleaning. '
-            f'Check --logreg-features matches the dataset '
-            f'(expected {num_features} features).'
+            f"[NoSync Worker {worker_id}] Partition is empty after cleaning. "
+            f"Check --logreg-features matches the dataset "
+            f"(expected {num_features} features)."
         )
 
-    assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol='features', handleInvalid='skip'
-    )
-    df_vec = assembler.transform(df_base).select('features', 'label').cache()
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
+    df_vec = assembler.transform(df_base).select("features", "label").cache()
     df_vec.count()  # materialise cache
 
     print(
-        f'[NoSync Worker {worker_id}] M1 — independent training  '
-        f'reg_param={reg_param} | rounds={max_iter} | '
-        f'local_epochs={local_epochs} | rows={row_count:,} | '
-        f'features={num_features}  [NO SYNC]'
+        f"[NoSync Worker {worker_id}] M1 — independent training  "
+        f"reg_param={reg_param} | rounds={max_iter} | "
+        f"local_epochs={local_epochs} | rows={row_count:,} | "
+        f"features={num_features}  [NO SYNC]"
     )
 
     # ── 2. Independent training loop — zero cross-driver communication ──
@@ -168,12 +166,12 @@ def run(
         t_iter = time.perf_counter()
 
         lr = LogisticRegression(
-            featuresCol='features',
-            labelCol='label',
+            featuresCol="features",
+            labelCol="label",
             maxIter=local_epochs,
             regParam=reg_param,
             elasticNetParam=0.0,
-            family='binomial',
+            family="binomial",
             fitIntercept=True,
             standardization=True,
         )
@@ -192,20 +190,22 @@ def run(
         weight_delta = float(np.linalg.norm(cur_vec - prev_weights_vec))
         prev_weights_vec = cur_vec.copy()
 
-        iter_metrics.append({
-            'worker_id':   worker_id,
-            'iteration':   iteration + 1,
-            'iter_time_s': round(iter_time, 6),
-            'weight_norm': round(global_norm, 8),
-            'weight_delta': round(weight_delta, 8),
-            'intercept':   round(current_intercept, 8),
-            'row_count':   row_count,
-        })
+        iter_metrics.append(
+            {
+                "worker_id": worker_id,
+                "iteration": iteration + 1,
+                "iter_time_s": round(iter_time, 6),
+                "weight_norm": round(global_norm, 8),
+                "weight_delta": round(weight_delta, 8),
+                "intercept": round(current_intercept, 8),
+                "row_count": row_count,
+            }
+        )
 
         print(
-            f'[NoSync Worker {worker_id}] round {iteration + 1}/{max_iter}  '
-            f'({iter_time:.3f}s)  |w|={global_norm:.4f}  '
-            f'\u0394={weight_delta:.6f}  [no sync]'
+            f"[NoSync Worker {worker_id}] round {iteration + 1}/{max_iter}  "
+            f"({iter_time:.3f}s)  |w|={global_norm:.4f}  "
+            f"\u0394={weight_delta:.6f}  [no sync]"
         )
 
     # ── 3. Final accuracy on local partition ──────────────────────────
@@ -219,14 +219,14 @@ def run(
         @_udf(returnType=_IT())
         def predict(features):
             import math as _m
+
             arr = features.toArray()
             logit = sum(w_list[i] * arr[i] for i in range(len(w_list))) + b_val
             return int(1.0 / (1.0 + _m.exp(-logit)) >= 0.5)
 
         correct = (
-            df_vec
-            .withColumn('pred', predict(F.col('features')))
-            .filter(F.col('pred') == F.col('label'))
+            df_vec.withColumn("pred", predict(F.col("features")))
+            .filter(F.col("pred") == F.col("label"))
             .count()
         )
         train_accuracy = correct / row_count if row_count > 0 else 0.0
@@ -238,12 +238,11 @@ def run(
         intercept_final = 0.0
 
     print(
-        f'[NoSync Worker {worker_id}] Final local accuracy : {train_accuracy:.4f}  '
-        f'[no sync — local partition only]'
+        f"[NoSync Worker {worker_id}] Final local accuracy : {train_accuracy:.4f}  "
+        f"[no sync — local partition only]"
     )
     print(
-        f'[NoSync Worker {worker_id}] Local weight norm    : '
-        f'{_weight_norm(weight_vector):.4f}'
+        f"[NoSync Worker {worker_id}] Local weight norm    : " f"{_weight_norm(weight_vector):.4f}"
     )
 
     df_vec.unpersist()
@@ -252,16 +251,16 @@ def run(
     # ── 4. Write per-worker metrics CSV ──────────────────────────────
     worker_csv_path = _write_worker_metrics(worker_id, iter_metrics, results_dir)
     print(
-        f'[NoSync Worker {worker_id}] Iter metrics → {worker_csv_path} '
-        f'({len(iter_metrics)} rows)'
+        f"[NoSync Worker {worker_id}] Iter metrics → {worker_csv_path} "
+        f"({len(iter_metrics)} rows)"
     )
 
     return {
-        'weight_vector':   weight_vector,
-        'intercept':       intercept_final,
-        'train_accuracy':  train_accuracy,
-        'row_count':       row_count,
-        'iterations_done': max_iter,
-        'partition_path':  partition_path,
-        'iter_metrics':    iter_metrics,
+        "weight_vector": weight_vector,
+        "intercept": intercept_final,
+        "train_accuracy": train_accuracy,
+        "row_count": row_count,
+        "iterations_done": max_iter,
+        "partition_path": partition_path,
+        "iter_metrics": iter_metrics,
     }

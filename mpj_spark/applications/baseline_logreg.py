@@ -42,13 +42,9 @@ def _sniff_csv_header(input_file: str) -> tuple[bool, int]:
             if not line:
                 continue
             tokens = line.split(",")
-            all_numeric = all(
-                _is_float(tok) for tok in tokens
-            )
+            all_numeric = all(_is_float(tok) for tok in tokens)
             return (not all_numeric), len(tokens)
-    raise RuntimeError(
-        f"Cannot sniff CSV header from '{input_file}': file appears empty."
-    )
+    raise RuntimeError(f"Cannot sniff CSV header from '{input_file}': file appears empty.")
 
 
 def _is_float(s: str) -> bool:
@@ -68,7 +64,8 @@ def _baseline_heap_gb(thread_count: int) -> int:
     """
     try:
         import psutil
-        total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+
+        total_ram_gb = psutil.virtual_memory().total / (1024**3)
         cap_gb = max(2, int(total_ram_gb * 0.80))
     except ImportError:
         cap_gb = 8
@@ -85,7 +82,8 @@ def _executor_memory_gb(num_workers: int) -> int:
     """
     try:
         import psutil
-        total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+
+        total_ram_gb = psutil.virtual_memory().total / (1024**3)
     except ImportError:
         total_ram_gb = 16.0
     per_worker_gb = max(2, int(total_ram_gb * 0.75 / num_workers))
@@ -153,9 +151,7 @@ def run_baseline_logreg(
     # Parity-adjusted iteration count
     effective_iter = parity_iter if parity_iter is not None else max_iter
     parity_label = (
-        f"  [parity: {num_workers}×{max_iter}={parity_iter}]"
-        if parity_iter is not None
-        else ""
+        f"  [parity: {num_workers}×{max_iter}={parity_iter}]" if parity_iter is not None else ""
     )
 
     # ------------------------------------------------------------------ #
@@ -166,9 +162,8 @@ def run_baseline_logreg(
     # ------------------------------------------------------------------ #
     # Build SparkSession — local[N] for dev, standalone for benchmark     #
     # ------------------------------------------------------------------ #
-    use_standalone = (
-        baseline_master is not None
-        and baseline_master.strip().startswith(("spark://", "yarn", "k8s://"))
+    use_standalone = baseline_master is not None and baseline_master.strip().startswith(
+        ("spark://", "yarn", "k8s://")
     )
 
     if use_standalone:
@@ -183,8 +178,7 @@ def run_baseline_logreg(
             f"{parity_label}"
         )
         builder = (
-            SparkSession.builder
-            .appName("MPJ-Baseline-LogReg")
+            SparkSession.builder.appName("MPJ-Baseline-LogReg")
             .master(master_url)
             .config("spark.ui.enabled", "false")
             # Match multi-driver worker budget exactly
@@ -205,8 +199,7 @@ def run_baseline_logreg(
             f"[heap={heap_gb}g]{parity_label}"
         )
         builder = (
-            SparkSession.builder
-            .appName("MPJ-Baseline-LogReg")
+            SparkSession.builder.appName("MPJ-Baseline-LogReg")
             .master(f"local[{thread_count}]")
             .config("spark.ui.enabled", "false")
             .config("spark.sql.shuffle.partitions", str(thread_count * 2))
@@ -228,9 +221,7 @@ def run_baseline_logreg(
         feature_cols = [c for c in df.columns if c != "label"]
     else:
         n_features = n_cols - 1
-        schema_fields = [
-            StructField(f"f{i}", DoubleType(), True) for i in range(n_features)
-        ]
+        schema_fields = [StructField(f"f{i}", DoubleType(), True) for i in range(n_features)]
         schema_fields.append(StructField("label", DoubleType(), True))
         schema = StructType(schema_fields)
         df_raw = spark.read.csv(input_file, schema=schema, header=False)
@@ -240,14 +231,9 @@ def run_baseline_logreg(
     row_count = df.count()
     load_time = time.perf_counter() - t_load_start
     header_mode = "with header" if has_header else "headerless (schema synthesised)"
-    print(
-        f"  [Baseline-LogReg] {row_count:,} rows loaded  "
-        f"({load_time:.3f}s)  [{header_mode}]"
-    )
+    print(f"  [Baseline-LogReg] {row_count:,} rows loaded  " f"({load_time:.3f}s)  [{header_mode}]")
 
-    assembler = VectorAssembler(
-        inputCols=feature_cols, outputCol="features", handleInvalid="skip"
-    )
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     # NOTE: intentionally NOT calling .cache() — see module docstring.
     df_vec = assembler.transform(df).select("features", "label")
 

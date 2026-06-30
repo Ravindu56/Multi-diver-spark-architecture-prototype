@@ -62,10 +62,7 @@ def run_kmeans_driver(
     # and embeds wcss inside the run_summary dict.
     result = {
         "centres": raw.get("global_centroids", []),
-        "wcss": float(
-            raw.get("run_summary", {}).get("final_wcss", 0.0)
-            or _extract_last_wcss(raw)
-        ),
+        "wcss": float(raw.get("run_summary", {}).get("final_wcss", 0.0) or _extract_last_wcss(raw)),
     }
 
     # Broadcast from root so every rank returns identical data

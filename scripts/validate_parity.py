@@ -37,28 +37,26 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-from mpj_spark.config import (
+from mpj_spark.config import (  # noqa: E402
     KMEANS_DATASET_PATH,
     LOGREG_DATASET_PATH,
-    SHARED_STORAGE_PATH,
-    TOTAL_CORES,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _banner(msg: str) -> None:
     if rank == 0:
@@ -76,6 +74,7 @@ def _check(label: str, delta: float, tol: float) -> dict:
 # K-Means parity
 # ---------------------------------------------------------------------------
 
+
 def run_kmeans_parity(
     k: int,
     max_iter: int,
@@ -92,7 +91,6 @@ def run_kmeans_parity(
     WCSS measures objective-value equivalence and is independent of centroid
     label assignment or initialisation pool.
     """
-    import numpy as np
 
     from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
     from mpj_spark.applications.kmeans.driver import run_kmeans_driver
@@ -116,7 +114,7 @@ def run_kmeans_parity(
         dataset_path=KMEANS_DATASET_PATH,
         k=k,
         max_iter=max_iter,
-        metrics_output_dir=metrics_dir,   # ← FIX: was never passed before
+        metrics_output_dir=metrics_dir,  # ← FIX: was never passed before
     )
 
     records: list[dict] = []
@@ -141,9 +139,13 @@ def run_kmeans_parity(
 # Logistic Regression parity
 # ---------------------------------------------------------------------------
 
-def _predict_accuracy(weights: "np.ndarray", intercept: float, X: "np.ndarray", y: "np.ndarray") -> float:
+
+def _predict_accuracy(
+    weights: "np.ndarray", intercept: float, X: "np.ndarray", y: "np.ndarray"
+) -> float:
     """Sigmoid prediction accuracy using numpy — no Spark dependency."""
     import numpy as np
+
     logits = X @ weights + intercept
     preds = (1.0 / (1.0 + np.exp(-logits)) >= 0.5).astype(int)
     return float(np.mean(preds == y))
@@ -191,15 +193,13 @@ def run_logreg_parity(
         comm=comm,
         dataset_path=LOGREG_DATASET_PATH,
         max_iter=max_iter,
-        metrics_output_dir=metrics_dir,   # ← FIX: was never passed before
+        metrics_output_dir=metrics_dir,  # ← FIX: was never passed before
     )
 
     records: list[dict] = []
     if rank == 0:
         try:
-            sample_X, sample_y = _load_sample_numpy(
-                LOGREG_DATASET_PATH, n=accuracy_sample
-            )
+            sample_X, sample_y = _load_sample_numpy(LOGREG_DATASET_PATH, n=accuracy_sample)
 
             base_w = np.array(baseline_result["weight_vector"])
             base_intercept = float(baseline_result.get("intercept", 0.0))
@@ -237,9 +237,7 @@ def run_logreg_parity(
     return records
 
 
-def _load_sample_numpy(
-    dataset_path: str, n: int
-) -> "tuple[np.ndarray, np.ndarray]":
+def _load_sample_numpy(dataset_path: str, n: int) -> "tuple[np.ndarray, np.ndarray]":
     """
     Load the first n rows of the CSV at dataset_path into (X, y) numpy arrays.
     Assumes the last column is the binary label (0/1 or -1/+1 mapped to 0/1).
@@ -248,7 +246,7 @@ def _load_sample_numpy(
 
     rows = []
     with open(dataset_path, newline="") as f:
-        header = f.readline()  # skip header
+        f.readline()  # skip header
         for i, line in enumerate(f):
             if i >= n:
                 break
@@ -265,6 +263,7 @@ def _load_sample_numpy(
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
+
 
 def write_report(records: list[dict], report_dir: str, run_id: str) -> None:
     Path(report_dir).mkdir(parents=True, exist_ok=True)
@@ -287,7 +286,11 @@ def print_summary(records: list[dict]) -> None:
     print(f"  {'Workload':<10} {'Metric':<35} {'Delta':<12} {'Tol':<8} {'Status'}")
     print("  " + "-" * 66)
     for r in records:
-        delta_str = f"{r['delta']:.8f}" if isinstance(r["delta"], float) and r["delta"] >= 0 else str(r["delta"])
+        delta_str = (
+            f"{r['delta']:.8f}"
+            if isinstance(r["delta"], float) and r["delta"] >= 0
+            else str(r["delta"])
+        )
         print(
             f"  {r['workload']:<10} {r['metric']:<35} {delta_str:<12} "
             f"{r.get('tolerance', ''):<8} {r['status']}"
@@ -304,6 +307,7 @@ def print_summary(records: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Issue #10 parity validation")
@@ -335,8 +339,8 @@ def main() -> None:
         "--metrics-dir",
         default="metrics",
         help="Output directory for per-rank metrics CSVs/JSONs written by the "
-             "KMeans and LogReg drivers (default: metrics/). "
-             "Pass this same path to timing_analysis.py --metrics-dir.",
+        "KMeans and LogReg drivers (default: metrics/). "
+        "Pass this same path to timing_analysis.py --metrics-dir.",
     )
     parser.add_argument(
         "--accuracy-sample",

@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # Learning-rate schedule  (unchanged)
 # ===========================================================================
 
+
 def _cosine_lr(epoch: int, max_epochs: int, lr_max: float, lr_min: float = 1e-4) -> float:
     """
     Cosine-decay learning rate schedule.
@@ -58,6 +59,7 @@ def _cosine_lr(epoch: int, max_epochs: int, lr_max: float, lr_min: float = 1e-4)
 # ===========================================================================
 # STEP 5a — Allreduce gradient synchronisation + weight update  (unchanged)
 # ===========================================================================
+
 
 def allreduce_gradients(
     comm,
@@ -89,6 +91,7 @@ def allreduce_gradients(
 # STEP 5b — Loss Allreduce + convergence broadcast  (unchanged)
 # ===========================================================================
 
+
 def check_loss_convergence(
     comm,
     rank: int,
@@ -104,7 +107,7 @@ def check_loss_convergence(
     """
     from mpi4py import MPI
 
-    _w   = w
+    _w = w
     _eps = 1e-15
 
     def local_loss_fn(row):
@@ -114,20 +117,23 @@ def check_loss_convergence(
         return -(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
 
     local_loss_sum = float(data_rdd.map(local_loss_fn).reduce(lambda a, b: a + b))
-    n_local        = data_rdd.count()
-    local_loss     = local_loss_sum / float(n_local) if n_local > 0 else 0.0
+    n_local = data_rdd.count()
+    local_loss = local_loss_sum / float(n_local) if n_local > 0 else 0.0
 
-    local_arr  = np.array([local_loss], dtype=np.float64)
+    local_arr = np.array([local_loss], dtype=np.float64)
     global_arr = np.zeros(1, dtype=np.float64)
     comm.Allreduce([local_arr, MPI.DOUBLE], [global_arr, MPI.DOUBLE], op=MPI.SUM)
     global_loss = float(global_arr[0]) / float(size)
 
     if rank == 0:
-        delta     = abs(prev_loss - global_loss)
+        delta = abs(prev_loss - global_loss)
         converged = bool(delta < tol)
         logger.info(
             "[rank 0] epoch=%d  global_loss=%.6f  delta=%.6f  converged=%s",
-            epoch, global_loss, delta, converged,
+            epoch,
+            global_loss,
+            delta,
+            converged,
         )
     else:
         converged = False
@@ -139,6 +145,7 @@ def check_loss_convergence(
 # ===========================================================================
 # STEP 6 — Full LogReg Allreduce runner
 # ===========================================================================
+
 
 def run_logreg_allreduce(
     comm,
@@ -176,7 +183,7 @@ def run_logreg_allreduce(
     from mpj_spark.applications.logreg.partition import partition_and_init_spark
 
     t_total_start = time.perf_counter()
-    collector     = LogRegMetricsCollector(rank=rank, output_dir=metrics_output_dir)
+    collector = LogRegMetricsCollector(rank=rank, output_dir=metrics_output_dir)
 
     # Step 2 — partition + Spark session
     _cores = cores_override if cores_override is not None else cores_per_worker(size)
@@ -199,7 +206,7 @@ def run_logreg_allreduce(
     comm.Barrier()
     logger.info("[rank %d] Barrier passed — starting epoch loop", rank)
 
-    prev_loss = float('inf')
+    prev_loss = float("inf")
     converged = False
     epoch = 0
 
@@ -209,20 +216,22 @@ def run_logreg_allreduce(
         # Step 4b — local gradient
         t_spark = time.perf_counter()
         grad_local, _ = compute_gradient_spark(data_rdd, w)
-        spark_time_s  = time.perf_counter() - t_spark
+        spark_time_s = time.perf_counter() - t_spark
 
         # Step 5 — allreduce + loss check
         t_sync = time.perf_counter()
-        lr_t   = _cosine_lr(epoch, max_epochs, lr_max=learning_rate)
+        lr_t = _cosine_lr(epoch, max_epochs, lr_max=learning_rate)
         w, global_grad = allreduce_gradients(
-            comm, size, w, grad_local, learning_rate=lr_t, reg_param=reg_param)
+            comm, size, w, grad_local, learning_rate=lr_t, reg_param=reg_param
+        )
         converged, global_loss = check_loss_convergence(
-            comm, rank, size, data_rdd, w, prev_loss, tol, epoch)
+            comm, rank, size, data_rdd, w, prev_loss, tol, epoch
+        )
         sync_time_s = time.perf_counter() - t_sync
 
         epoch_time_s = time.perf_counter() - t_epoch
-        grad_norm    = float(np.linalg.norm(global_grad))
-        prev_loss    = global_loss
+        grad_norm = float(np.linalg.norm(global_grad))
+        prev_loss = global_loss
 
         collector.record_epoch(
             epoch=epoch,
@@ -238,8 +247,14 @@ def run_logreg_allreduce(
             logger.info(
                 "epoch %d/%d  lr=%.5f  |w|=%.4f  |grad|=%.6f  loss=%.6f  "
                 "spark=%.3fs  sync=%.3fs",
-                epoch + 1, max_epochs, lr_t, float(np.linalg.norm(w)),
-                grad_norm, global_loss, spark_time_s, sync_time_s,
+                epoch + 1,
+                max_epochs,
+                lr_t,
+                float(np.linalg.norm(w)),
+                grad_norm,
+                global_loss,
+                spark_time_s,
+                sync_time_s,
             )
 
         if converged:

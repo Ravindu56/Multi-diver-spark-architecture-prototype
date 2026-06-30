@@ -37,12 +37,11 @@ kmeans:
 
 import os
 import random
-import sys
 import time
 
 import numpy as np
 import pandas as pd
-from sklearn.datasets import make_classification, make_blobs
+from sklearn.datasets import make_blobs, make_classification
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "shared_storage")
 N_SAMPLES = 540_000
@@ -70,13 +69,13 @@ def generate_logreg(path: str):
     X, y = make_classification(
         n_samples=N_SAMPLES,
         n_features=10,
-        n_informative=8,        # 8/10 features carry real signal
-        n_redundant=2,          # 2 features are linear combos of informative
+        n_informative=8,  # 8/10 features carry real signal
+        n_redundant=2,  # 2 features are linear combos of informative
         n_repeated=0,
         n_classes=2,
-        n_clusters_per_class=2, # non-convex per-class structure
-        class_sep=0.5,          # KEY: overlapping classes
-        flip_y=0.05,            # 5% label noise
+        n_clusters_per_class=2,  # non-convex per-class structure
+        class_sep=0.5,  # KEY: overlapping classes
+        flip_y=0.05,  # 5% label noise
         random_state=RANDOM_STATE,
     )
 
@@ -90,10 +89,11 @@ def generate_logreg(path: str):
 
     elapsed = time.perf_counter() - t0
     balance = df["label"].mean()
-    print(f"[generate_data] logreg_data.csv  {len(df):,} rows  "
-          f"class_balance={balance:.3f}  ({elapsed:.1f}s)")
-    print(f"[generate_data] Feature means: "
-          f"{np.abs(X).mean(axis=0).round(3).tolist()}")
+    print(
+        f"[generate_data] logreg_data.csv  {len(df):,} rows  "
+        f"class_balance={balance:.3f}  ({elapsed:.1f}s)"
+    )
+    print(f"[generate_data] Feature means: " f"{np.abs(X).mean(axis=0).round(3).tolist()}")
 
 
 def generate_kmeans(path: str):
@@ -114,7 +114,7 @@ def generate_kmeans(path: str):
         n_samples=N_SAMPLES,
         n_features=N_FEATURES,
         centers=N_CLUSTERS,
-        cluster_std=1.8,        # KEY: wide overlapping clusters
+        cluster_std=1.8,  # KEY: wide overlapping clusters
         random_state=RANDOM_STATE,
     )
 
@@ -123,8 +123,10 @@ def generate_kmeans(path: str):
     df.to_csv(path, index=False, header=True)
 
     elapsed = time.perf_counter() - t0
-    print(f"[generate_data] kmeans_data.csv  {len(df):,} rows  "
-          f"{N_FEATURES} features  {N_CLUSTERS} clusters  ({elapsed:.1f}s)")
+    print(
+        f"[generate_data] kmeans_data.csv  {len(df):,} rows  "
+        f"{N_FEATURES} features  {N_CLUSTERS} clusters  ({elapsed:.1f}s)"
+    )
 
 
 def generate_wordcount(path: str):
@@ -133,7 +135,7 @@ def generate_wordcount(path: str):
     ~1 M words drawn from a Zipf-distributed vocabulary of 5 000 words,
     written as plain text lines of 10-20 words each.
     """
-    print(f"[generate_data] Generating wordcount corpus ...")
+    print("[generate_data] Generating wordcount corpus ...")
     t0 = time.perf_counter()
 
     rng = random.Random(RANDOM_STATE)
@@ -159,15 +161,17 @@ def generate_wordcount(path: str):
         f.write("\n".join(lines))
 
     elapsed = time.perf_counter() - t0
-    print(f"[generate_data] wordcount_data.txt  {words_written:,} words  "
-          f"{len(lines):,} lines  ({elapsed:.1f}s)")
+    print(
+        f"[generate_data] wordcount_data.txt  {words_written:,} words  "
+        f"{len(lines):,} lines  ({elapsed:.1f}s)"
+    )
 
 
 def main():
     ensure_dir()
 
-    logreg_path   = os.path.join(OUT_DIR, "logreg_data.csv")
-    kmeans_path   = os.path.join(OUT_DIR, "kmeans_data.csv")
+    logreg_path = os.path.join(OUT_DIR, "logreg_data.csv")
+    kmeans_path = os.path.join(OUT_DIR, "kmeans_data.csv")
     wordcount_path = os.path.join(OUT_DIR, "wordcount_data.txt")
 
     generate_logreg(logreg_path)

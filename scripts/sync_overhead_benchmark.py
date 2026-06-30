@@ -44,6 +44,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 try:
     from mpi4py import MPI
+
     COMM = MPI.COMM_WORLD
     RANK = COMM.Get_rank()
     SIZE = COMM.Get_size()
@@ -59,13 +60,13 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from mpj_spark.applications.baseline_kmeans import run_kmeans_baseline
-from mpj_spark.applications.baseline_logreg import run_logreg_baseline
-
+from mpj_spark.applications.baseline_kmeans import run_kmeans_baseline  # noqa: E402
+from mpj_spark.applications.baseline_logreg import run_logreg_baseline  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _load_metrics_csv(metrics_dir: Path, prefix: str) -> list[dict]:
     """Return list of row-dicts from the most recent metrics CSV for a workload."""
@@ -98,6 +99,7 @@ def _dataset_rows(data_path: Path) -> int:
 # ---------------------------------------------------------------------------
 # Single-driver baseline measurements
 # ---------------------------------------------------------------------------
+
 
 def _baseline_kmeans(data_path: Path, k: int, max_iter: int) -> dict:
     """Run single-driver K-Means baseline and return timing dict."""
@@ -148,22 +150,20 @@ def _baseline_logreg(data_path: Path, epochs: int) -> dict:
 # MPI multi-driver measurements — read from metrics CSVs written by allreduce.py
 # ---------------------------------------------------------------------------
 
+
 def _mpi_kmeans_from_metrics(metrics_dir: Path, data_path: Path, max_iter: int) -> dict:
     """Parse the latest K-Means metrics CSV written by allreduce.py."""
     rows = _load_metrics_csv(metrics_dir, "kmeans")
     if not rows:
         return None
     sync_times = [_safe_float(r.get("sync_time_s", 0)) for r in rows]
-    spark_times = [_safe_float(r.get("spark_time_s", 0)) for r in rows]
+    _spark_times = [_safe_float(r.get("spark_time_s", 0)) for r in rows]
     iter_times = [_safe_float(r.get("iter_time_s", 0)) for r in rows]
     n_rows = _dataset_rows(data_path)
     total_exec = sum(iter_times)
     sync_mean = float(np.mean(sync_times)) if sync_times else 0.0
     sync_max = float(np.max(sync_times)) if sync_times else 0.0
-    sync_pct = [
-        100.0 * s / t if t > 0 else 0.0
-        for s, t in zip(sync_times, iter_times)
-    ]
+    sync_pct = [100.0 * s / t if t > 0 else 0.0 for s, t in zip(sync_times, iter_times)]
     return {
         "workload": "kmeans",
         "setup": "mpi_multi_driver",
@@ -183,20 +183,15 @@ def _mpi_logreg_from_metrics(metrics_dir: Path, data_path: Path, epochs: int) ->
     if not rows:
         return None
     sync_times = [_safe_float(r.get("sync_time_s", 0)) for r in rows]
-    spark_times = [_safe_float(r.get("spark_time_s", 0)) for r in rows]
+    _spark_times = [_safe_float(r.get("spark_time_s", 0)) for r in rows]
     iter_times = [
-        _safe_float(r.get("epoch_time_s", 0)) or
-        _safe_float(r.get("iter_time_s", 0))
-        for r in rows
+        _safe_float(r.get("epoch_time_s", 0)) or _safe_float(r.get("iter_time_s", 0)) for r in rows
     ]
     n_rows = _dataset_rows(data_path)
     total_exec = sum(iter_times)
     sync_mean = float(np.mean(sync_times)) if sync_times else 0.0
     sync_max = float(np.max(sync_times)) if sync_times else 0.0
-    sync_pct = [
-        100.0 * s / t if t > 0 else 0.0
-        for s, t in zip(sync_times, iter_times)
-    ]
+    sync_pct = [100.0 * s / t if t > 0 else 0.0 for s, t in zip(sync_times, iter_times)]
     return {
         "workload": "logreg",
         "setup": "mpi_multi_driver",
@@ -215,9 +210,15 @@ def _mpi_logreg_from_metrics(metrics_dir: Path, data_path: Path, epochs: int) ->
 # ---------------------------------------------------------------------------
 
 CSV_FIELDS = [
-    "workload", "setup", "exec_time_s", "throughput_rows_per_s",
-    "sync_time_mean_s", "sync_time_max_s", "sync_overhead_pct_mean",
-    "iterations_run", "dataset_size_rows",
+    "workload",
+    "setup",
+    "exec_time_s",
+    "throughput_rows_per_s",
+    "sync_time_mean_s",
+    "sync_time_max_s",
+    "sync_overhead_pct_mean",
+    "iterations_run",
+    "dataset_size_rows",
 ]
 
 HDR = (
@@ -239,11 +240,15 @@ def _print_row(r: dict) -> None:
 def _print_comparison(rows: list[dict], workload: str) -> None:
     wrows = [r for r in rows if r["workload"] == workload]
     baseline = next((r for r in wrows if r["setup"] == "single_driver_baseline"), None)
-    mpi      = next((r for r in wrows if r["setup"] == "mpi_multi_driver"), None)
+    mpi = next((r for r in wrows if r["setup"] == "mpi_multi_driver"), None)
     if not baseline or not mpi:
         return
     speedup = baseline["exec_time_s"] / mpi["exec_time_s"] if mpi["exec_time_s"] > 0 else 0
-    tput_delta = mpi["throughput_rows_per_s"] / baseline["throughput_rows_per_s"] if baseline["throughput_rows_per_s"] > 0 else 0
+    tput_delta = (
+        mpi["throughput_rows_per_s"] / baseline["throughput_rows_per_s"]
+        if baseline["throughput_rows_per_s"] > 0
+        else 0
+    )
     print(f"  {workload.upper()} speedup (exec_time): {speedup:.3f}x")
     print(f"  {workload.upper()} throughput ratio  : {tput_delta:.3f}x")
     print(f"  {workload.upper()} sync overhead (MPI): {mpi['sync_overhead_pct_mean']:.2f}%")
@@ -253,19 +258,27 @@ def _print_comparison(rows: list[dict], workload: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Issue #12 — Sync overhead benchmark: MPI multi-driver vs single-driver baseline."
     )
-    parser.add_argument("--ranks",         type=int,   default=5,    help="Expected MPI size (informational, not enforced)")
-    parser.add_argument("--kmeans-k",      type=int,   default=3,    help="K-Means clusters")
-    parser.add_argument("--kmeans-iter",   type=int,   default=20,   help="K-Means max iterations")
-    parser.add_argument("--logreg-epochs", type=int,   default=14,   help="LogReg epochs")
-    parser.add_argument("--metrics-dir",   type=str,   default="metrics", help="Directory containing workload metrics CSVs")
-    parser.add_argument("--results-dir",   type=str,   default="results", help="Output directory")
-    parser.add_argument("--data-dir",      type=str,   default="data",    help="Dataset directory")
-    parser.add_argument("--skip-kmeans",   action="store_true", help="Skip K-Means benchmark")
-    parser.add_argument("--skip-logreg",   action="store_true", help="Skip LogReg benchmark")
+    parser.add_argument(
+        "--ranks", type=int, default=5, help="Expected MPI size (informational, not enforced)"
+    )
+    parser.add_argument("--kmeans-k", type=int, default=3, help="K-Means clusters")
+    parser.add_argument("--kmeans-iter", type=int, default=20, help="K-Means max iterations")
+    parser.add_argument("--logreg-epochs", type=int, default=14, help="LogReg epochs")
+    parser.add_argument(
+        "--metrics-dir",
+        type=str,
+        default="metrics",
+        help="Directory containing workload metrics CSVs",
+    )
+    parser.add_argument("--results-dir", type=str, default="results", help="Output directory")
+    parser.add_argument("--data-dir", type=str, default="data", help="Dataset directory")
+    parser.add_argument("--skip-kmeans", action="store_true", help="Skip K-Means benchmark")
+    parser.add_argument("--skip-logreg", action="store_true", help="Skip LogReg benchmark")
     args = parser.parse_args()
 
     # Only rank 0 runs the benchmark logic
@@ -276,7 +289,7 @@ def main() -> None:
 
     metrics_dir = Path(args.metrics_dir)
     results_dir = Path(args.results_dir)
-    data_dir    = Path(args.data_dir)
+    data_dir = Path(args.data_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
     kmeans_data = data_dir / "kmeans_dataset.csv"
@@ -301,22 +314,30 @@ def main() -> None:
         if kmeans_data.exists():
             km_bl = _baseline_kmeans(kmeans_data, args.kmeans_k, args.kmeans_iter)
             rows.append(km_bl)
-            print(f"  baseline exec_time={km_bl['exec_time_s']:.3f}s  "
-                  f"throughput={km_bl['throughput_rows_per_s']:.1f} rows/s")
+            print(
+                f"  baseline exec_time={km_bl['exec_time_s']:.3f}s  "
+                f"throughput={km_bl['throughput_rows_per_s']:.1f} rows/s"
+            )
         else:
-            print(f"  WARNING: {kmeans_data} not found — skipping baseline. "
-                  "Run scripts/generate_datasets.py first.")
+            print(
+                f"  WARNING: {kmeans_data} not found — skipping baseline. "
+                "Run scripts/generate_datasets.py first."
+            )
 
         print("[K-Means] Reading MPI multi-driver metrics...")
         km_mpi = _mpi_kmeans_from_metrics(metrics_dir, kmeans_data, args.kmeans_iter)
         if km_mpi:
             rows.append(km_mpi)
-            print(f"  MPI exec_time={km_mpi['exec_time_s']:.3f}s  "
-                  f"sync_mean={km_mpi['sync_time_mean_s']:.6f}s  "
-                  f"sync_pct={km_mpi['sync_overhead_pct_mean']:.2f}%")
+            print(
+                f"  MPI exec_time={km_mpi['exec_time_s']:.3f}s  "
+                f"sync_mean={km_mpi['sync_time_mean_s']:.6f}s  "
+                f"sync_pct={km_mpi['sync_overhead_pct_mean']:.2f}%"
+            )
         else:
-            print(f"  WARNING: No K-Means metrics CSV found in {metrics_dir}. "
-                  "Run mpirun -n 5 python -m mpj_spark.applications.kmeans.allreduce first.")
+            print(
+                f"  WARNING: No K-Means metrics CSV found in {metrics_dir}. "
+                "Run mpirun -n 5 python -m mpj_spark.applications.kmeans.allreduce first."
+            )
 
     # ── LogReg ────────────────────────────────────────────────────────────────
     if not args.skip_logreg:
@@ -324,22 +345,30 @@ def main() -> None:
         if logreg_data.exists():
             lr_bl = _baseline_logreg(logreg_data, args.logreg_epochs)
             rows.append(lr_bl)
-            print(f"  baseline exec_time={lr_bl['exec_time_s']:.3f}s  "
-                  f"throughput={lr_bl['throughput_rows_per_s']:.1f} rows/s")
+            print(
+                f"  baseline exec_time={lr_bl['exec_time_s']:.3f}s  "
+                f"throughput={lr_bl['throughput_rows_per_s']:.1f} rows/s"
+            )
         else:
-            print(f"  WARNING: {logreg_data} not found — skipping baseline. "
-                  "Run scripts/generate_datasets.py first.")
+            print(
+                f"  WARNING: {logreg_data} not found — skipping baseline. "
+                "Run scripts/generate_datasets.py first."
+            )
 
         print("[LogReg] Reading MPI multi-driver metrics...")
         lr_mpi = _mpi_logreg_from_metrics(metrics_dir, logreg_data, args.logreg_epochs)
         if lr_mpi:
             rows.append(lr_mpi)
-            print(f"  MPI exec_time={lr_mpi['exec_time_s']:.3f}s  "
-                  f"sync_mean={lr_mpi['sync_time_mean_s']:.6f}s  "
-                  f"sync_pct={lr_mpi['sync_overhead_pct_mean']:.2f}%")
+            print(
+                f"  MPI exec_time={lr_mpi['exec_time_s']:.3f}s  "
+                f"sync_mean={lr_mpi['sync_time_mean_s']:.6f}s  "
+                f"sync_pct={lr_mpi['sync_overhead_pct_mean']:.2f}%"
+            )
         else:
-            print(f"  WARNING: No LogReg metrics CSV found in {metrics_dir}. "
-                  "Run mpirun -n 5 python -m mpj_spark.applications.logreg.allreduce first.")
+            print(
+                f"  WARNING: No LogReg metrics CSV found in {metrics_dir}. "
+                "Run mpirun -n 5 python -m mpj_spark.applications.logreg.allreduce first."
+            )
 
     # ── Write CSV ─────────────────────────────────────────────────────────────
     out_path = results_dir / "sync_overhead_benchmark.csv"

@@ -204,7 +204,10 @@ def run_kmeans_allreduce(
     logger.info(
         "[rank %d] init  mode=bcast_from_rank0  k=%d  D=%d  "
         "seed=%d (only rank 0 used seed; others received via Bcast)",
-        rank, k, d, seed,
+        rank,
+        k,
+        d,
+        seed,
     )
 
     comm.Barrier()
@@ -252,8 +255,7 @@ def run_kmeans_allreduce(
         )
 
         logger.info(
-            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  "
-            "shift=%.6f  wcss=%.2f",
+            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  " "shift=%.6f  wcss=%.2f",
             rank,
             iteration,
             spark_time,
