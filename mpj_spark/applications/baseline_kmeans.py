@@ -14,6 +14,24 @@ except ImportError:  # pragma: no cover
 from mpj_spark.workers.spark_session import build_spark_session
 
 
+def _get_cluster_centers(model):
+    """
+    PySpark version-safe accessor for KMeansModel cluster centres.
+
+    - PySpark >= 3.2 : clusterCenters is a @property  → list[DenseVector]
+    - PySpark <= 3.1 : clusterCenters is a method     → must call ()
+
+    Calling a property with () raises TypeError: 'list' object is not callable.
+    Accessing a method without () raises TypeError: 'method' object is not iterable.
+    This helper handles both cases transparently.
+    """
+    raw = model.clusterCenters
+    # If it came back as a bound-method (old PySpark), call it.
+    if callable(raw):
+        raw = raw()
+    return raw
+
+
 def run_baseline_kmeans(
     input_file_path: str,
     num_workers: int = 1,
@@ -107,11 +125,9 @@ def run_baseline_kmeans(
     t_proc_end = time.perf_counter()
     t_total_end = time.perf_counter()
 
-    # clusterCenters is a property (list attribute) on KMeansModel —
-    # do NOT call it as a method.  The previous code used
-    # model.clusterCenters() which raises TypeError when the mock (or
-    # real pyspark.ml KMeansModel) returns a plain list attribute.
-    centres = [c.tolist() for c in model.clusterCenters]
+    # Use version-safe accessor — handles both property (PySpark >=3.2)
+    # and method (PySpark <=3.1) forms of clusterCenters.
+    centres = [c.tolist() for c in _get_cluster_centers(model)]
     wcss = float(model.summary.trainingCost)
     load_time = t_load_end - t_load_start
     proc_time = t_proc_end - t_proc_start
