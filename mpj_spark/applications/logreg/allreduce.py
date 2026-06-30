@@ -40,6 +40,12 @@
 #     'intercept'  : float         — 0.0 (bias folded into w; no separate term)
 #     'run_summary': dict          — epochs_run, converged, total_time_s
 #   }
+#
+# METRICS KWARG FIX
+# ─────────────────
+# record_epoch() kwargs corrected to match LogRegMetricsCollector signature:
+#   w_norm  → weight_norm
+#   loss    → global_loss
 # =============================================================================
 
 from __future__ import annotations
@@ -266,26 +272,28 @@ def run_logreg_allreduce(
         sync_time_s = time.perf_counter() - t_sync
 
         epoch_time_s = time.perf_counter() - t_epoch
-        w_norm       = float(np.linalg.norm(w))
         grad_norm    = float(np.linalg.norm(global_grad))
         prev_loss    = global_loss
 
+        # FIX: use correct kwarg names matching LogRegMetricsCollector.record_epoch()
+        #   weight_norm= (not w_norm=)
+        #   global_loss= (not loss=)
         collector.record_epoch(
             epoch=epoch,
-            w_norm=w_norm,
-            grad_norm=grad_norm,
-            loss=global_loss,
             spark_time_s=spark_time_s,
             sync_time_s=sync_time_s,
             epoch_time_s=epoch_time_s,
+            grad_norm=grad_norm,
+            global_loss=global_loss,
+            weight_norm=float(np.linalg.norm(w)),
         )
 
         if rank == 0:
             logger.info(
                 "epoch %d/%d  lr=%.5f  |w|=%.4f  |grad|=%.6f  loss=%.6f  "
                 "spark=%.3fs  sync=%.3fs",
-                epoch + 1, max_epochs, lr_t, w_norm, grad_norm, global_loss,
-                spark_time_s, sync_time_s,
+                epoch + 1, max_epochs, lr_t, float(np.linalg.norm(w)),
+                grad_norm, global_loss, spark_time_s, sync_time_s,
             )
 
         if converged:
