@@ -7,7 +7,6 @@
 # Usage (5 MPI ranks = 1 root + 4 workers):
 #   mpirun --oversubscribe -n 5 \
 #     --mca hwloc_base_binding_policy none \
-#     -x PYTHONPATH \
 #     python scripts/validate_parity.py
 #
 # CLI flags:
@@ -65,7 +64,7 @@ def run_kmeans_parity(k: int, max_iter: int, tol: float) -> list[dict]:
     import numpy as np
 
     from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
-    from mpj_spark.kmeans.driver import run_kmeans_driver
+    from mpj_spark.applications.kmeans.driver import run_kmeans_driver
 
     _banner("[PARITY] K-Means — Running single-driver Spark BASELINE")
     baseline_result = None
@@ -117,7 +116,7 @@ def run_logreg_parity(max_iter: int, tol: float) -> list[dict]:
     import numpy as np
 
     from mpj_spark.applications.baseline_logreg import run_baseline_logreg
-    from mpj_spark.logreg.driver import run_logreg_driver
+    from mpj_spark.applications.logreg.driver import run_logreg_driver
 
     _banner("[PARITY] Logistic Regression — Running single-driver Spark BASELINE")
     baseline_result = None
@@ -204,7 +203,6 @@ def main() -> None:
     parser.add_argument("--report-dir", default="results")
     args = parser.parse_args()
 
-    # Use timezone-aware UTC (replaces deprecated datetime.utcnow())
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") if rank == 0 else None
     run_id = comm.bcast(run_id, root=0)
 
