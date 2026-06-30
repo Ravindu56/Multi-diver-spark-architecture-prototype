@@ -1,16 +1,16 @@
 # .github/workflows/lint.yml
-# Runs ruff lint + format check on every PR targeting dev or main.
+# Runs ruff lint + format check on every PR targeting dev, main, or master.
 # Pinned to ruff 0.4.10 — matches local dev toolchain.
 
 name: Lint
 
 on:
   pull_request:
-    branches: [dev, main, "feature/**"]
+    branches: [dev, main, master, "feature/**", "release/**"]
 
 jobs:
   ruff:
-    name: ruff 0.4.10
+    name: Ruff Code Quality Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
