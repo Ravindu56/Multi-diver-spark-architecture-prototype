@@ -3,7 +3,7 @@
 # Phase 3 — MPI Allreduce LogReg runner
 #
 # BUG FIX (convergence-parity patch)
-# ─────────────────────────────────────
+# ───────────────────────────────────
 # BUG — |w| divergence: allreduce_gradients() was applying a FIXED learning
 #   rate with no decay.  On a 10-feature synthetic dataset, the fixed lr=0.01
 #   causes the weight norm to grow without bound across 30 iterations because
@@ -29,6 +29,17 @@
 #   compared on load_time_s only for the Phase 2 prototype report.  The
 #   proc_time slowdown on a single machine is expected (shared-core contention)
 #   and should be reported as such, not as a regression.
+#
+# RETURN VALUE FIX (Issue #10 / validate_parity.py integration)
+# ───────────────────────────────────────────────────────────────
+# run_logreg_allreduce() was calling collector.record_run(w=w, ...) but
+# LogRegMetricsCollector.record_run() has no 'w' parameter and returns None.
+# The function now returns an explicit dict:
+#   {
+#     'weights'    : list[float]   — final weight vector
+#     'intercept'  : float         — 0.0 (bias folded into w; no separate term)
+#     'run_summary': dict          — epochs_run, converged, total_time_s
+#   }
 # =============================================================================
 
 from __future__ import annotations
@@ -194,6 +205,13 @@ def run_logreg_allreduce(
 
     FIX: cosine-decay learning rate schedule replaces the fixed lr.
          L2 weight-decay regularisation is applied in allreduce_gradients().
+
+    Returns
+    -------
+    dict with keys:
+        'weights'    : list[float]  — final weight vector (length = num_features)
+        'intercept'  : float        — 0.0  (bias is folded into w; no separate term)
+        'run_summary': dict         — epochs_run, converged, total_time_s
     """
     from mpj_spark.applications.logreg.local_gradient import (
         compute_gradient_spark,
@@ -228,6 +246,7 @@ def run_logreg_allreduce(
 
     prev_loss = float('inf')
     converged = False
+    epoch = 0
 
     for epoch in range(max_epochs):
         t_epoch = time.perf_counter()
@@ -256,7 +275,6 @@ def run_logreg_allreduce(
             w_norm=w_norm,
             grad_norm=grad_norm,
             loss=global_loss,
-            lr=lr_t,
             spark_time_s=spark_time_s,
             sync_time_s=sync_time_s,
             epoch_time_s=epoch_time_s,
@@ -276,12 +294,31 @@ def run_logreg_allreduce(
             break
 
     total_time_s = time.perf_counter() - t_total_start
-    result       = collector.record_run(w=w, total_time_s=total_time_s,
-                                        epochs_run=epoch + 1, converged=converged)
+
+    # Record run-level metrics (no 'w' param — collector stores timing only)
+    collector.record_run(
+        total_time_s=total_time_s,
+        epochs_run=epoch + 1,
+        converged=converged,
+        dataset_size=data_rdd.count(),
+        num_ranks=size,
+        learning_rate=learning_rate,
+        tol=tol,
+    )
     collector.to_csv()
     collector.to_json()
 
     data_rdd.unpersist()
     spark.stop()
 
-    return result
+    # Return explicit dict with weights so driver.py / validate_parity.py
+    # can extract them without touching Spark internals after spark.stop().
+    return {
+        "weights": w.tolist(),
+        "intercept": 0.0,  # bias folded into w; no separate intercept term
+        "run_summary": {
+            "epochs_run": epoch + 1,
+            "converged": converged,
+            "total_time_s": round(total_time_s, 4),
+        },
+    }
