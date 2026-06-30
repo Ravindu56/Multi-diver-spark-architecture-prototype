@@ -4,13 +4,40 @@
 # ================================================================
 import time
 
+try:
+    from pyspark.ml.clustering import KMeans
+    from pyspark.ml.feature import VectorAssembler
+except ImportError:  # pragma: no cover
+    KMeans = None
+    VectorAssembler = None
+
+from mpj_spark.workers.spark_session import build_spark_session
+
+
+def _get_cluster_centers(model):
+    """
+    PySpark version-safe accessor for KMeansModel cluster centres.
+
+    - PySpark >= 3.2 : clusterCenters is a @property  → list[DenseVector]
+    - PySpark <= 3.1 : clusterCenters is a method     → must call ()
+
+    Calling a property with () raises TypeError: 'list' object is not callable.
+    Accessing a method without () raises TypeError: 'method' object is not iterable.
+    This helper handles both cases transparently.
+    """
+    raw = model.clusterCenters
+    # If it came back as a bound-method (old PySpark), call it.
+    if callable(raw):
+        raw = raw()
+    return raw
+
 
 def run_baseline_kmeans(
-    input_file_path:  str,
-    num_workers:      int = 1,
-    cores_override:   int = None,
-    k:                int = 3,
-    max_iter:         int = 20,
+    input_file_path: str,
+    num_workers: int = 1,
+    cores_override: int = None,
+    k: int = 3,
+    max_iter: int = 20,
     baseline_threads: int = None,
 ) -> tuple:
     """
@@ -35,9 +62,6 @@ def run_baseline_kmeans(
         timing_dict : {'load_time': float, 'processing_time': float, 'total_time': float}
     """
     from mpj_spark.config import TOTAL_CORES
-    from mpj_spark.workers.spark_session import build_spark_session
-    from pyspark.ml.clustering import KMeans
-    from pyspark.ml.feature import VectorAssembler
 
     # Thread budget resolution (priority order):
     #   1. baseline_threads explicitly passed  →  fair comparison mode
@@ -45,82 +69,84 @@ def run_baseline_kmeans(
     #   3. default: TOTAL_CORES // num_workers →  same per-worker budget
     if baseline_threads is not None:
         cores = max(1, baseline_threads)
-        budget_label = f'local[{cores}]  [fair: total MPJ threads = {cores}]'
+        budget_label = f"local[{cores}]  [fair: total MPJ threads = {cores}]"
     elif cores_override:
         cores = max(1, cores_override)
-        budget_label = f'local[{cores}]  (cores_override)'
+        budget_label = f"local[{cores}]  (cores_override)"
     else:
         cores = max(1, TOTAL_CORES // num_workers)
-        budget_label = f'local[{cores}]  ({TOTAL_CORES} total \u00f7 {num_workers} workers)'
+        budget_label = f"local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)"
 
-    print('\n' + '=' * 70)
-    print('  Standard Spark K-Means (Single Driver) — BASELINE')
-    print(f'  Thread budget : {budget_label}')
-    print(f'  k={k}  max_iter={max_iter}')
-    print('=' * 70)
+    print("\n" + "=" * 70)
+    print("  Standard Spark K-Means (Single Driver) — BASELINE")
+    print(f"  Thread budget : {budget_label}")
+    print(f"  k={k}  max_iter={max_iter}")
+    print("=" * 70)
 
     t_total_start = time.perf_counter()
 
     # ── Build SparkSession ────────────────────────────────────────────
     try:
-        spark = build_spark_session('Baseline-KMeans', cores_override=cores, num_workers=1)
+        spark = build_spark_session("Baseline-KMeans", cores_override=cores, num_workers=1)
     except TypeError:
-        spark = build_spark_session('Baseline-KMeans', cores)
+        spark = build_spark_session("Baseline-KMeans", cores)
 
     # ── Load ─────────────────────────────────────────────────────────
     t_load_start = time.perf_counter()
-    raw_rdd      = spark.sparkContext.textFile(input_file_path)
-    first_row    = raw_rdd.first()
-    num_features = len(first_row.strip().split(','))
-    feature_cols = [f'f{i}' for i in range(num_features)]
+    raw_rdd = spark.sparkContext.textFile(input_file_path)
+    first_row = raw_rdd.first()
+    num_features = len(first_row.strip().split(","))
+    feature_cols = [f"f{i}" for i in range(num_features)]
 
     def parse_row(line):
         from pyspark.sql import Row
+
         try:
-            vals = [float(x) for x in line.strip().split(',') if x.strip()]
-            return Row(**dict(zip(feature_cols, vals))) if len(vals) == num_features else None
+            vals = [float(x) for x in line.strip().split(",") if x.strip()]
+            return (
+                Row(**dict(zip(feature_cols, vals, strict=False)))
+                if len(vals) == num_features
+                else None
+            )
         except ValueError:
             return None
 
-    df        = spark.createDataFrame(raw_rdd.map(parse_row).filter(lambda r: r is not None))
+    df = spark.createDataFrame(raw_rdd.map(parse_row).filter(lambda r: r is not None))
     row_count = df.count()
     t_load_end = time.perf_counter()
 
     # ── Assemble + Train ─────────────────────────────────────────────
     t_proc_start = time.perf_counter()
-    assembler = VectorAssembler(
-        inputCols=feature_cols,
-        outputCol='features',
-        handleInvalid='skip'
-    )
-    df_vec = assembler.transform(df).select('features').cache()
-    model  = KMeans(
-        k=k, maxIter=max_iter, seed=42,
-        featuresCol='features', initMode='k-means||'
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
+    df_vec = assembler.transform(df).select("features").cache()
+    model = KMeans(
+        k=k, maxIter=max_iter, seed=42, featuresCol="features", initMode="k-means||"
     ).fit(df_vec)
-    t_proc_end  = time.perf_counter()
+    t_proc_end = time.perf_counter()
     t_total_end = time.perf_counter()
 
-    centres   = [c.tolist() for c in model.clusterCenters()]
-    wcss      = float(model.summary.trainingCost)
-    load_time = t_load_end  - t_load_start
-    proc_time = t_proc_end  - t_proc_start
-    total     = t_total_end - t_total_start
+    # Use version-safe accessor — handles both property (PySpark >=3.2)
+    # and method (PySpark <=3.1) forms of clusterCenters.
+    centres = [c.tolist() for c in _get_cluster_centers(model)]
+    wcss = float(model.summary.trainingCost)
+    load_time = t_load_end - t_load_start
+    proc_time = t_proc_end - t_proc_start
+    total = t_total_end - t_total_start
 
-    print(f'\n  Rows processed : {row_count:,}')
-    print(f'  WCSS (inertia) : {wcss:.4f}')
-    print(f'  Cluster centres:')
+    print(f"\n  Rows processed : {row_count:,}")
+    print(f"  WCSS (inertia) : {wcss:.4f}")
+    print("  Cluster centres:")
     for i, c in enumerate(centres):
-        preview = ', '.join(f'{v:.3f}' for v in c[:4])
-        print(f'    C{i}: [{preview}{"..." if len(c) > 4 else ""}]')
-    print(f'\n  Load Time      : {load_time:.4f} s')
-    print(f'  Proc Time      : {proc_time:.4f} s')
-    print(f'  Total          : {total:.4f} s')
+        preview = ", ".join(f"{v:.3f}" for v in c[:4])
+        print(f"    C{i}: [{preview}{'...' if len(c) > 4 else ''}]")
+    print(f"\n  Load Time      : {load_time:.4f} s")
+    print(f"  Proc Time      : {proc_time:.4f} s")
+    print(f"  Total          : {total:.4f} s")
 
     df_vec.unpersist()
     spark.stop()
 
     return (
-        {'centres': centres, 'wcss': wcss},
-        {'load_time': load_time, 'processing_time': proc_time, 'total_time': total},
+        {"centres": centres, "wcss": wcss},
+        {"load_time": load_time, "processing_time": proc_time, "total_time": total},
     )

@@ -15,7 +15,7 @@ class KeyValueStructure:
     """
 
     def __init__(self):
-        self.data: list = []   # list of (str, int) tuples
+        self.data: list = []  # list of (str, int) tuples
 
     # ----------------------------------------------------------
     def from_rdd_collect(self, rdd_results):
@@ -28,13 +28,13 @@ class KeyValueStructure:
         return [(str(k), int(v)) for k, v in self.data]
 
     @staticmethod
-    def from_serializable(serialized: list) -> 'KeyValueStructure':
+    def from_serializable(serialized: list) -> "KeyValueStructure":
         """Reconstruct from a serialised list received via Queue."""
         kv = KeyValueStructure()
         kv.data = [(str(k), int(v)) for k, v in serialized]
         return kv
 
-    def merge(self, other) -> 'KeyValueStructure':
+    def merge(self, other) -> "KeyValueStructure":
         """
         Merge another KeyValueStructure or a raw serializable list into
         this instance by summing counts for matching keys.

@@ -1,4 +1,4 @@
-from .timing   import TimingCollector
-from .reporter import print_results, print_timing, print_comparison
+from .reporter import print_comparison, print_results, print_timing
+from .timing import TimingCollector
 
-__all__ = ['TimingCollector', 'print_results', 'print_timing', 'print_comparison']
+__all__ = ["TimingCollector", "print_results", "print_timing", "print_comparison"]
