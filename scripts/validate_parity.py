@@ -29,7 +29,8 @@
 #   --logreg-tol  FLOAT      accuracy delta threshold (0-1)     [default: 0.03]
 #   --k           INT        number of K-Means clusters         [default: 3]
 #   --max-iter    INT        max iterations                     [default: 20]
-#   --report-dir  PATH       directory for CSV report           [default: results/]
+#   --report-dir  PATH       directory for parity CSV report    [default: results/]
+#   --metrics-dir PATH       directory for per-rank metrics CSVs[default: metrics/]
 #   --accuracy-sample INT    rows used for accuracy comparison  [default: 1000]
 # =============================================================================
 from __future__ import annotations
@@ -72,10 +73,15 @@ def _check(label: str, delta: float, tol: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# K-Means parity  (Problem 1 fix)
+# K-Means parity
 # ---------------------------------------------------------------------------
 
-def run_kmeans_parity(k: int, max_iter: int, wcss_tol: float) -> list[dict]:
+def run_kmeans_parity(
+    k: int,
+    max_iter: int,
+    wcss_tol: float,
+    metrics_dir: str,
+) -> list[dict]:
     """
     Parity check for K-Means.
 
@@ -110,13 +116,11 @@ def run_kmeans_parity(k: int, max_iter: int, wcss_tol: float) -> list[dict]:
         dataset_path=KMEANS_DATASET_PATH,
         k=k,
         max_iter=max_iter,
+        metrics_output_dir=metrics_dir,   # ← FIX: was never passed before
     )
 
     records: list[dict] = []
     if rank == 0:
-        # WCSS relative delta — the only valid parity criterion here.
-        # Two k-means solutions are considered equivalent when their objective
-        # values agree to within 1 % (wcss_tol=0.01 by default).
         wcss_baseline = float(baseline_result["wcss"])
         wcss_mpi = float(mpj_result["wcss"])
         wcss_delta = abs(wcss_baseline - wcss_mpi) / max(abs(wcss_baseline), 1e-9)
@@ -124,18 +128,17 @@ def run_kmeans_parity(k: int, max_iter: int, wcss_tol: float) -> list[dict]:
             {**_check("wcss_relative_delta", wcss_delta, wcss_tol), "workload": "kmeans"}
         )
 
-        if rank == 0:
-            print(
-                f"\n  KMeans WCSS  baseline={wcss_baseline:.2f}  "
-                f"mpi={wcss_mpi:.2f}  "
-                f"rel_delta={wcss_delta:.6f}  tol={wcss_tol}"
-            )
+        print(
+            f"\n  KMeans WCSS  baseline={wcss_baseline:.2f}  "
+            f"mpi={wcss_mpi:.2f}  "
+            f"rel_delta={wcss_delta:.6f}  tol={wcss_tol}"
+        )
 
     return records
 
 
 # ---------------------------------------------------------------------------
-# Logistic Regression parity  (Problems 2 + 3 fix)
+# Logistic Regression parity
 # ---------------------------------------------------------------------------
 
 def _predict_accuracy(weights: "np.ndarray", intercept: float, X: "np.ndarray", y: "np.ndarray") -> float:
@@ -150,6 +153,7 @@ def run_logreg_parity(
     max_iter: int,
     accuracy_tol: float,
     accuracy_sample: int,
+    metrics_dir: str,
 ) -> list[dict]:
     """
     Parity check for Logistic Regression.
@@ -187,12 +191,11 @@ def run_logreg_parity(
         comm=comm,
         dataset_path=LOGREG_DATASET_PATH,
         max_iter=max_iter,
+        metrics_output_dir=metrics_dir,   # ← FIX: was never passed before
     )
 
     records: list[dict] = []
     if rank == 0:
-        # Load a shared sample from the dataset for accuracy comparison.
-        # numpy / csv only — no Spark session needed here.
         try:
             sample_X, sample_y = _load_sample_numpy(
                 LOGREG_DATASET_PATH, n=accuracy_sample
@@ -220,7 +223,6 @@ def run_logreg_parity(
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            # If sample loading fails, record a diagnostic FAIL rather than crash.
             print(f"\n  [WARN] accuracy sample load failed: {exc}")
             records.append(
                 {
@@ -319,7 +321,7 @@ def main() -> None:
         default=0.03,
         help="Accuracy delta threshold for LogReg PASS (default: 0.03 = 3 pp)",
     )
-    # Keep --tolerance as a legacy alias that sets both tolerances
+    # Legacy alias
     parser.add_argument(
         "--tolerance",
         type=float,
@@ -329,6 +331,13 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=3)
     parser.add_argument("--max-iter", type=int, default=20)
     parser.add_argument("--report-dir", default="results")
+    parser.add_argument(
+        "--metrics-dir",
+        default="metrics",
+        help="Output directory for per-rank metrics CSVs/JSONs written by the "
+             "KMeans and LogReg drivers (default: metrics/). "
+             "Pass this same path to timing_analysis.py --metrics-dir.",
+    )
     parser.add_argument(
         "--accuracy-sample",
         type=int,
@@ -342,6 +351,9 @@ def main() -> None:
         args.kmeans_tol = args.tolerance
         args.logreg_tol = args.tolerance
 
+    # Create metrics dir before any driver runs so all ranks can write to it
+    Path(args.metrics_dir).mkdir(parents=True, exist_ok=True)
+
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") if rank == 0 else None
     run_id = comm.bcast(run_id, root=0)
 
@@ -353,13 +365,17 @@ def main() -> None:
         print(f"  LogReg tol (acc) : {args.logreg_tol}  (3 pp accuracy delta)")
         print(f"  KMeans path      : {KMEANS_DATASET_PATH}")
         print(f"  LogReg path      : {LOGREG_DATASET_PATH}")
+        print(f"  Metrics output   : {args.metrics_dir}/")
         print("=" * 70)
 
     all_records: list[dict] = []
 
     if not args.skip_kmeans:
         records = run_kmeans_parity(
-            k=args.k, max_iter=args.max_iter, wcss_tol=args.kmeans_tol
+            k=args.k,
+            max_iter=args.max_iter,
+            wcss_tol=args.kmeans_tol,
+            metrics_dir=args.metrics_dir,
         )
         if rank == 0:
             all_records.extend(records)
@@ -369,6 +385,7 @@ def main() -> None:
             max_iter=args.max_iter,
             accuracy_tol=args.logreg_tol,
             accuracy_sample=args.accuracy_sample,
+            metrics_dir=args.metrics_dir,
         )
         if rank == 0:
             all_records.extend(records)
@@ -376,6 +393,11 @@ def main() -> None:
     if rank == 0:
         write_report(all_records, args.report_dir, run_id)
         print_summary(all_records)
+
+        # Remind the user to run the timing analysis next
+        print(f"\n  Metrics written to: {args.metrics_dir}/")
+        print(f"  Next step → python scripts/timing_analysis.py --metrics-dir {args.metrics_dir}")
+        print()
 
 
 if __name__ == "__main__":
