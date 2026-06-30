@@ -4,8 +4,8 @@
 # CI workflow: Unit Tests
 #
 # Triggers:
-#   - Every push to dev or any feature/* branch
-#   - Every pull request targeting dev
+#   - Every push to dev or any feature/* or release/* branch
+#   - Every pull request targeting dev, master, or release/*
 #
 # Job: install deps → run pytest → upload coverage artifact
 # =============================================================
@@ -15,10 +15,14 @@ on:
   push:
     branches:
       - dev
+      - master
       - "feature/**"
+      - "release/**"
   pull_request:
     branches:
       - dev
+      - master
+      - "release/**"
 
 jobs:
   unit-tests:
@@ -26,31 +30,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout source ──────────────────────────────
+      # ── 1. Checkout source ────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Python setup ─────────────────────────────────
+      # ── 2. Python setup ──────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      # ── 3. Java setup (required for PySpark JVM) ──────────
+      # ── 3. Java setup (required for PySpark JVM) ────────────
       - name: Set up Java 11
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "11"
 
-      # ── 4. Install dependencies ──────────────────────────
+      # ── 4. Install dependencies ────────────────────────────
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ── 5. Run unit tests with coverage ───────────────────
+      # ── 5. Run unit tests with coverage ─────────────────────
       - name: Run unit tests
         run: |
           pytest tests/unit/ \
@@ -60,7 +64,7 @@ jobs:
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
 
-      # ── 6. Upload coverage report as artifact ─────────────
+      # ── 6. Upload coverage report as artifact ────────────────
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
