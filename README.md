@@ -1,9 +1,8 @@
 # MPJ-SPARK Multi-Driver Architecture Prototype
 
-[![CI](https://github.com/Ravindu56/Multi-diver-spark-architecture-prototype/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/Ravindu56/Multi-diver-spark-architecture-prototype/actions/workflows/ci.yml)
-[![Lint](https://github.com/Ravindu56/Multi-diver-spark-architecture-prototype/actions/workflows/lint.yml/badge.svg?branch=dev)](https://github.com/Ravindu56/Multi-diver-spark-architecture-prototype/actions/workflows/lint.yml)
-[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+> **BScEng Research Prototype — University of Jaffna, EC6070**  
+> **v0.2.0 — Phase 2: Iterative ML Workloads with Simulated Allreduce**  
+> Implements a cloud-native multi-driver Spark architecture on a single machine using Python `multiprocessing` + PySpark, validating the MPJ-Spark execution model for iterative ML workloads.
 
 ---
 
@@ -48,10 +47,32 @@ Existing scalable multi-driver execution frameworks (e.g., MPJ-Spark) are valida
 | 2b | Develop a lightweight prediction model (LSTM or regression-based) for per-driver resource demand estimation | O2 |
 | 2c | Implement a workload-aware heuristic resource allocation strategy that dynamically assigns CPU cores and memory to each Spark driver | O2 |
 | 2d | Evaluate the full framework against two baselines: (i) single-driver Spark with static allocation, and (ii) multi-driver execution without workload-aware allocation or parameter synchronisation | O2 |
+This prototype implements and benchmarks the **multi-driver Spark architecture** described in the state-of-the-art reference paper (Saleh et al., 2025). Each MPJ Worker owns an independent `SparkSession` and processes its data partition in parallel. A Root Process orchestrates the full pipeline — partition, launch, synchronise (Allreduce), collect, aggregate — mirroring how MPJ-Express coordinates processes across HPC cluster nodes.
+
+**Phase 2 extends the architecture from batch analytics (WordCount) to iterative ML workloads** — K-Means clustering and binary Logistic Regression — with per-iteration cross-driver parameter synchronisation via a simulated Queue-based Allreduce.
+
+> **State-of-the-Art Reference:**  
+> Saleh et al. (2025). *MPJ-SPARK Integration-Based Technique to Enhance Big Data Analytics in High Performance Computing Environments.* IEEE Access. DOI: [10.1109/ACCESS.2025.3584744](https://doi.org/10.1109/ACCESS.2025.3584744)
+
+---
+
+## Research Objectives Addressed
+
+| Objective | Status |
+|---|---|
+| **1a** — Adapt multi-driver Spark from HPC/SLURM to containerised cloud (Phase 4) | 🔜 Phase 4 |
+| **1b** — Per-iteration cross-driver parameter synchronisation (Allreduce-based) | ✅ Phase 2 — Queue-simulated FedAvg |
+| **1c** — Validate on iterative ML workloads (k-means, logistic regression) | ✅ Phase 2 |
+| **2a** — Profile CPU/memory across heterogeneous ML workloads | ✅ `results/logreg_iter_metrics.csv` |
+| **2b** — Prediction model for per-driver resource demand | 🔜 Phase 6 |
+| **2c** — Workload-aware heuristic resource allocation | 🔜 Phase 6 |
+| **2d** — Evaluate against single-driver and non-synchronised baselines | ✅ `--compare` flag |
 
 ---
 
 ## Architecture
+
+### Multi-Driver Execution Model
 
 ```
 [Root Coordinator — rank 0]
@@ -221,8 +242,42 @@ python -c "from mpi4py import MPI; print('MPI OK, version:', MPI.Get_version())"
 | **Phase 4** | Docker containerisation — one container per MPI rank, NFS shared volume, multi-node Docker Swarm | 🔧 In progress |
 | **Phase 5** | Multi-node Docker Swarm cluster validation at scale; full comparative evaluation | 📋 Planned |
 | **Phase 6** | ML-aware resource allocator integrated; LSTM/regression demand prediction; full O1+O2 evaluation | 📋 Planned |
+  ├─ Phase 1 : dynamic_partition()      — O(1) RAM stream-split → N partition files
+  │
+  ├─ Phase 1b: global seed centroids    — isolated subprocess, 5% sample (k-means only)
+  │
+  ├─ Phase 2 : launch N workers         — each owns an independent SparkSession(local[K])
+  │            JVM pre-warm barrier     — all N JVMs signal ready before timer starts
+  │
+  ├─ Phase 3 : fire go-signals          — all workers start simultaneously
+  │            workers compute          — each processes its partition independently
+  │            Allreduce coordinator    — background thread (logreg) or gossip loop (k-means)
+  │
+  ├─ Phase 4 : collect results          — Queue-based result collection
+  │
+  ├─ Phase 5 : aggregate                — FedAvg / Hungarian merge across all workers
+  │
+  └─ Phase 5b: re-assignment pass       — exact centroid correction (k-means + gossip only)
+```
+
+### Per-Iteration Allreduce — Two-Queue Design (Phase 2)
+
+```
+allreduce_up_queue   — workers → root  (local weight vectors / centroids, per iteration)
+allreduce_down_queue — root → workers  (FedAvg-averaged result, broadcast back)
+```
+
+Two dedicated queues eliminate the livelock present in a single shared-queue design: the root coordinator can never read back its own broadcast messages. The coordinator runs in a **background thread** fired immediately after worker go-signals, so it is listening before workers push their first iteration.
 
 ---
+
+## Supported Workloads
+
+### WordCount (`--app wordcount`)
+Batch word frequency aggregation. Validates Phase 1 multi-driver architecture against single-driver baseline.
+
+### K-Means Clustering (`--app kmeans`)
+Distributed iterative k-means via Spark MLlib on per-worker partitions.
 
 ## Installation
 
@@ -367,7 +422,7 @@ python3 main.py --workers 4 --generate 500 --app logreg --compare \
 python3 main.py --log-history
 ```
 
-### Scaling Sweep (speedup curve)
+### Logistic Regression
 
 ```bash
 for w in 1 2 4 8; do
@@ -509,12 +564,9 @@ mpirun --oversubscribe -np 5 python -m mpj_spark.core.main_mpi \
   --generate 500 --app wordcount --compare --cores 4
 ```
 
-| Metric | Multi-Driver | Std Spark | Speedup |
-|---|---|---|---|
-| Load Time | 1.22 s | 1.73 s | **1.42×** |
-| Avg Worker Proc Time | 6.81 s | 10.51 s | **1.54×** |
-| Total Wall-clock | 12.18 s | 30.94 s | **2.54×** |
-| JVM Pre-warm (T_Init) | 3.04 s | — | excluded from T_Proc |
+---
+
+## Benchmark Results
 
 ### Phase 3 Timing Analysis — K-Means & LogReg (N=5, 540 K rows)
 
