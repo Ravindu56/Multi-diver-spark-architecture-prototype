@@ -135,7 +135,9 @@ mpj_spark_prototype.py        # Phase 1 single-file prototype (archived)
 mpj_spark_prototype_v2.py     # Phase 2 single-file prototype with ML (archived)
 scripts/
 ├── generate_datasets.py      # Generate fixed K-Means + LogReg datasets (run once)
-└── validate_parity.py        # Issue #10 — baseline Spark vs MPI parity validation
+├── validate_parity.py        # Issue #10 — baseline Spark vs MPI parity validation
+├── sync_overhead_benchmark.py # Issue #12 — MPI multi-driver vs baseline sync benchmark
+└── timing_analysis.py        # Phase 3 timing decomposition + controller feature matrix
 requirements.txt
 pyproject.toml
 pytest.ini
@@ -146,25 +148,26 @@ pytest.ini
 ```
 tests/
 ├── unit/
-│   ├── conftest.py                      # Shared fixtures
-│   ├── test_file_manager.py             # MPJSparkFileManager — partition correctness
-│   ├── test_file_manager_edge.py        # Edge cases — empty file, single-line, unicode
-│   ├── test_root_process.py             # Root process pipeline helpers
-│   ├── test_root_process_helpers.py     # Aggregation and timing helpers
-│   ├── test_spark_session.py            # SparkSession factory — core allocation
-│   ├── test_key_value.py                # KeyValueStructure serialisation
-│   ├── test_gossip_aggregator.py        # Gossip Allreduce correctness
-│   └── test_baseline_applications.py   # Baseline K-Means + LogReg return shapes
+│   ├── conftest.py                          # Shared fixtures
+│   ├── test_file_manager.py                 # MPJSparkFileManager — partition correctness
+│   ├── test_file_manager_edge.py            # Edge cases — empty file, single-line, unicode
+│   ├── test_root_process.py                 # Root process pipeline helpers
+│   ├── test_root_process_helpers.py         # Aggregation and timing helpers
+│   ├── test_spark_session.py                # SparkSession factory — core allocation
+│   ├── test_key_value.py                    # KeyValueStructure serialisation
+│   ├── test_gossip_aggregator.py            # Gossip Allreduce correctness
+│   └── test_baseline_applications.py       # Baseline K-Means + LogReg return shapes
 ├── phase3/
-│   ├── test_kmeans_allreduce.py         # K-Means MPI Allreduce — guarded @NEEDS_MPI
-│   ├── test_kmeans_convergence.py       # K-Means convergence over iterations
-│   ├── test_kmeans_metrics.py           # K-Means metrics collector
-│   ├── test_kmeans_partition.py         # K-Means partition + centroid init
-│   └── test_mpi_verify.py              # MPI environment sanity checks
+│   ├── test_kmeans_allreduce.py             # K-Means MPI Allreduce — guarded @NEEDS_MPI
+│   ├── test_kmeans_convergence.py           # K-Means convergence over iterations
+│   ├── test_kmeans_metrics.py               # K-Means metrics collector
+│   ├── test_kmeans_partition.py             # K-Means partition + centroid init
+│   ├── test_mpi_verify.py                   # MPI environment sanity checks
+│   └── test_wordcount_mpi_vs_baseline.py    # Issue #14 — WordCount MPI regression test
 └── logreg/
-    ├── test_allreduce.py                # LogReg Allreduce + convergence check
-    ├── test_local_gradient.py           # Gradient computation (real local[1] Spark)
-    └── test_metrics.py                  # LogRegMetricsCollector
+    ├── test_allreduce.py                    # LogReg Allreduce + convergence check
+    ├── test_local_gradient.py               # Gradient computation (real local[1] Spark)
+    └── test_metrics.py                      # LogRegMetricsCollector
 ```
 
 ---
@@ -229,7 +232,7 @@ python -c "from mpi4py import MPI; print('MPI OK, version:', MPI.Get_version())"
 # 1. Install OpenMPI at OS level (see Phase 3 Prerequisites above)
 
 # 2. Install Python dependencies
-pip install -r requirements.txt
+pip install -e .
 
 # 3. Verify
 mpirun --version
@@ -307,6 +310,35 @@ mpirun -n 5 python scripts/validate_parity.py \
 column -t -s, results/parity_report.csv
 ```
 
+#### Step 4 — Sync overhead benchmark (Issue #12)
+
+```bash
+# Full benchmark: MPI multi-driver vs single-driver baseline
+# Reads existing metrics CSVs + runs baselines, writes results/sync_overhead_benchmark.csv
+# NOTE: Run workloads first (Step 2) so metrics CSVs are present in metrics/
+mpirun --oversubscribe -n 5 python scripts/sync_overhead_benchmark.py
+
+# K-Means only
+mpirun --oversubscribe -n 5 python scripts/sync_overhead_benchmark.py --skip-logreg
+
+# LogReg only
+mpirun --oversubscribe -n 5 python scripts/sync_overhead_benchmark.py --skip-kmeans
+
+# Custom parameters
+mpirun --oversubscribe -n 5 python scripts/sync_overhead_benchmark.py \
+  --kmeans-k 3 --kmeans-iter 20 --logreg-epochs 14
+
+# View report
+column -t -s, results/sync_overhead_benchmark.csv
+```
+
+#### Step 5 — WordCount MPI regression test (Issue #14)
+
+```bash
+# Run only in full MPI environment (skipped automatically in CI)
+mpirun --oversubscribe -n 5 pytest tests/phase3/test_wordcount_mpi_vs_baseline.py -v
+```
+
 ### Phase 1–2 — Multiprocessing Entry Point (`main.py`)
 
 > Phase 2 Queue simulation (`--sync queue`) is retained as benchmark condition M2 for Objective 2d comparative evaluation.
@@ -380,6 +412,7 @@ pytest tests/unit/ -v --cov=mpj_spark --cov-report=term-missing
 | `phase3/test_kmeans_metrics.py` | K-Means metrics collector | No |
 | `phase3/test_kmeans_partition.py` | K-Means partition + centroid init | Yes (skipped in CI) |
 | `phase3/test_mpi_verify.py` | MPI environment sanity (barrier, allreduce) | Partial |
+| `phase3/test_wordcount_mpi_vs_baseline.py` | WordCount MPI vs baseline top-N match | Yes (skipped in CI) |
 | `logreg/test_allreduce.py` | `allreduce_gradients()`, `check_loss_convergence()` | No |
 | `logreg/test_local_gradient.py` | `compute_gradient_spark()` (real `local[1]` Spark) | No |
 | `logreg/test_metrics.py` | `LogRegMetricsCollector` all methods | No |
@@ -435,6 +468,20 @@ pytest tests/unit/ -v --cov=mpj_spark --cov-report=term-missing
 | `--skip-kmeans` | off | Skip K-Means validation |
 | `--skip-logreg` | off | Skip LogReg validation |
 
+### `scripts/sync_overhead_benchmark.py` (Issue #12)
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ranks N` | `5` | Expected MPI size (informational) |
+| `--kmeans-k N` | `3` | K for K-Means |
+| `--kmeans-iter N` | `20` | max_iter for K-Means baseline |
+| `--logreg-epochs N` | `14` | Epochs for LogReg baseline |
+| `--metrics-dir PATH` | `metrics` | Directory containing workload metrics CSVs |
+| `--results-dir PATH` | `results` | Output directory for benchmark CSV |
+| `--data-dir PATH` | `data` | Dataset directory |
+| `--skip-kmeans` | off | Skip K-Means benchmark |
+| `--skip-logreg` | off | Skip LogReg benchmark |
+
 ---
 
 ## Performance Metrics
@@ -469,7 +516,16 @@ mpirun --oversubscribe -np 5 python -m mpj_spark.core.main_mpi \
 | Total Wall-clock | 12.18 s | 30.94 s | **2.54×** |
 | JVM Pre-warm (T_Init) | 3.04 s | — | excluded from T_Proc |
 
-> Results produced on Phase 2 multiprocessing prototype. Phase 3 MPI results will be added upon Phase 4 Docker cluster validation.
+### Phase 3 Timing Analysis — K-Means & LogReg (N=5, 540 K rows)
+
+| Workload | Bottleneck | Spark fraction | Sync overhead (mean) | Iterations |
+|---|---|---|---|---|
+| K-Means | compute | 0.963 | 3.74% | 4 (converged) |
+| LogReg | sync | 0.375 | 62.51% | 14 (not converged) |
+
+> Full timing decomposition in `results/timing/timing_summary.csv`.
+> Sync overhead benchmark in `results/sync_overhead_benchmark.csv`.
+> Controller feature matrix in `results/timing/controller_feature_matrix.csv` — input for Objective 2b predictor.
 
 ---
 
@@ -486,7 +542,7 @@ mpirun --oversubscribe -np 5 python -m mpj_spark.core.main_mpi \
 
 | Branch | Research Objective |
 |---|---|
-| `feature/p3-ml-workload-parity` | Issue #10 — parity validation + benchmark wiring (B1/B2/M1/M2/M3) |
+| `feature/p3-ml-workload-parity` | Issues #10 #12 #13 #14 — parity + sync benchmark + docs + WordCount regression |
 | `feature/adaptive-gossip-aggregation` | Objective 1b — Gossip Allreduce sync |
 
 ---
