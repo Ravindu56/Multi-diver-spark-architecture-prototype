@@ -1,0 +1,173 @@
+# =============================================================================
+# docker/docker-compose.yml  —  Phase 4 Single-Node Cluster
+# MPJ-SPARK Multi-Driver Architecture
+# University of Jaffna — EC6070 — 2022/E/033 & 2022/E/090
+#
+# TOPOLOGY
+# --------
+#   mpi-root       — MPI rank 0  (root coordinator, launches mpirun)
+#   mpi-worker-1   — MPI rank 1  (independent Spark driver)
+#   mpi-worker-2   — MPI rank 2  (independent Spark driver)
+#   ... up to NUM_WORKERS workers (set in .env)
+#
+# All containers share:
+#   - mpj-spark-data NFS volume mounted at /data  (replaces Lustre)
+#   - mpj-spark-net  bridge network  172.20.0.0/24
+#
+# USAGE
+# -----
+#   # 1. Run NFS setup first (P4-02)
+#   sudo bash docker/nfs-setup.sh
+#
+#   # 2. Build the image
+#   docker build -t mpj-spark:latest -f docker/Dockerfile .
+#
+#   # 3. Launch the cluster (uses docker/.env for all parameters)
+#   docker compose -f docker/docker-compose.yml up
+#
+#   # 4. Attach to root and run a workload
+#   docker exec -it mpi-root bash
+#   mpirun --hostfile /etc/mpi/hostfile -np 3 python3 mpj_spark_mpi.py \
+#       --app wordcount --input /data/input/dataset.txt --compare
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # MPI Root  (rank 0)
+  # Responsibilities:
+  #   - Partition dataset into N chunks, write metadata to /data/partitions/
+  #   - Broadcast partition assignments to workers via MPI
+  #   - Collect and aggregate results from workers
+  #   - Run ML-aware allocator (Phase 6) to set per-driver resource budgets
+  # ---------------------------------------------------------------------------
+  mpi-root:
+    image: mpj-spark:latest
+    container_name: mpi-root
+    hostname: mpi-root
+    environment:
+      # MPI rank identity — used by entrypoint.sh to dispatch root_main()
+      MPI_RANK: "0"
+      MPI_SIZE: "${NUM_WORKERS_PLUS_ONE}"
+      # Shared storage — aligns with mpj_spark/config.py MPJ_SHARED_STORAGE
+      MPJ_SHARED_STORAGE: /data
+      MPJ_KMEANS_DATA: /data/input/kmeans_data.csv
+      MPJ_LOGREG_DATA: /data/input/logreg_data.csv
+      MPJ_KMEANS_SIZE_MB: "${KMEANS_DATASET_SIZE_MB}"
+      MPJ_LOGREG_SIZE_MB: "${LOGREG_DATASET_SIZE_MB}"
+      MPJ_LOGREG_FEATURES: "${LOGREG_NUM_FEATURES}"
+      MPJ_KMEANS_FEATURES: "${KMEANS_NUM_FEATURES}"
+      # Spark UI — root driver UI on base port
+      SPARK_UI_PORT: "${SPARK_UI_PORT_BASE}"
+      # OpenMPI root-as-root flags (set in Dockerfile but repeated for clarity)
+      OMPI_ALLOW_RUN_AS_ROOT: "1"
+      OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: "1"
+    volumes:
+      # NFS-backed shared volume — functional equivalent of Lustre shared storage
+      - mpj-spark-data:/data
+    ports:
+      # SSH: mpirun on root SSHes into workers via this port
+      - "2222:22"
+      # Spark Web UI for root driver
+      - "${SPARK_UI_PORT_BASE}:4040"
+    networks:
+      mpj-spark-net:
+        ipv4_address: 172.20.0.2
+    # Root stays alive waiting for mpirun commands
+    # entrypoint.sh starts sshd and then drops to bash/sleep
+    stdin_open: true
+    tty: true
+    depends_on:
+      - mpi-worker-1
+      - mpi-worker-2
+
+  # ---------------------------------------------------------------------------
+  # MPI Worker 1  (rank 1)
+  # Responsibilities:
+  #   - Receive partition metadata from root via MPI tag=10
+  #   - Launch independent SparkSession on assigned dataset partition
+  #   - Execute ML workload (K-Means / LogReg) with per-iteration Allreduce
+  #   - Return results and timing metrics to root
+  # ---------------------------------------------------------------------------
+  mpi-worker-1:
+    image: mpj-spark:latest
+    container_name: mpi-worker-1
+    hostname: mpi-worker-1
+    environment:
+      MPI_RANK: "1"
+      MPI_SIZE: "${NUM_WORKERS_PLUS_ONE}"
+      MPJ_SHARED_STORAGE: /data
+      MPJ_KMEANS_DATA: /data/input/kmeans_data.csv
+      MPJ_LOGREG_DATA: /data/input/logreg_data.csv
+      MPJ_KMEANS_SIZE_MB: "${KMEANS_DATASET_SIZE_MB}"
+      MPJ_LOGREG_SIZE_MB: "${LOGREG_DATASET_SIZE_MB}"
+      MPJ_LOGREG_FEATURES: "${LOGREG_NUM_FEATURES}"
+      MPJ_KMEANS_FEATURES: "${KMEANS_NUM_FEATURES}"
+      # Each worker gets a unique Spark UI port to avoid host-port conflicts
+      SPARK_UI_PORT: "${SPARK_UI_PORT_BASE_WORKER1}"
+      OMPI_ALLOW_RUN_AS_ROOT: "1"
+      OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: "1"
+    volumes:
+      - mpj-spark-data:/data
+    ports:
+      - "${SPARK_UI_PORT_BASE_WORKER1}:4040"
+    networks:
+      mpj-spark-net:
+        ipv4_address: 172.20.0.3
+    stdin_open: true
+    tty: true
+
+  # ---------------------------------------------------------------------------
+  # MPI Worker 2  (rank 2)
+  # ---------------------------------------------------------------------------
+  mpi-worker-2:
+    image: mpj-spark:latest
+    container_name: mpi-worker-2
+    hostname: mpi-worker-2
+    environment:
+      MPI_RANK: "2"
+      MPI_SIZE: "${NUM_WORKERS_PLUS_ONE}"
+      MPJ_SHARED_STORAGE: /data
+      MPJ_KMEANS_DATA: /data/input/kmeans_data.csv
+      MPJ_LOGREG_DATA: /data/input/logreg_data.csv
+      MPJ_KMEANS_SIZE_MB: "${KMEANS_DATASET_SIZE_MB}"
+      MPJ_LOGREG_SIZE_MB: "${LOGREG_DATASET_SIZE_MB}"
+      MPJ_LOGREG_FEATURES: "${LOGREG_NUM_FEATURES}"
+      MPJ_KMEANS_FEATURES: "${KMEANS_NUM_FEATURES}"
+      SPARK_UI_PORT: "${SPARK_UI_PORT_BASE_WORKER2}"
+      OMPI_ALLOW_RUN_AS_ROOT: "1"
+      OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: "1"
+    volumes:
+      - mpj-spark-data:/data
+    ports:
+      - "${SPARK_UI_PORT_BASE_WORKER2}:4040"
+    networks:
+      mpj-spark-net:
+        ipv4_address: 172.20.0.4
+    stdin_open: true
+    tty: true
+
+# =============================================================================
+# Named Volume  —  NFS-backed shared storage (configured in P4-02)
+# This is the Docker-side declaration; the NFS server is set up on the host
+# by docker/nfs-setup.sh. NFS_SERVER_IP is set in docker/.env
+# =============================================================================
+volumes:
+  mpj-spark-data:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_SERVER_IP},rw,nfsvers=4,soft"
+      device: ":/data/mpj-spark-shared"
+
+# =============================================================================
+# Bridge Network  —  isolated subnet for MPI + Spark inter-container comms
+# Subnet 172.20.0.0/24 must match the export rule in docker/nfs-setup.sh
+# =============================================================================
+networks:
+  mpj-spark-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
