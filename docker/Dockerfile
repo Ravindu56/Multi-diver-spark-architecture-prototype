@@ -11,7 +11,7 @@
 #   See docker/docker-compose.yml and docker/entrypoint.sh
 # =============================================================================
 
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # ---------------------------------------------------------------------------
 # Labels
