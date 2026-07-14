@@ -157,7 +157,7 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      o: "addr=${NFS_SERVER_IP},rw,nfsvers=3,soft"
+      o: "addr=${NFS_SERVER_IP},rw,nfsvers=3,soft,rw"
       device: ":/data/mpj-spark-shared"
 
 # =============================================================================
