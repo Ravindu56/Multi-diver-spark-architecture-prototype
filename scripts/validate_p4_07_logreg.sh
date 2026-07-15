@@ -79,8 +79,8 @@ fi
 
 # ── T3: Single-driver baseline run ───────────────────────────────────────────
 log_info "T3: Running single-driver LogReg baseline..."
-docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/baseline"
-docker exec "$CONTAINER" bash -c "
+    docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/baseline"
+    docker exec "$CONTAINER" bash -c "set -o pipefail; \
     python3 mpj_spark_mpi.py \
         --app logreg \
         --input $INPUT_LOGREG \
@@ -100,8 +100,8 @@ fi
 
 # ── T4: Multi-driver LogReg in Docker cluster ─────────────────────────────────
 log_info "T4: Running multi-driver LogReg (np=${NP})..."
-docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/multidriver"
-docker exec "$CONTAINER" bash -c "
+    docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/multidriver"
+    docker exec "$CONTAINER" bash -c "set -o pipefail; \
     mpirun --hostfile $HOSTFILE -np $NP \
         --mca btl_tcp_if_include eth0 \
         python3 mpj_spark_mpi.py \

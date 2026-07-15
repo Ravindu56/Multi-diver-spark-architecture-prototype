@@ -614,7 +614,9 @@ def run_root(
     _hdr(f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n" f"{title_extra}")
 
     cores = (
-        max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / num_workers))
+        max(1, cores_override)
+        if cores_override
+        else max(1, math.ceil(TOTAL_CORES / max(1, num_workers)))
     )
     print(f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)")
     if model_label:

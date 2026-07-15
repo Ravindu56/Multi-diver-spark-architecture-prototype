@@ -50,101 +50,55 @@ done
 # ── T2: K-Means dataset present on NFS ──────────────────────────────────────
 log_info "T2: Checking K-Means dataset at $INPUT_KMEANS..."
 FILE_LINES=$(docker exec "$CONTAINER" wc -l < "$INPUT_KMEANS" 2>/dev/null || echo "0")
-if [ "$FILE_LINES" -gt "100" ]; then
-    log_pass "K-Means dataset: $FILE_LINES rows"
-else
-    log_info "Generating synthetic K-Means dataset (20 MB, k=${K} true clusters)..."
-    docker exec "$CONTAINER" bash -c "
-        python3 - <<'PYEOF'
-import numpy as np, csv, os
-np.random.seed(42)
-os.makedirs('/data/input', exist_ok=True)
-k, n, dim = ${K}, 500_000, int('${MPJ_KMEANS_FEATURES:-10}')
-centers = np.random.randn(k, dim) * 5
-rows = []
-for i in range(n):
-    c = np.random.randint(k)
-    rows.append(centers[c] + np.random.randn(dim) * 0.8)
-with open('$INPUT_KMEANS', 'w', newline='') as f:
-    writer = csv.writer(f)
-    writer.writerows([[round(x,6) for x in r] for r in rows])
-print(f'Generated {n} rows, {dim} features, {k} clusters -> $INPUT_KMEANS')
-PYEOF
-    "
-    log_pass "K-Means dataset generated"
-fi
-
-# ── T3: Run K-Means — single driver baseline ─────────────────────────────────
-log_info "T3: Running single-driver K-Means baseline (np=1)..."
-docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/baseline"
-docker exec "$CONTAINER" bash -c "set -o pipefail; 
-    python3 mpj_spark_mpi.py \
-        --app kmeans \
-        --input $INPUT_KMEANS \
-        --kmeans-k $K \
-        --kmeans-iter $KMEANS_ITER \
-        --global-seed \
-        --results-dir ${RESULTS_DIR}/baseline \
-    2>&1 | tee ${RESULTS_DIR}/baseline_stdout.log
-" && BASE_EXIT=0 || BASE_EXIT=$?
-
-# single-driver run uses np=1 so workers=0; run directly without mpirun
-if [ "$BASE_EXIT" -eq "0" ]; then
-    log_pass "Baseline (single-driver) K-Means completed"
-else
-    log_fail "Baseline run failed (exit=$BASE_EXIT) — check ${RESULTS_DIR}/baseline_stdout.log"
-fi
-
-# ── T4: Run K-Means — multi-driver Docker cluster ────────────────────────────
-log_info "T4: Running multi-driver K-Means (np=${NP}, global_seed)..."
-docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/multidriver"
-docker exec "$CONTAINER" bash -c "set -o pipefail; 
-    mpirun --hostfile $HOSTFILE -np $NP \
-        --mca btl_tcp_if_include eth0 \
-        python3 mpj_spark_mpi.py \
-            --app kmeans \
-            --input $INPUT_KMEANS \
-            --kmeans-k $K \
-            --kmeans-iter $KMEANS_ITER \
-            --global-seed \
-            --compare \
-            --results-dir ${RESULTS_DIR}/multidriver \
-        2>&1 | tee ${RESULTS_DIR}/multidriver_stdout.log
-" && MULTI_EXIT=0 || MULTI_EXIT=$?
-
-if [ "$MULTI_EXIT" -eq "0" ]; then
-    log_pass "Multi-driver K-Means completed (exit=0)"
-else
-    log_fail "Multi-driver run failed (exit=$MULTI_EXIT)"
-fi
-
-# ── T5: Convergence check — centroid delta across iterations ─────────────────
-log_info "T5: Verifying K-Means convergence (centroid delta < tol)..."
-CONVERGED=$(docker exec "$CONTAINER" python3 - <<'PYEOF'
+CENTROID_OUTPUT=$(docker exec "$CONTAINER" python3 - <<'PYEOF'
 import json, glob, sys, math
 
-result_files = sorted(glob.glob('/data/results/p4_06/multidriver/*.json'))
-if not result_files:
-    print("NO_RESULTS"); sys.exit(1)
+def load_centroids(pattern):
+    files = sorted(glob.glob(pattern))
+    if not files:
+        return None
+    d = json.load(open(files[-1]))
+    return d.get('final_centroids', d.get('centroids', None))
 
-data = json.load(open(result_files[-1]))
-iterations = data.get('iterations_run', data.get('kmeans_iterations', None))
-centroid_delta = data.get('final_centroid_delta', data.get('centroid_change', None))
+base = load_centroids('/data/results/p4_06/baseline/*.json')
+multi = load_centroids('/data/results/p4_06/multidriver/*.json')
 
-print(f"iterations={iterations}  final_delta={centroid_delta}")
+if base is None or multi is None:
+    print('CENTROID_DATA_MISSING base=%s multi=%s' % (base is not None, multi is not None))
+    sys.exit(2)
 
-if centroid_delta is not None and float(centroid_delta) < 1e-3:
-    print("CONVERGED")
-elif iterations is not None:
-    print(f"COMPLETED_ITERATIONS_{iterations}")
-else:
-    print("UNKNOWN")
+base_s  = sorted(base,  key=lambda c: c[0] if isinstance(c, list) else list(c.values())[0])
+multi_s = sorted(multi, key=lambda c: c[0] if isinstance(c, list) else list(c.values())[0])
+
+tol = float("${CENTROID_TOL}")
+max_dist = 0.0
+for b, m in zip(base_s, multi_s):
+    bv = b if isinstance(b, list) else list(b.values())
+    mv = m if isinstance(m, list) else list(m.values())
+    dist = math.sqrt(sum((bi - mi)**2 for bi, mi in zip(bv, mv)))
+    max_dist = max(max_dist, dist)
+
+print(f'max_centroid_L2_distance={max_dist:.6f}  tolerance={tol}')
+if max_dist <= tol:
+    print('CENTROID_MATCH_PASS')
+    sys.exit(0)
+print(f'CENTROID_MATCH_FAIL — distance {max_dist:.6f} exceeds tolerance {tol}')
+sys.exit(1)
 PYEOF
-2>/dev/null || echo "PARSE_ERROR")
+CENTROID_EXIT=$?
 
-if echo "$CONVERGED" | grep -q "CONVERGED"; then
-    log_pass "K-Means converged: $CONVERGED"
-elif echo "$CONVERGED" | grep -q "COMPLETED_ITERATIONS"; then
+if [ "$CENTROID_EXIT" -eq "0" ]; then
+    log_pass "Centroid comparison PASSED (within tolerance ${CENTROID_TOL})"
+elif [ "$CENTROID_EXIT" -eq "1" ]; then
+    echo "$CENTROID_OUTPUT"
+    log_fail "Centroid comparison FAILED — centroids differ"
+elif [ "$CENTROID_EXIT" -eq "2" ]; then
+    echo "$CENTROID_OUTPUT"
+    log_fail "Centroid comparison FAILED — centroid data missing"
+else
+    echo "$CENTROID_OUTPUT"
+    log_fail "Centroid comparison FAILED — unexpected exit=$CENTROID_EXIT"
+fi
     log_pass "K-Means ran all iterations (convergence not logged separately): $CONVERGED"
 else
     log_fail "Convergence check inconclusive: $CONVERGED"

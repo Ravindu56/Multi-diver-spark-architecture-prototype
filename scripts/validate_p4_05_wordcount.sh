@@ -122,7 +122,7 @@ docker exec mpi-root rm -f "/data/tmp/${PROBE}"
 log_info "T7: Running WordCount workload (np=$NP)..."
 docker exec "$CONTAINER" bash -c "mkdir -p $RESULTS_DIR"
 START_TS=$(date +%s%N)
-docker exec "$CONTAINER" bash -c "
+docker exec "$CONTAINER" bash -c "set -o pipefail; \
     mpirun --hostfile $HOSTFILE -np $NP         --mca btl_tcp_if_include eth0         python3 mpj_spark_mpi.py             --app wordcount             --input $INPUT_FILE             --compare             --results-dir $RESULTS_DIR         2>&1 | tee /data/results/p4_05/mpirun_stdout.log
 " && EXIT_CODE=0 || EXIT_CODE=$?
 END_TS=$(date +%s%N)

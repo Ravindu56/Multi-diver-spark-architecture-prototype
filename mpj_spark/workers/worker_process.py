@@ -77,17 +77,28 @@ def worker_process(
                     metrics_output_dir=results_dir,
                 )
             except (ImportError, AttributeError):
-                from mpj_spark.applications.kmeans import run_kmeans
+                # Legacy fallback: the old API exported `run_kmeans` at package
+                # level but that symbol was removed in favor of the Phase-3
+                # `run_kmeans_allreduce`/`run_kmeans_driver` facades. Use the
+                # driver facade here and provide a tiny dummy `comm` object so
+                # the driver can return a parity-check contract in single-
+                # process mode.
+                from mpj_spark.applications.kmeans.driver import run_kmeans_driver
 
-                result = run_kmeans(
-                    partition_path,
+                class _DummyComm:
+                    def bcast(self, val, root=0):
+                        return val
+
+                result = run_kmeans_driver(
+                    rank=worker_id,
+                    size=num_workers,
+                    comm=_DummyComm(),
+                    dataset_path=partition_path,
                     k=worker_cfg.get("kmeans_k", 3),
                     max_iter=worker_cfg.get("kmeans_max_iter", 20),
-                    worker_id=worker_id,
-                    gossip_queue=allreduce_up_queue,
-                    reassign_queue=reassign_queue,
-                    seed_centres=worker_cfg.get("seed_centres"),
-                    num_workers=num_workers,
+                    tol=1e-4,
+                    seed=worker_cfg.get("seed_centres", 42) or 42,
+                    metrics_output_dir=results_dir,
                 )
 
         elif app == "logreg":
