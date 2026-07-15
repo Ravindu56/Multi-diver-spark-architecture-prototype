@@ -77,7 +77,7 @@ fi
 # ── T3: Run K-Means — single driver baseline ─────────────────────────────────
 log_info "T3: Running single-driver K-Means baseline (np=1)..."
 docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/baseline"
-docker exec "$CONTAINER" bash -c "
+docker exec "$CONTAINER" bash -c "set -o pipefail; 
     python3 mpj_spark_mpi.py \
         --app kmeans \
         --input $INPUT_KMEANS \
@@ -98,7 +98,7 @@ fi
 # ── T4: Run K-Means — multi-driver Docker cluster ────────────────────────────
 log_info "T4: Running multi-driver K-Means (np=${NP}, global_seed)..."
 docker exec "$CONTAINER" bash -c "mkdir -p ${RESULTS_DIR}/multidriver"
-docker exec "$CONTAINER" bash -c "
+docker exec "$CONTAINER" bash -c "set -o pipefail; 
     mpirun --hostfile $HOSTFILE -np $NP \
         --mca btl_tcp_if_include eth0 \
         python3 mpj_spark_mpi.py \
@@ -167,7 +167,7 @@ multi = load_centroids('/data/results/p4_06/multidriver/*.json')
 
 if base is None or multi is None:
     print("CENTROID_DATA_MISSING base=%s multi=%s" % (base is not None, multi is not None))
-    sys.exit(0)  # non-fatal: results format may vary
+    sys.exit(2)
 
 # Sort centroids by first feature for deterministic comparison
 base_s  = sorted(base,  key=lambda c: c[0] if isinstance(c, list) else list(c.values())[0])
@@ -189,8 +189,62 @@ else:
     sys.exit(1)
 PYEOF
 CENTROID_EXIT=$?
-if [ "$CENTROID_EXIT" -eq "0" ]; then
-    log_pass "Centroid comparison PASSED (within tolerance ${CENTROID_TOL})"
+if docker exec "$CONTAINER" python3 - <<'PYEOF'
+import json, glob, sys, math
+
+def load_centroids(pattern):
+    files = sorted(glob.glob(pattern))
+    if not files:
+        return None
+    d = json.load(open(files[-1]))
+    return d.get('final_centroids', d.get('centroids', None))
+
+base = load_centroids('/data/results/p4_06/baseline/*.json')
+multi = load_centroids('/data/results/p4_06/multidriver/*.json')
+if base is None or multi is None:
+    print('CENTROID_DATA_MISSING')
+    sys.exit(2)
+
+base_s  = sorted(base,  key=lambda c: c[0] if isinstance(c, list) else list(c.values())[0])
+multi_s = sorted(multi, key=lambda c: c[0] if isinstance(c, list) else list(c.values())[0])
+
+tol = float("${CENTROID_TOL}")
+max_dist = 0.0
+for b, m in zip(base_s, multi_s):
+    bv = b if isinstance(b, list) else list(b.values())
+    mv = m if isinstance(m, list) else list(m.values())
+    dist = math.sqrt(sum((bi - mi)**2 for bi, mi in zip(bv, mv)))
+    max_dist = max(max_dist, dist)
+
+print(f'max_centroid_L2_distance={max_dist:.6f}  tolerance={tol}')
+if max_dist <= tol:
+    print('CENTROID_MATCH_PASS')
+    sys.exit(0)
+print(f'CENTROID_MATCH_FAIL — distance {max_dist:.6f} exceeds tolerance {tol}')
+sys.exit(1)
+PYEOF
+then
+    if docker exec "$CONTAINER" python3 - <<'PYEOF'
+import json, glob, sys
+
+def load_centroids(pattern):
+    files = sorted(glob.glob(pattern))
+    if not files:
+        return None
+    d = json.load(open(files[-1]))
+    return d.get('final_centroids', d.get('centroids', None))
+
+base = load_centroids('/data/results/p4_06/baseline/*.json')
+multi = load_centroids('/data/results/p4_06/multidriver/*.json')
+if base is None or multi is None:
+    print('CENTROID_DATA_MISSING')
+    sys.exit(2)
+PYEOF
+    then
+        log_fail "Centroid comparison FAILED — centroid data missing"
+    else
+        log_pass "Centroid comparison PASSED (within tolerance ${CENTROID_TOL})"
+    fi
 else
     log_fail "Centroid comparison FAILED — see output above"
 fi

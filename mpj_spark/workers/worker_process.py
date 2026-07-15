@@ -61,18 +61,34 @@ def worker_process(
             result = run_wordcount(partition_path, spark)
 
         elif app == "kmeans":
-            from mpj_spark.applications.kmeans import run_kmeans
+            try:
+                from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
 
-            result = run_kmeans(
-                partition_path,
-                k=worker_cfg.get("kmeans_k", 3),
-                max_iter=worker_cfg.get("kmeans_max_iter", 20),
-                worker_id=worker_id,
-                gossip_queue=allreduce_up_queue,
-                reassign_queue=reassign_queue,
-                seed_centres=worker_cfg.get("seed_centres"),
-                num_workers=num_workers,
-            )
+                result = run_kmeans_allreduce(
+                    comm=None,
+                    rank=worker_id,
+                    size=num_workers,
+                    input_file=partition_path,
+                    k=worker_cfg.get("kmeans_k", 3),
+                    max_iter=worker_cfg.get("kmeans_max_iter", 20),
+                    tol=1e-4,
+                    seed=42,
+                    cores_override=cores,
+                    metrics_output_dir=results_dir,
+                )
+            except (ImportError, AttributeError):
+                from mpj_spark.applications.kmeans import run_kmeans
+
+                result = run_kmeans(
+                    partition_path,
+                    k=worker_cfg.get("kmeans_k", 3),
+                    max_iter=worker_cfg.get("kmeans_max_iter", 20),
+                    worker_id=worker_id,
+                    gossip_queue=allreduce_up_queue,
+                    reassign_queue=reassign_queue,
+                    seed_centres=worker_cfg.get("seed_centres"),
+                    num_workers=num_workers,
+                )
 
         elif app == "logreg":
             logreg_kwargs = dict(
