@@ -29,8 +29,8 @@ TOLERANCE_PCT=5                             # allow ≤5% word-count deviation
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 PASS=0; FAIL=0
 
-log_pass() { echo -e "${GREEN}[PASS]${NC} $*"; ((PASS++)); }
-log_fail() { echo -e "${RED}[FAIL]${NC} $*"; ((FAIL++)); }
+log_pass() { echo -e "${GREEN}[PASS]${NC} $*"; ((PASS + 1)); }
+log_fail() { echo -e "${RED}[FAIL]${NC} $*"; ((FAIL + 1)); }
 log_info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
 
 echo "========================================================"
@@ -83,7 +83,8 @@ fi
 
 # ── T4: MPI hostfile is valid ───────────────────────────────────────────────
 log_info "T4: Validating MPI hostfile..."
-HOSTFILE_LINES=$(docker exec "$CONTAINER" wc -l < "$HOSTFILE" 2>/dev/null || echo "0")
+HOSTFILE_LINES=$(docker exec "$CONTAINER" \
+    sh -c "wc -l < '$HOSTFILE'" 2>/dev/null || echo "0")
 if [ "$HOSTFILE_LINES" -ge "2" ]; then
     log_pass "Hostfile has $HOSTFILE_LINES entries"
     docker exec "$CONTAINER" cat "$HOSTFILE" | while read line; do
@@ -95,12 +96,14 @@ fi
 
 # ── T5: SSH connectivity between root and workers ───────────────────────────
 log_info "T5: Testing SSH connectivity from root to workers..."
-for worker_ip in 172.20.0.3 172.20.0.4; do
-    SSH_RESULT=$(docker exec "$CONTAINER"         ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$worker_ip"         "hostname" 2>&1 || echo "FAILED")
-    if echo "$SSH_RESULT" | grep -qv "FAILED"; then
-        log_pass "SSH to $worker_ip: OK (host=$(echo $SSH_RESULT | tr -d '\n'))"
+for worker_host in mpi-worker-1 mpi-worker-2; do
+    SSH_RESULT=$(docker exec "$CONTAINER" \
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$worker_host" \
+        "hostname" 2>&1 || echo "FAILED")
+    if ! echo "$SSH_RESULT" | grep -q "FAILED"; then
+        log_pass "SSH to $worker_host: OK (host=$(echo "$SSH_RESULT" | tr -d '\n'))"
     else
-        log_fail "SSH to $worker_ip: FAILED ($SSH_RESULT)"
+        log_fail "SSH to $worker_host: FAILED ($SSH_RESULT)"
     fi
 done
 
@@ -170,3 +173,4 @@ else
     exit 1
 fi
 echo "========================================================"
+exit 0
