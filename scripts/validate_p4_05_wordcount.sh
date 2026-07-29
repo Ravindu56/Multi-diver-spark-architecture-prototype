@@ -137,28 +137,41 @@ else
     log_fail "mpirun exited with code $EXIT_CODE"
 fi
 
-# ── T8: Validate output results file ────────────────────────────────────────
-log_info "T8: Checking results output..."
-RESULT_FILE=$(docker exec "$CONTAINER"     bash -c "ls ${RESULTS_DIR}/*.json 2>/dev/null | head -1" 2>/dev/null || echo "")
-if [ -n "$RESULT_FILE" ]; then
-    log_pass "Results file found: $RESULT_FILE"
-    TOTAL_WORDS=$(docker exec "$CONTAINER"         python3 -c "import json; d=json.load(open('$RESULT_FILE')); print(d.get('total_word_count',0))"         2>/dev/null || echo "0")
-    if [ "$TOTAL_WORDS" -gt "0" ]; then
-        log_pass "WordCount total=$TOTAL_WORDS (non-zero)"
+# ── T8: Validate workload evidence ─────────────────────────────────────────
+log_info "T8: Checking workload output evidence..."
+
+RUN_LOG="${RESULTS_DIR}/mpirun_stdout.log"
+RUN_LOG_EXISTS=$(docker exec "$CONTAINER" \
+    sh -c "[ -s '$RUN_LOG' ] && echo yes || echo no")
+
+if [ "$RUN_LOG_EXISTS" = "yes" ]; then
+    log_pass "Workload log found and non-empty: $RUN_LOG"
+
+    if docker exec "$CONTAINER" \
+        grep -q "All 2 workers completed" "$RUN_LOG"; then
+        log_pass "Both MPI workers completed successfully"
     else
-        log_fail "WordCount total=$TOTAL_WORDS (expected > 0)"
+        log_fail "Worker-completion marker missing from $RUN_LOG"
+    fi
+
+    if docker exec "$CONTAINER" \
+        grep -q "Unique words[[:space:]]*: 5,000" "$RUN_LOG"; then
+        log_pass "Baseline reports 5,000 unique words"
+    else
+        log_fail "Expected baseline WordCount output not found"
     fi
 else
-    log_fail "No results JSON file found in $RESULTS_DIR"
+    log_fail "Workload log missing or empty: $RUN_LOG"
 fi
 
-# ── T9: Multi-driver result consistency (compare flag) ───────────────────────
-log_info "T9: Checking multi-driver vs single-driver comparison result..."
-COMPARE_LOG=$(docker exec "$CONTAINER"     bash -c "grep -i 'comparison\|deviation\|baseline' ${RESULTS_DIR}/mpirun_stdout.log 2>/dev/null || echo 'not_found'"     2>/dev/null || echo "")
-if echo "$COMPARE_LOG" | grep -qi "comparison\|deviation"; then
-    log_pass "Comparison metrics logged: $(echo $COMPARE_LOG | head -c 120)"
+# ── T9: Multi-driver comparison evidence ───────────────────────────────────
+log_info "T9: Checking multi-driver vs baseline comparison..."
+
+if docker exec "$CONTAINER" \
+    grep -q "Multi-Driver vs Baseline" "${RESULTS_DIR}/mpirun_stdout.log"; then
+    log_pass "Multi-driver versus baseline comparison completed"
 else
-    log_info "Comparison log line not found (check $RESULTS_DIR/mpirun_stdout.log)"
+    log_fail "Comparison table missing from workload log"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
