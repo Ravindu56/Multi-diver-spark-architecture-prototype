@@ -45,6 +45,7 @@
 import time
 import traceback
 
+from mpi4py import MPI
 from mpj_spark.utils.dev_logger import DevLogger
 from mpj_spark.workers.spark_session import build_spark_session
 from mpj_spark.workers.worker_process import _tag, run_worker_core
@@ -235,6 +236,11 @@ def run_worker_mpi(comm):
     comm.recv(source=0, tag=TAG_GO)
     print(f"{_tag(worker_id, 'WAIT')} Go-signal received — starting {app_name}")
 
+    worker_comm = comm.Split(
+        color=1,
+        key=rank,
+    )
+
     # ================================================================
     # Step 5 — Build MPI transport adapters, delegate to core
     # ================================================================
@@ -257,6 +263,7 @@ def run_worker_mpi(comm):
         up_queue=up_queue,
         down_queue=down_queue,
         reassign_adapter=reassign,
+        comm=worker_comm,  # MPI communicator for this worker
     )
 
     # Patch init_time into the timing dict (core doesn’t know it)

@@ -24,6 +24,7 @@ def run_worker_core(
     up_queue=None,
     down_queue=None,
     reassign_adapter=None,
+    comm=None
 ):
     app = worker_config.get("app", "wordcount")
     num_workers = worker_config.get("num_workers", 1)
@@ -50,7 +51,7 @@ def run_worker_core(
 
         if use_allreduce:
             result = run_kmeans_allreduce(
-                comm=None,
+                comm=comm,
                 rank=worker_id,
                 size=num_workers,
                 input_file=partition_path,
@@ -71,7 +72,7 @@ def run_worker_core(
             result = run_kmeans_driver(
                 rank=worker_id,
                 size=num_workers,
-                comm=_DummyComm(),
+                comm=comm or _DummyComm(),
                 dataset_path=partition_path,
                 k=worker_config.get("kmeans_k", 3),
                 max_iter=worker_config.get("kmeans_max_iter", 20),
@@ -164,6 +165,7 @@ def worker_process(
             up_queue=allreduce_up_queue,
             down_queue=allreduce_down_queue,
             reassign_adapter=reassign_queue,
+            comm=None,  # Placeholder for MPI communicator if needed
         )
 
         result_queue.put(
