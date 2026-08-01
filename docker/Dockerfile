@@ -38,6 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
         rsync \
         procps \
+        libblas3 \
+        util-linux \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -68,6 +70,7 @@ ENV JAVA_TOOL_OPTIONS="--add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
 # ---------------------------------------------------------------------------
 ENV PYSPARK_PYTHON=/usr/local/bin/python3
 ENV PYSPARK_DRIVER_PYTHON=/usr/local/bin/python3
+ENV PYTHONPATH=/app${PYTHONPATH:+:${PYTHONPATH}}
 
 # ---------------------------------------------------------------------------
 # 5. MPI environment
