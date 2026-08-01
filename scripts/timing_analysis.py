@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+from html import parser
+import os
 import statistics
 from pathlib import Path
 from typing import Any
@@ -88,6 +90,15 @@ def _describe(values: list[float]) -> dict[str, float]:
         "min": round(min(values), 6),
         "std": round(statistics.pstdev(values), 6),
     }
+    
+def _existing_metric_files(metrics_dir: Path) -> list[Path]:
+    patterns = (
+        "kmeans_metrics_rank*.csv",
+        "kmeans_metrics_aggregated.csv",
+        "logreg_rank*_epochs.csv",
+        "logreg_all_ranks_epochs.csv",
+    )
+    return [path for pattern in patterns for path in metrics_dir.glob(pattern)]
 
 
 # ---------------------------------------------------------------------------
@@ -586,13 +597,33 @@ def main() -> None:
     parser.add_argument(
         "--num-ranks",
         type=int,
-        default=5,
-        help="Number of MPI ranks used in the experiment (default: 5)",
+        default=int(os.getenv("MPI_NUM_RANKS", "3")),
+        help=(
+            "Total MPI ranks represented by metrics files "
+            "(default: MPI_NUM_RANKS environment variable or 3)."
+        ),
     )
     args = parser.parse_args()
 
-    metrics_dir = Path(args.metrics_dir)
-    out_dir = Path(args.out_dir)
+    metrics_dir = Path(args.metrics_dir).expanduser().resolve()
+    out_dir = Path(args.out_dir).expanduser().resolve()
+
+    if not metrics_dir.is_dir():
+        parser.error(
+            f"Metrics directory does not exist: {metrics_dir}. "
+            "Use the exact absolute --metrics-dir supplied to validate_parity.py."
+        )
+
+    metric_files = _existing_metric_files(metrics_dir)
+    if not metric_files:
+        parser.error(
+            f"No supported metric CSV files found in {metrics_dir}. "
+            "Expected kmeans_metrics_rank*.csv or logreg_rank*_epochs.csv."
+        )
+
+    if args.num_ranks < 2:
+        parser.error("--num-ranks must be at least 2 for MPI multi-driver analysis.")
+    
     num_ranks = args.num_ranks
 
     print(f"""

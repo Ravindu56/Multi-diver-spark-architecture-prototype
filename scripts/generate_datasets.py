@@ -196,11 +196,12 @@ def ensure_dataset(workload: str, input_file: str | None = None, **kwargs) -> st
     if input_file and os.path.exists(input_file):
         return input_file
 
-    if input_file and not os.path.exists(input_file):
-        print(
-            f"[generate_datasets] WARNING: --input '{input_file}' not found.\n"
-            f"  Auto-generating dataset to the config default path instead."
-        )
+    if input_file and not os.path.isfile(input_file):
+        raise FileNotFoundError(
+            f"Requested input file does not exist: {input_file}. "
+            "Either provide a valid --input path or omit --input so the "
+            "configured shared-storage dataset can be generated."
+        )      
 
     if workload == "kmeans":
         return ensure_kmeans_dataset(**kwargs)

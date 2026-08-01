@@ -264,7 +264,10 @@ def main() -> None:
         description="Issue #12 — Sync overhead benchmark: MPI multi-driver vs single-driver baseline."
     )
     parser.add_argument(
-        "--ranks", type=int, default=5, help="Expected MPI size (informational, not enforced)"
+        "--ranks",
+        type=int,
+        default=int(os.getenv("MPI_NUM_RANKS", "3")),
+        help="Expected MPI world size; default is MPI_NUM_RANKS or 3.",
     )
     parser.add_argument("--kmeans-k", type=int, default=3, help="K-Means clusters")
     parser.add_argument("--kmeans-iter", type=int, default=20, help="K-Means max iterations")
@@ -272,11 +275,19 @@ def main() -> None:
     parser.add_argument(
         "--metrics-dir",
         type=str,
-        default="metrics",
-        help="Directory containing workload metrics CSVs",
+        default=os.getenv("MPJ_METRICS_DIR", "/data/metrics/p4_full"),
     )
-    parser.add_argument("--results-dir", type=str, default="results", help="Output directory")
-    parser.add_argument("--data-dir", type=str, default="data", help="Dataset directory")
+    parser.add_argument(
+        "--results-dir",
+        type=str, 
+        default=os.getenv("MPJ_RESULTS_DIR", "/data/results/p4_full_sync"),
+        help="Output directory for benchmark CSV (default: /data/results/p4_full_sync).",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=os.getenv("MPJ_INPUT_DIR", "/data/input"),
+        help="Dataset directory")
     parser.add_argument("--skip-kmeans", action="store_true", help="Skip K-Means benchmark")
     parser.add_argument("--skip-logreg", action="store_true", help="Skip LogReg benchmark")
     args = parser.parse_args()
@@ -286,14 +297,24 @@ def main() -> None:
         if COMM:
             COMM.Barrier()
         return
+    
+    if SIZE != args.ranks:
+        if RANK == 0:
+            print(
+                f"[ERROR] MPI world size mismatch: launched with {SIZE} ranks, "
+                f"but --ranks={args.ranks}."
+            )
+        if COMM is not None:
+            COMM.Abort(2)
+        raise SystemExit(2)
 
     metrics_dir = Path(args.metrics_dir)
     results_dir = Path(args.results_dir)
     data_dir = Path(args.data_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    kmeans_data = data_dir / "kmeans_dataset.csv"
-    logreg_data = data_dir / "logreg_dataset.csv"
+    kmeans_data = data_dir / "kmeans_data.csv"
+    logreg_data = data_dir / "logreg_data.csv"
 
     rows: list[dict] = []
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -336,7 +357,7 @@ def main() -> None:
         else:
             print(
                 f"  WARNING: No K-Means metrics CSV found in {metrics_dir}. "
-                "Run mpirun -n 5 python -m mpj_spark.applications.kmeans.allreduce first."
+                f"Run mpirun -n {args.ranks} python -m mpj_spark.applications.kmeans.allreduce first."
             )
 
     # ── LogReg ────────────────────────────────────────────────────────────────

@@ -37,9 +37,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+from html import parser
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 
 import numpy as np
 from mpi4py import MPI
@@ -69,6 +71,40 @@ def _check(label: str, delta: float, tol: float) -> dict:
     status = "PASS" if delta <= tol else "FAIL"
     return {"metric": label, "delta": delta, "tolerance": tol, "status": status}
 
+def _validate_runtime(
+    kmeans_enabled: bool,
+    logreg_enabled: bool,
+    metrics_dir: Path,
+    report_dir: Path,
+) -> None:
+    if size < 2:
+        if rank == 0:
+            print(
+                "[ERROR] validate_parity.py requires at least 2 MPI ranks: "
+                "one coordinator plus one driver."
+            )
+        raise SystemExit(2)
+
+    if rank == 0:
+        missing: list[str] = []
+
+        if kmeans_enabled and not Path(KMEANS_DATASET_PATH).is_file():
+            missing.append(f"K-Means dataset: {KMEANS_DATASET_PATH}")
+
+        if logreg_enabled and not Path(LOGREG_DATASET_PATH).is_file():
+            missing.append(f"LogReg dataset: {LOGREG_DATASET_PATH}")
+
+        if missing:
+            print("[ERROR] Required input files are missing:")
+            for item in missing:
+                print(f"  - {item}")
+            print("Run: python /app/scripts/generate_datasets.py")
+            raise SystemExit(2)
+
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+    comm.Barrier()
 
 # ---------------------------------------------------------------------------
 # K-Means parity
@@ -334,13 +370,14 @@ def main() -> None:
     )
     parser.add_argument("--k", type=int, default=3)
     parser.add_argument("--max-iter", type=int, default=20)
-    parser.add_argument("--report-dir", default="results")
+    parser.add_argument(
+        "--report-dir",
+        default=os.getenv("MPJ_PARITY_REPORT_DIR", "/data/results/parity"),
+    )
+
     parser.add_argument(
         "--metrics-dir",
-        default="metrics",
-        help="Output directory for per-rank metrics CSVs/JSONs written by the "
-        "KMeans and LogReg drivers (default: metrics/). "
-        "Pass this same path to timing_analysis.py --metrics-dir.",
+        default=os.getenv("MPJ_PARITY_METRICS_DIR", "/data/metrics/parity"),
     )
     parser.add_argument(
         "--accuracy-sample",
@@ -349,6 +386,28 @@ def main() -> None:
         help="Number of rows used for LogReg accuracy comparison (default: 1000)",
     )
     args = parser.parse_args()
+    
+    if args.skip_kmeans and args.skip_logreg:
+        parser.error("At least one workload must be enabled.")
+
+    if args.k <= 1:
+        parser.error("--k must be greater than 1.")
+
+    if args.max_iter <= 0:
+        parser.error("--max-iter must be greater than 0.")
+
+    if not 0.0 <= args.kmeans_tol <= 1.0:
+        parser.error("--kmeans-tol must be in [0, 1].")
+
+    if not 0.0 <= args.logreg_tol <= 1.0:
+        parser.error("--logreg-tol must be in [0, 1].")
+
+    _validate_runtime(
+        kmeans_enabled=not args.skip_kmeans,
+        logreg_enabled=not args.skip_logreg,
+        metrics_dir=Path(args.metrics_dir),
+        report_dir=Path(args.report_dir),
+    )
 
     # --tolerance legacy override
     if args.tolerance is not None:
