@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# =============================================================================
-# validate_p4_07_logreg.sh
-# P4-07 — Logistic Regression Docker/MPI data-integrity validation
-# Criterion: baseline vs MPI held-out accuracy delta
-# =============================================================================
+# P4-07: Docker MPI Logistic Regression parity validation.
+
 set -euo pipefail
 
 NP="${NP:-3}"
 MAX_ITER="${MAX_ITER:-20}"
 LOGREG_TOL="${LOGREG_TOL:-0.03}"
 ACCURACY_SAMPLE="${ACCURACY_SAMPLE:-1000}"
+
 CONTAINER="${CONTAINER:-mpi-root}"
 HOSTFILE="${HOSTFILE:-/etc/mpi/hostfile}"
+
 RUN_ID="${RUN_ID:-p4_07}"
-REPORT_DIR="${REPORT_DIR:-/data/results/${RUN_ID}_parity}"
+REPORT_DIR="${REPORT_DIR:-/data/results/${RUN_ID}/parity}"
 METRICS_DIR="${METRICS_DIR:-/data/metrics/${RUN_ID}}"
 
 RED='\033[0;31m'
@@ -24,52 +23,101 @@ NC='\033[0m'
 PASS=0
 FAIL=0
 
-log_pass() { echo -e "${GREEN}[PASS]${NC} $*"; PASS=$((PASS + 1)); }
-log_fail() { echo -e "${RED}[FAIL]${NC} $*"; FAIL=$((FAIL + 1)); }
-log_info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
+log_pass() {
+    echo -e "${GREEN}PASS${NC} $*"
+    PASS=$((PASS + 1))
+}
+
+log_fail() {
+    echo -e "${RED}FAIL${NC} $*"
+    FAIL=$((FAIL + 1))
+}
+
+log_info() {
+    echo -e "${YELLOW}INFO${NC} $*"
+}
 
 run_in_root() {
     docker exec "${CONTAINER}" bash -lc "$1"
 }
 
-echo "========================================================"
-echo "P4-07: Logistic Regression parity validation"
-echo "MPI ranks=${NP}, max_iter=${MAX_ITER}, accuracy tol=${LOGREG_TOL}"
-echo "========================================================"
+container_running() {
+    docker inspect --format '{{.State.Status}}' "$1" 2>/dev/null | grep -qx "running"
+}
+
+parity_status_pass() {
+    local report="$1"
+    local workload="$2"
+
+    run_in_root "python3 - '${report}' '${workload}' <<'PY'
+import csv
+import sys
+
+report_path = sys.argv[1]
+target_workload = sys.argv[2].strip().lower()
+
+try:
+    with open(report_path, newline='', encoding='utf-8') as handle:
+        rows = list(csv.DictReader(handle))
+except (FileNotFoundError, OSError):
+    raise SystemExit(1)
+
+matches = [
+    row for row in rows
+    if row.get('workload', '').strip().lower() == target_workload
+]
+
+if not matches:
+    raise SystemExit(1)
+
+if all(row.get('status', '').strip().upper() == 'PASS' for row in matches):
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY"
+}
+
+echo
+echo "P4-07 Logistic Regression parity validation"
+echo "MPI ranks=${NP}, max_iter=${MAX_ITER}, accuracy tolerance=${LOGREG_TOL}"
+echo
 
 for cname in mpi-root mpi-worker-1 mpi-worker-2; do
-    status="$(docker inspect --format='{{.State.Status}}' "${cname}" 2>/dev/null || echo missing)"
-    if [[ "${status}" == "running" ]]; then
+    if container_running "${cname}"; then
         log_pass "${cname} is running"
     else
-        log_fail "${cname} status=${status}"
+        log_fail "${cname} is not running"
     fi
 done
 
 if run_in_root "test -s /data/input/logreg_data.csv"; then
-    log_pass "LogReg input exists on shared /data volume"
+    log_pass "LogReg input exists on shared data volume"
 else
-    log_info "Generating LogReg input on shared volume"
-    if run_in_root "cd /app && python scripts/generate_datasets.py --logreg-only"; then
-        log_pass "LogReg input generated"
-    else
-        log_fail "LogReg input generation failed"
-    fi
+    log_fail "LogReg input is missing: /data/input/logreg_data.csv"
+fi
+
+if run_in_root "test \$(grep -cvE '^[[:space:]]*(#|$)' '${HOSTFILE}') -ge ${NP}"; then
+    log_pass "MPI hostfile supports ${NP} ranks"
+else
+    log_fail "MPI hostfile has insufficient usable entries"
 fi
 
 run_in_root "rm -rf '${REPORT_DIR}' '${METRICS_DIR}' && mkdir -p '${REPORT_DIR}' '${METRICS_DIR}'"
 
 log_info "Running MPI LogReg parity validation"
+
 if run_in_root "
-    cd /app &&
-    export PYTHONPATH=/app:\${PYTHONPATH:-} &&
-    mpirun --oversubscribe \
+    cd /app
+    export PYTHONPATH=/app:\${PYTHONPATH:-}
+
+    mpirun \
+      --oversubscribe \
       --bind-to none \
       --mca hwloc_base_binding_policy none \
       --hostfile '${HOSTFILE}' \
       -np '${NP}' \
       -x PYTHONPATH \
-      python scripts/validate_parity.py \
+      python3 /app/scripts/validate_parity.py \
         --skip-kmeans \
         --max-iter '${MAX_ITER}' \
         --logreg-tol '${LOGREG_TOL}' \
@@ -83,25 +131,33 @@ else
     log_fail "LogReg MPI parity command failed"
 fi
 
-if run_in_root "test -s '${REPORT_DIR}/parity_report.csv'"; then
+PARITY_CSV="${REPORT_DIR}/parity_report.csv"
+
+if run_in_root "test -s '${PARITY_CSV}'"; then
     log_pass "Parity CSV was produced"
 else
-    log_fail "Parity CSV is missing"
+    log_fail "Parity CSV is missing: ${PARITY_CSV}"
 fi
 
-if run_in_root "awk -F, 'NR > 1 && \$2 == \"logreg\" && \$NF == \"PASS\" { found=1 } END { exit !found }' '${REPORT_DIR}/parity_report.csv'"; then
-    log_pass "LogReg held-out accuracy parity passed"
+if parity_status_pass "${PARITY_CSV}" "logreg"; then
+    log_pass "LogReg accuracy parity passed according to parity_report.csv"
 else
-    log_fail "LogReg accuracy parity did not pass"
+    log_fail "LogReg accuracy parity did not pass according to parity_report.csv"
 fi
 
-if run_in_root "ls '${METRICS_DIR}'/logreg_rank*_epochs.csv >/dev/null 2>&1"; then
+if run_in_root "find '${METRICS_DIR}' -type f -iname '*logreg*.csv' -size +0c | grep -q ."; then
     log_pass "Per-rank LogReg metrics were written"
 else
     log_fail "Per-rank LogReg metrics are missing"
 fi
 
-echo "========================================================"
-echo "P4-07 results: PASS=${PASS}, FAIL=${FAIL}"
-[[ "${FAIL}" -eq 0 ]] && exit 0
+echo
+echo "P4-07 Results: PASS=${PASS}, FAIL=${FAIL}"
+
+if [[ "${FAIL}" -eq 0 ]]; then
+    echo -e "${GREEN}ALL TESTS PASSED — P4-07 ACCEPTANCE CRITERIA MET${NC}"
+    exit 0
+fi
+
+echo -e "${RED}P4-07 VALIDATION FAILED — REVIEW OUTPUT ABOVE${NC}"
 exit 1

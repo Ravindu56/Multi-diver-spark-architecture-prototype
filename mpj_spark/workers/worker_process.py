@@ -24,7 +24,7 @@ def run_worker_core(
     up_queue=None,
     down_queue=None,
     reassign_adapter=None,
-    comm=None
+    comm=None,
 ):
     app = worker_config.get("app", "wordcount")
     num_workers = worker_config.get("num_workers", 1)

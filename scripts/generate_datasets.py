@@ -264,12 +264,29 @@ if __name__ == "__main__":
     logreg_size = args.size_mb or LOGREG_DATASET_SIZE_MB
     kmeans_features = args.num_features or KMEANS_NUM_FEATURES
     logreg_features = args.num_features or LOGREG_NUM_FEATURES
+    
+    if kmeans_size <= 0:
+        raise ValueError(f"K-Means dataset size must be positive, got {kmeans_size}")
+
+    if logreg_size <= 0:
+        raise ValueError(f"LogReg dataset size must be positive, got {logreg_size}")
+
+    if kmeans_features < 2:
+        raise ValueError(
+            f"K-Means number of features must be at least 2, got {kmeans_features}"
+        )
+
+    if logreg_features < 2:
+        raise ValueError(
+            f"LogReg number of features must be at least 2, got {logreg_features}"
+        )
 
     print(f"\n[generate_datasets] Shared storage: {SHARED_STORAGE_PATH}")
     print(f"[generate_datasets] K-Means  → {KMEANS_DATASET_PATH}")
     print(f"[generate_datasets] LogReg   → {LOGREG_DATASET_PATH}\n")
 
     generated = []
+
 
     if not args.logreg_only:
         path = ensure_kmeans_dataset(

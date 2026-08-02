@@ -33,11 +33,10 @@
 #   MPI_SIZE   : total number of MPI processes (1 root + N workers)
 #
 # =============================================================================
+set -euo pipefail
 
 export PYTHONPATH="/app${PYTHONPATH:+:${PYTHONPATH}}"
 export MPI_NUM_RANKS="${MPI_NUM_RANKS:-3}"
-
-set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Colours

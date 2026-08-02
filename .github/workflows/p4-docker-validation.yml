@@ -1,0 +1,137 @@
+name: Phase 4 Docker Validation
+
+on:
+  push:
+    branches:
+      - feature/p4-docker-containerization
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "docker/**"
+      - "scripts/**"
+      - "mpj_spark/**"
+      - "tests/**"
+      - ".github/workflows/p4-docker-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  static-validation:
+    name: Static validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install pytest
+
+      - name: Validate Bash scripts
+        run: |
+          bash -n scripts/validate_p4_05_wordcount.sh
+          bash -n scripts/validate_p4_06_kmeans.sh
+          bash -n scripts/validate_p4_07_logreg.sh
+
+      - name: Validate Python syntax
+        run: |
+          python3 -m py_compile scripts/sync_overhead_benchmark.py
+          python3 -m py_compile scripts/timing_analysis.py
+          python3 -m py_compile scripts/validate_parity.py
+
+      - name: Validate benchmark imports
+        run: |
+          python3 - <<'PY'
+          import importlib
+          importlib.import_module("mpj_spark.applications.baseline_kmeans")
+          importlib.import_module("mpj_spark.applications.baseline_logreg")
+          importlib.import_module("scripts.sync_overhead_benchmark")
+          print("P4-08 baseline and benchmark module imports passed")
+          PY
+
+      - name: Run unit tests
+        run: |
+          python3 -m pytest tests/unit -v
+
+  docker-mpi-integration:
+    name: Docker MPI integration
+    runs-on: self-hosted
+    needs: static-validation
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'master'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and start Phase 4 cluster
+        run: |
+          docker compose -f docker/docker-compose.yml down -v --remove-orphans || true
+          docker compose -f docker/docker-compose.yml build --no-cache
+          docker compose -f docker/docker-compose.yml up -d
+          sleep 20
+          docker compose -f docker/docker-compose.yml ps
+
+      - name: Run P4-05 WordCount validation
+        run: |
+          bash scripts/validate_p4_05_wordcount.sh
+
+      - name: Run P4-06 K-Means validation
+        run: |
+          bash scripts/validate_p4_06_kmeans.sh
+
+      - name: Run P4-07 LogReg validation
+        run: |
+          bash scripts/validate_p4_07_logreg.sh
+
+      - name: Run P4-08 synchronization benchmark
+        run: |
+          docker exec mpi-root bash -lc '
+            cd /app
+            export PYTHONPATH=/app:${PYTHONPATH:-}
+            mpirun \
+              --oversubscribe \
+              --bind-to none \
+              --mca hwloc_base_binding_policy none \
+              --hostfile /etc/mpi/hostfile \
+              -np 3 \
+              -x PYTHONPATH \
+              python3 /app/scripts/sync_overhead_benchmark.py \
+                --ranks 3 \
+                --metrics-dir /data/metrics/p4_08 \
+                --results-dir /data/results/p4_08_sync \
+                --data-dir /data/input
+          '
+
+      - name: Collect artefacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          docker cp mpi-root:/data/results artifacts/results || true
+          docker cp mpi-root:/data/metrics artifacts/metrics || true
+          docker compose -f docker/docker-compose.yml logs --no-color > artifacts/docker-compose.log || true
+
+      - name: Upload Phase 4 artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4-docker-mpi-results
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Stop cluster
+        if: always()
+        run: |
+          docker compose -f docker/docker-compose.yml down -v --remove-orphans
