@@ -201,7 +201,7 @@ def ensure_dataset(workload: str, input_file: str | None = None, **kwargs) -> st
             f"Requested input file does not exist: {input_file}. "
             "Either provide a valid --input path or omit --input so the "
             "configured shared-storage dataset can be generated."
-        )      
+        )
 
     if workload == "kmeans":
         return ensure_kmeans_dataset(**kwargs)
@@ -264,7 +264,7 @@ if __name__ == "__main__":
     logreg_size = args.size_mb or LOGREG_DATASET_SIZE_MB
     kmeans_features = args.num_features or KMEANS_NUM_FEATURES
     logreg_features = args.num_features or LOGREG_NUM_FEATURES
-    
+
     if kmeans_size <= 0:
         raise ValueError(f"K-Means dataset size must be positive, got {kmeans_size}")
 

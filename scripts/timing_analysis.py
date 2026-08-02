@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-from html import parser
 import os
 import statistics
 from pathlib import Path
@@ -90,7 +89,7 @@ def _describe(values: list[float]) -> dict[str, float]:
         "min": round(min(values), 6),
         "std": round(statistics.pstdev(values), 6),
     }
-    
+
 def _existing_metric_files(metrics_dir: Path) -> list[Path]:
     patterns = (
         "kmeans_metrics_rank*.csv",
@@ -623,7 +622,7 @@ def main() -> None:
 
     if args.num_ranks < 2:
         parser.error("--num-ranks must be at least 2 for MPI multi-driver analysis.")
-    
+
     num_ranks = args.num_ranks
 
     print(f"""

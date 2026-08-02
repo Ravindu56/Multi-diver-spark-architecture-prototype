@@ -37,11 +37,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-from html import parser
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-import os
 
 import numpy as np
 from mpi4py import MPI
@@ -386,7 +385,7 @@ def main() -> None:
         help="Number of rows used for LogReg accuracy comparison (default: 1000)",
     )
     args = parser.parse_args()
-    
+
     if args.skip_kmeans and args.skip_logreg:
         parser.error("At least one workload must be enabled.")
 

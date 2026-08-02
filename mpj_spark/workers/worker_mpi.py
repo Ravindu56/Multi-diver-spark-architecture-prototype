@@ -45,7 +45,6 @@
 import time
 import traceback
 
-from mpi4py import MPI
 from mpj_spark.utils.dev_logger import DevLogger
 from mpj_spark.workers.spark_session import build_spark_session
 from mpj_spark.workers.worker_process import _tag, run_worker_core
