@@ -156,6 +156,11 @@ mpj_spark_prototype.py        # Phase 1 single-file prototype (archived)
 mpj_spark_prototype_v2.py     # Phase 2 single-file prototype with ML (archived)
 scripts/
 ├── generate_datasets.py      # Generate fixed K-Means + LogReg datasets (run once)
+├── run_docker.sh             # P4-09: Docker cluster lifecycle and validation launcher
+├── validate_p4_05_wordcount.sh # P4-05 Docker WordCount acceptance validation
+├── validate_p4_06_kmeans.sh  # P4-06 Docker K-Means acceptance validation
+├── validate_p4_07_logreg.sh  # P4-07 Docker LogReg acceptance validation
+├── validate_p4_09.sh         # P4-09 deployment acceptance checks
 ├── validate_parity.py        # Issue #10 — baseline Spark vs MPI parity validation
 ├── sync_overhead_benchmark.py # Issue #12 — MPI multi-driver vs baseline sync benchmark
 └── timing_analysis.py        # Phase 3 timing decomposition + controller feature matrix
@@ -429,6 +434,78 @@ for w in 1 2 4 8; do
   python3 main.py --workers $w --generate 500 --compare
 done
 ```
+
+---
+
+## Docker Deployment — Phase 4
+
+Phase 4 deploys the MPI-enabled multi-driver Spark prototype as a
+three-container Docker cluster:
+
+- `mpi-root`: MPI launcher and coordinator
+- `mpi-worker-1`, `mpi-worker-2`: Spark/MPI worker containers
+- Shared Docker-mounted `/data` storage for input datasets, metrics, and results
+- OpenMPI over the Docker bridge network and the generated MPI hostfile
+
+### Prerequisites
+
+- Docker Engine 24+ recommended
+- Docker Compose v2
+- At least 8 GB available RAM; 16 GB is recommended for the K-Means and
+  Logistic Regression validation workloads
+
+### Quick Start
+
+```bash
+chmod +x scripts/run_docker.sh scripts/validate_p4_09.sh
+
+# Build images and start the Docker MPI cluster
+./scripts/run_docker.sh up
+
+# Inspect services
+./scripts/run_docker.sh status
+
+# Validate Docker deployment configuration
+./scripts/validate_p4_09.sh
+```
+
+### Phase 4 Workload Validation
+
+```bash
+# P4-05: WordCount Docker validation
+./scripts/run_docker.sh validate-p4-05
+
+# P4-06: K-Means convergence validation
+./scripts/run_docker.sh validate-p4-06
+
+# P4-07: Logistic Regression parity validation
+./scripts/run_docker.sh validate-p4-07
+
+# P4-08: Baseline versus MPI synchronization-overhead benchmark
+./scripts/run_docker.sh benchmark-p4-08
+```
+
+The P4-08 CSV is written inside the shared Docker data volume:
+
+```text
+/data/results/p4_08_sync/sync_overhead_benchmark.csv
+```
+
+Print it without requiring the optional `column` package:
+
+```bash
+docker exec mpi-root cat /data/results/p4_08_sync/sync_overhead_benchmark.csv
+```
+
+### Cleanup
+
+```bash
+./scripts/run_docker.sh down
+```
+
+The Docker deployment is intended for functional validation and controlled
+resource experiments. Performance optimization, dynamic allocation, and
+Kubernetes deployment are later-phase work.
 
 ---
 
