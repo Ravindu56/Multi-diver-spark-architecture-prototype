@@ -90,6 +90,7 @@ def _describe(values: list[float]) -> dict[str, float]:
         "std": round(statistics.pstdev(values), 6),
     }
 
+
 def _existing_metric_files(metrics_dir: Path) -> list[Path]:
     patterns = (
         "kmeans_metrics_rank*.csv",

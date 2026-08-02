@@ -70,6 +70,7 @@ def _check(label: str, delta: float, tol: float) -> dict:
     status = "PASS" if delta <= tol else "FAIL"
     return {"metric": label, "delta": delta, "tolerance": tol, "status": status}
 
+
 def _validate_runtime(
     kmeans_enabled: bool,
     logreg_enabled: bool,
@@ -104,6 +105,7 @@ def _validate_runtime(
         report_dir.mkdir(parents=True, exist_ok=True)
 
     comm.Barrier()
+
 
 # ---------------------------------------------------------------------------
 # K-Means parity

@@ -118,9 +118,7 @@ def baseline_kmeans(
         "workload": "kmeans",
         "setup": "single_driver_baseline",
         "exec_time_s": round(exec_time, 6),
-        "throughput_rows_per_s": (
-            round(nrows / exec_time, 2) if exec_time > 0 else 0.0
-        ),
+        "throughput_rows_per_s": (round(nrows / exec_time, 2) if exec_time > 0 else 0.0),
         "sync_time_mean_s": 0.0,
         "sync_time_max_s": 0.0,
         "sync_overhead_pct_mean": 0.0,
@@ -157,9 +155,7 @@ def baseline_logreg(
         "workload": "logreg",
         "setup": "single_driver_baseline",
         "exec_time_s": round(exec_time, 6),
-        "throughput_rows_per_s": (
-            round(nrows / exec_time, 2) if exec_time > 0 else 0.0
-        ),
+        "throughput_rows_per_s": (round(nrows / exec_time, 2) if exec_time > 0 else 0.0),
         "sync_time_mean_s": 0.0,
         "sync_time_max_s": 0.0,
         "sync_overhead_pct_mean": 0.0,
@@ -197,9 +193,7 @@ def mpi_kmeans_from_metrics(
 
     total_exec = sum(iter_times)
     sync_pct = [
-        100.0 * sync / iteration
-        for sync, iteration in zip(sync_times, iter_times)
-        if iteration > 0
+        100.0 * sync / iteration for sync, iteration in zip(sync_times, iter_times) if iteration > 0
     ]
 
     row_count = dataset_rows(data_path)
@@ -242,11 +236,7 @@ def mpi_logreg_from_metrics(
         epoch_times = [spark + sync for spark, sync in zip(spark_times, sync_times)]
 
     total_exec = sum(epoch_times)
-    sync_pct = [
-        100.0 * sync / epoch
-        for sync, epoch in zip(sync_times, epoch_times)
-        if epoch > 0
-    ]
+    sync_pct = [100.0 * sync / epoch for sync, epoch in zip(sync_times, epoch_times) if epoch > 0]
 
     row_count = dataset_rows(data_path)
 
@@ -282,16 +272,14 @@ def print_row(row: dict[str, Any]) -> None:
 def print_comparison(rows: list[dict[str, Any]], workload: str) -> None:
     baseline = next(
         (
-            row for row in rows
+            row
+            for row in rows
             if row["workload"] == workload and row["setup"] == "single_driver_baseline"
         ),
         None,
     )
     mpi_row = next(
-        (
-            row for row in rows
-            if row["workload"] == workload and row["setup"] == "mpi_multi_driver"
-        ),
+        (row for row in rows if row["workload"] == workload and row["setup"] == "mpi_multi_driver"),
         None,
     )
 
@@ -299,9 +287,7 @@ def print_comparison(rows: list[dict[str, Any]], workload: str) -> None:
         return
 
     speedup = (
-        baseline["exec_time_s"] / mpi_row["exec_time_s"]
-        if mpi_row["exec_time_s"] > 0
-        else 0.0
+        baseline["exec_time_s"] / mpi_row["exec_time_s"] if mpi_row["exec_time_s"] > 0 else 0.0
     )
 
     print(
@@ -317,9 +303,7 @@ def print_comparison(rows: list[dict[str, Any]], workload: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="P4-08 synchronization-overhead benchmark."
-    )
+    parser = argparse.ArgumentParser(description="P4-08 synchronization-overhead benchmark.")
     parser.add_argument("--ranks", type=int, default=int(os.getenv("MPI_NUM_RANKS", "3")))
     parser.add_argument("--kmeans-k", type=int, default=3)
     parser.add_argument("--kmeans-iter", type=int, default=20)
@@ -350,10 +334,7 @@ def main() -> None:
 
     if SIZE != args.ranks:
         if RANK == 0:
-            print(
-                f"ERROR: launched with {SIZE} MPI ranks, "
-                f"but --ranks={args.ranks}"
-            )
+            print(f"ERROR: launched with {SIZE} MPI ranks, " f"but --ranks={args.ranks}")
         if COMM is not None:
             COMM.Abort(2)
         raise SystemExit(2)

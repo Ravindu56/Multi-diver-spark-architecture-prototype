@@ -44,6 +44,7 @@ def run_worker_core(
     elif app == "kmeans":
         try:
             from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
+
             use_allreduce = True
         except ImportError:
             use_allreduce = False
