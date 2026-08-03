@@ -196,10 +196,11 @@ def ensure_dataset(workload: str, input_file: str | None = None, **kwargs) -> st
     if input_file and os.path.exists(input_file):
         return input_file
 
-    if input_file and not os.path.exists(input_file):
-        print(
-            f"[generate_datasets] WARNING: --input '{input_file}' not found.\n"
-            f"  Auto-generating dataset to the config default path instead."
+    if input_file and not os.path.isfile(input_file):
+        raise FileNotFoundError(
+            f"Requested input file does not exist: {input_file}. "
+            "Either provide a valid --input path or omit --input so the "
+            "configured shared-storage dataset can be generated."
         )
 
     if workload == "kmeans":
@@ -263,6 +264,18 @@ if __name__ == "__main__":
     logreg_size = args.size_mb or LOGREG_DATASET_SIZE_MB
     kmeans_features = args.num_features or KMEANS_NUM_FEATURES
     logreg_features = args.num_features or LOGREG_NUM_FEATURES
+
+    if kmeans_size <= 0:
+        raise ValueError(f"K-Means dataset size must be positive, got {kmeans_size}")
+
+    if logreg_size <= 0:
+        raise ValueError(f"LogReg dataset size must be positive, got {logreg_size}")
+
+    if kmeans_features < 2:
+        raise ValueError(f"K-Means number of features must be at least 2, got {kmeans_features}")
+
+    if logreg_features < 2:
+        raise ValueError(f"LogReg number of features must be at least 2, got {logreg_features}")
 
     print(f"\n[generate_datasets] Shared storage: {SHARED_STORAGE_PATH}")
     print(f"[generate_datasets] K-Means  → {KMEANS_DATASET_PATH}")

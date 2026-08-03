@@ -29,6 +29,7 @@ from mpj_spark.core.root_process import (
     aggregate_kmeans_results,
     aggregate_logreg_results,
     align_centres_hungarian,
+    resolve_worker_count,
     run_logreg_allreduce,
 )
 
@@ -175,6 +176,17 @@ class TestAggregateKmeansResults:
 # =============================================================
 # Section 3: run_logreg_allreduce()
 # =============================================================
+
+
+class TestResolveWorkerCount:
+    def test_zero_workers_fall_back_to_single_worker(self):
+        assert resolve_worker_count(0) == 1
+
+    def test_negative_workers_fall_back_to_single_worker(self):
+        assert resolve_worker_count(-2) == 1
+
+    def test_positive_workers_are_preserved(self):
+        assert resolve_worker_count(4) == 4
 
 
 class TestRunLogregAllreduce:

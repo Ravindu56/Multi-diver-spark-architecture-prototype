@@ -147,6 +147,13 @@ def align_centres_hungarian(reference, candidate):
     return [candidate[i] for i in col_ind.tolist()], col_ind.tolist()
 
 
+def resolve_worker_count(num_workers: int | None) -> int:
+    """Return a safe positive worker count for orchestration paths."""
+    if num_workers is None:
+        return 1
+    return max(1, int(num_workers))
+
+
 def aggregate_kmeans_results(worker_results):
     import numpy as np
 
@@ -602,10 +609,14 @@ def run_root(
     else:
         title_extra = ""
 
+    num_workers = resolve_worker_count(num_workers)
+
     _hdr(f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n" f"{title_extra}")
 
     cores = (
-        max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / num_workers))
+        max(1, cores_override)
+        if cores_override
+        else max(1, math.ceil(TOTAL_CORES / max(1, num_workers)))
     )
     print(f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)")
     if model_label:

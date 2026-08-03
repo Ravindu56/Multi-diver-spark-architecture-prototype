@@ -1,23 +1,26 @@
 # ============================================================
 # applications/wordcount.py
 # WordCount RDD pipeline — current benchmark application
-# Paper Reference: Section VI.A — Application used for evaluation
 # ============================================================
+
+from __future__ import annotations
+
+from pathlib import Path
 
 
 def run(text_rdd):
     """
-    Standard WordCount pipeline.
-
-    Pipeline: textFile → flatMap → filter → map → reduceByKey
+    Standard WordCount RDD pipeline.
 
     Parameters
     ----------
-    text_rdd : pyspark.rdd.RDD  — text lines loaded from partition
+    text_rdd : pyspark.rdd.RDD
+        Text lines already loaded from an assigned data partition.
 
     Returns
     -------
-    list of (word: str, count: int) tuples
+    list[tuple[str, int]]
+        Word-count tuples produced by this driver.
     """
     return (
         text_rdd.flatMap(lambda line: line.lower().split())
@@ -26,3 +29,31 @@ def run(text_rdd):
         .reduceByKey(lambda a, b: a + b)
         .collect()
     )
+
+
+def run_wordcount(partition_path: str | Path, spark):
+    """
+    Worker-facing WordCount entry point.
+
+    Loads one partition allocated to a Spark driver, applies the standard
+    WordCount RDD pipeline, and returns the local word-count result.
+
+    Parameters
+    ----------
+    partition_path : str | Path
+        Path to the worker's assigned text partition.
+    spark : pyspark.sql.SparkSession
+        Worker-local independent SparkSession.
+
+    Returns
+    -------
+    list[tuple[str, int]]
+        Local word-count result for root-side aggregation.
+    """
+    partition_path = str(partition_path)
+
+    if not partition_path:
+        raise ValueError("WordCount partition path must not be empty.")
+
+    text_rdd = spark.sparkContext.textFile(partition_path)
+    return run(text_rdd)
