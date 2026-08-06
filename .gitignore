@@ -27,3 +27,10 @@ END_PRESENTATION_2022E033_2022E090.tex
 END_PRESENTATION_2022E033_2022E090.toc
 
 *.csv
+*.log
+*.bak
+*.json
+*.zip
+*.tar.gz
+*.tar
+*.tar.bz2   
