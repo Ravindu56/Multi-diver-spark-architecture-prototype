@@ -1,6 +1,6 @@
 #!/bin/bash
 # Phase 2 nested sweep: dataset size x worker count, all workloads + sync variants
-SIZES=(50 100 200 400 10000 1600)      # MB
+SIZES=(50 100 200 400 1000 1600)      # MB
 WORKERS=(2 4 8)
 LOGDIR=benchmark_logs
 mkdir -p $LOGDIR
