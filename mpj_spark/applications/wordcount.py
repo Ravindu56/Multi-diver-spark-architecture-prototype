@@ -26,3 +26,14 @@ def run(text_rdd):
         .reduceByKey(lambda a, b: a + b)
         .collect()
     )
+
+
+
+def run_wordcount(text_rdd, worker_config=None):
+    """Phase 3 worker-dispatch adapter.
+
+    worker_process.py calls run_wordcount(rdd, worker_config); the
+    Phase 2 run() only needs the RDD. WordCount has no tunable
+    parameters, so worker_config is accepted and ignored.
+    """
+    return run(text_rdd)

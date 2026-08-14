@@ -12,6 +12,8 @@
 import math
 import time
 
+# from mpj_spark.applications.kmeans.driver import run_kmeans_driver
+
 
 def worker_process(
     worker_id,
@@ -58,12 +60,12 @@ def worker_process(
         # ── dispatch ───────────────────────────────────────────────────
         if app == 'wordcount':
             from mpj_spark.applications.wordcount import run_wordcount
-            result = run_wordcount(partition_path, spark)
+            result = run_wordcount(spark.sparkContext.textFile(partition_path))
 
         elif app == 'kmeans':
-            from mpj_spark.applications.kmeans import run_kmeans
-            result = run_kmeans(
-                partition_path,
+            from mpj_spark.applications.kmeans import driver
+            result = driver.run_kmeans_driver(
+                partition_path=partition_path,
                 k=worker_cfg.get('kmeans_k', 3),
                 max_iter=worker_cfg.get('kmeans_max_iter', 20),
                 worker_id=worker_id,
@@ -89,7 +91,7 @@ def worker_process(
                 from mpj_spark.applications.logreg import nosync_run
                 result = nosync_run.run(**logreg_kwargs)
 
-            else:
+            elif sync_mode == 'queue':
                 # M2 — Multi-driver, Queue/FedAvg (default)
                 from mpj_spark.applications.logreg import queue_run
                 result = queue_run.run(
