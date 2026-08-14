@@ -57,3 +57,13 @@ def run_wordcount(partition_path: str | Path, spark):
 
     text_rdd = spark.sparkContext.textFile(partition_path)
     return run(text_rdd)
+
+
+def run_wordcount_rdd(text_rdd, worker_config=None):
+    """Phase 3 worker-dispatch adapter.
+
+    worker_process.py calls run_wordcount(rdd, worker_config); the
+    Phase 2 run() only needs the RDD. WordCount has no tunable
+    parameters, so worker_config is accepted and ignored.
+    """
+    return run(text_rdd)
