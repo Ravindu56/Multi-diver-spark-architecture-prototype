@@ -60,7 +60,7 @@ def run_wordcount(partition_path: str | Path, spark):
 
 
 
-def run_wordcount(text_rdd, worker_config=None):
+def run_wordcount_rdd(text_rdd, worker_config=None):
     """Phase 3 worker-dispatch adapter.
 
     worker_process.py calls run_wordcount(rdd, worker_config); the
