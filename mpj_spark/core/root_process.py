@@ -122,7 +122,8 @@ def compute_global_seed_centres(input_file, k, total_cores, sample_fraction=0.05
 
 def dynamic_partition(input_path, num_partitions, output_dir):
     fm = MPJSparkFileManager(output_dir)
-    return fm.dynamic_partition(input_path, num_partitions)
+    res = fm.dynamic_partition(input_path, num_partitions)
+    return [p["partition_path"] if isinstance(p, dict) else p for p in res]
 
 
 # ──────────────────────────────────────────────────────────────────
