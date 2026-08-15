@@ -26,7 +26,6 @@ import pytest
 
 from mpj_spark.applications.logreg.allreduce import allreduce_gradients
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -142,9 +141,7 @@ class TestAllreduceGradients:
         grad_local = np.zeros(3)
         lr = 0.1
 
-        w_new, _ = allreduce_gradients(
-            comm, size=2, w=w, grad_local=grad_local, learning_rate=lr
-        )
+        w_new, _ = allreduce_gradients(comm, size=2, w=w, grad_local=grad_local, learning_rate=lr)
 
         np.testing.assert_allclose(w_new, w * (1.0 - lr * 0.01), rtol=1e-12)
         np.testing.assert_allclose(w_new, [0.999, -1.998, 2.997], rtol=1e-12)
