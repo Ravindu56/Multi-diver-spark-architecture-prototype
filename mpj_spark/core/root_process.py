@@ -19,7 +19,7 @@ import math
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from multiprocessing import Process, Queue
 
 from mpj_spark.core.file_manager import MPJSparkFileManager
@@ -194,9 +194,7 @@ def run_logreg_allreduce(up_queue, down_queue, num_workers, num_iterations, num_
     """
     import numpy as np
 
-    print(
-        f"  [LogReg Allreduce] Starting — {num_workers} workers × {num_iterations} iterations"
-    )
+    print(f"  [LogReg Allreduce] Starting — {num_workers} workers × {num_iterations} iterations")
     final_weights = None
     final_intercept = 0.0
     for iteration in range(num_iterations):
@@ -286,7 +284,9 @@ def _write_merged_iter_metrics(
                     "num_features": num_features,
                     "local_weight_norm": rec.get("local_weight_norm", rec.get("weight_norm", "")),
                 }
-                row.update({k: v for k, v in rec.items() if k not in ("local_weight_norm", "sync_mode")})
+                row.update(
+                    {k: v for k, v in rec.items() if k not in ("local_weight_norm", "sync_mode")}
+                )
                 writer.writerow(row)
                 rows_written += 1
     return out_path, rows_written
@@ -346,7 +346,7 @@ def aggregate_logreg_results(
     w_preview = ", ".join(f"{v:.4f}" for v in final_weights[:5])
     _info(f"Weight preview   : [{w_preview}{'...' if len(final_weights) > 5 else ''}]")
 
-    _run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    _run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     _nw = num_workers or len(worker_results)
     _rp = reg_param or 0.0
     _nf = num_features or len(final_weights)
@@ -582,7 +582,11 @@ def run_root(
     num_workers = resolve_worker_count(num_workers)
     _hdr(f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n{title_extra}")
 
-    cores = max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / max(1, num_workers)))
+    cores = (
+        max(1, cores_override)
+        if cores_override
+        else max(1, math.ceil(TOTAL_CORES / max(1, num_workers)))
+    )
     print(f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)")
     if model_label:
         print(f"  Benchmark   : {model_label}")
@@ -760,7 +764,7 @@ def run_root(
         _info(f"Total WCSS : {agg['total_wcss']:.4f}")
 
     elif app == "logreg":
-        _run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         agg = aggregate_logreg_results(
             worker_results,
             allreduce_result=allreduce_result,
@@ -838,9 +842,11 @@ def run_root(
 
         if app == "wordcount":
             from mpj_spark.applications.baseline_spark import run_baseline
+
             _, baseline_timing = run_baseline(input_file, num_workers, cores_override)
         elif app == "kmeans":
             from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
+
             _, baseline_timing = run_baseline_kmeans(
                 input_file,
                 num_workers,
@@ -851,6 +857,7 @@ def run_root(
             )
         elif app == "logreg":
             from mpj_spark.applications.baseline_logreg import run_baseline_logreg
+
             _, baseline_timing = run_baseline_logreg(
                 input_file,
                 num_workers,

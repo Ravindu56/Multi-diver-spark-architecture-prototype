@@ -6,7 +6,6 @@
 
 import time
 import traceback
-from mpi4py import MPI
 
 from mpj_spark.core.sync_modes import MODE_PS_SYNC_FEDAVG_MPI, normalize_sync_mode
 from mpj_spark.utils.dev_logger import DevLogger
@@ -94,7 +93,9 @@ def run_worker_mpi(comm):
     num_workers = cfg.get("num_workers", 1)
     sync_mode = normalize_sync_mode(cfg.get("sync_mode", MODE_PS_SYNC_FEDAVG_MPI))
 
-    print(f"{_tag(worker_id, 'BOOT')} config received app={app_name} partition={partition_path} sync_mode={sync_mode}")
+    print(
+        f"{_tag(worker_id, 'BOOT')} config received app={app_name} partition={partition_path} sync_mode={sync_mode}"
+    )
 
     logger = DevLogger(worker_id=worker_id)
 
@@ -118,7 +119,13 @@ def run_worker_mpi(comm):
             tag=TAG_RESULT,
         )
         comm.send(
-            {"worker_id": worker_id, "init_time": 0.0, "load_time": 0.0, "processing_time": 0.0, "total_time": 0.0},
+            {
+                "worker_id": worker_id,
+                "init_time": 0.0,
+                "load_time": 0.0,
+                "processing_time": 0.0,
+                "total_time": 0.0,
+            },
             dest=0,
             tag=TAG_TIMING,
         )
@@ -159,7 +166,9 @@ def run_worker_mpi(comm):
     )
 
     outcome["timing"]["init_time"] = init_time
-    outcome["timing"]["total_time"] = init_time + outcome["timing"]["load_time"] + outcome["timing"]["processing_time"]
+    outcome["timing"]["total_time"] = (
+        init_time + outcome["timing"]["load_time"] + outcome["timing"]["processing_time"]
+    )
 
     logger.log_worker_timing(
         worker_id=worker_id,

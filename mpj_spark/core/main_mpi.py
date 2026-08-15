@@ -28,6 +28,7 @@ size = comm.Get_size()
 
 def _build_arg_parser():
     import argparse
+
     from mpj_spark.core.sync_modes import MODE_PS_SYNC_FEDAVG_MPI
 
     p = argparse.ArgumentParser(
@@ -41,10 +42,22 @@ def _build_arg_parser():
     )
 
     p.add_argument("--input", default="./test_dataset.txt", help="Path to input dataset file.")
-    p.add_argument("--generate", type=int, default=50, metavar="MB", help="Auto-generate synthetic dataset size (MB).")
-    p.add_argument("--workers", type=int, default=None, help="Informational worker count (size - 1).")
-    p.add_argument("--cores", type=int, default=None, help="Override Spark local[N] core count per worker.")
-    p.add_argument("--app", default="wordcount", choices=["wordcount", "kmeans", "logreg"], help="Workload.")
+    p.add_argument(
+        "--generate",
+        type=int,
+        default=50,
+        metavar="MB",
+        help="Auto-generate synthetic dataset size (MB).",
+    )
+    p.add_argument(
+        "--workers", type=int, default=None, help="Informational worker count (size - 1)."
+    )
+    p.add_argument(
+        "--cores", type=int, default=None, help="Override Spark local[N] core count per worker."
+    )
+    p.add_argument(
+        "--app", default="wordcount", choices=["wordcount", "kmeans", "logreg"], help="Workload."
+    )
     p.add_argument("--compare", action="store_true", help="Run single-driver baseline.")
     p.add_argument("--no-prewarm", action="store_true", help="Skip JVM pre-warm barrier.")
 
@@ -112,6 +125,7 @@ def _run_root(args):
 def _run_worker():
     assert rank >= 1, f"_run_worker() called on rank {rank}"
     from mpj_spark.workers.worker_mpi import run_worker_mpi
+
     run_worker_mpi(comm)
 
 

@@ -5,13 +5,11 @@
 # ================================================================
 
 import math
-import os
 import threading
 import time
-from mpi4py import MPI
+from datetime import UTC
 
 from mpj_spark.core.sync_modes import (
-    MODE_NONE,
     MODE_PS_SYNC_FEDAVG_MPI,
     MODE_PS_SYNC_FEDAVG_QUEUE,
     normalize_sync_mode,
@@ -56,7 +54,9 @@ def run_logreg_allreduce_mpi(
     """Root-side MPI coordinator for per-iteration FedAvg weight synchronisation (Point-to-Point legacy)."""
     import numpy as np
 
-    print(f"  [LogReg Allreduce MPI] Starting — {num_workers} workers × {num_iterations} iterations")
+    print(
+        f"  [LogReg Allreduce MPI] Starting — {num_workers} workers × {num_iterations} iterations"
+    )
 
     final_weights = None
     final_intercept = 0.0
@@ -90,7 +90,9 @@ def run_logreg_allreduce_mpi(
 
         iter_time = time.perf_counter() - t_iter
         weight_norm = float(np.linalg.norm(avg_w))
-        print(f"  [LogReg Allreduce MPI] iter {iteration+1}/{num_iterations}  ({iter_time:.3f}s)  |w|={weight_norm:.4f}")
+        print(
+            f"  [LogReg Allreduce MPI] iter {iteration+1}/{num_iterations}  ({iter_time:.3f}s)  |w|={weight_norm:.4f}"
+        )
 
     print("  [LogReg Allreduce MPI] Complete")
     return {
@@ -180,7 +182,9 @@ def run_root_mpi(
         f"{title_extra}"
     )
 
-    cores = max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / num_workers))
+    cores = (
+        max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / num_workers))
+    )
     print(f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)")
 
     seed_centres = None
@@ -243,6 +247,7 @@ def run_root_mpi(
     _allreduce_store = []
 
     if do_logreg_allreduce_p2p:
+
         def _allreduce_thread_fn():
             res = run_logreg_allreduce_mpi(
                 comm=comm,
@@ -305,6 +310,7 @@ def run_root_mpi(
         if use_gossip:
             from mpj_spark.core.gossip_aggregator import GossipAggregator
             from mpj_spark_mpi import MpiRootFanoutQueue
+
             gossip_q = MpiRootFanoutQueue(tag=TAG_ALLREDUCE_UP, num_workers=num_workers)
             gagg = GossipAggregator(
                 num_workers=num_workers,
@@ -327,8 +333,9 @@ def run_root_mpi(
         _info(f"Total WCSS : {agg['total_wcss']:.4f}")
 
     elif app == "logreg":
-        from datetime import datetime, timezone
-        _run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        from datetime import datetime
+
+        _run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         agg = aggregate_logreg_results(
             worker_results,
             allreduce_result=allreduce_result,
@@ -356,9 +363,12 @@ def run_root_mpi(
 
         for i in range(num_workers):
             w_rank = i + 1
-            comm.send({"type": "reassign", "centres": gossip_centres}, dest=w_rank, tag=TAG_REASSIGN_BCAST)
+            comm.send(
+                {"type": "reassign", "centres": gossip_centres}, dest=w_rank, tag=TAG_REASSIGN_BCAST
+            )
 
         import numpy as np
+
         all_sums = np.zeros((k_val, d_val))
         all_counts = np.zeros(k_val, dtype=np.int64)
         total_rows = 0
@@ -383,7 +393,10 @@ def run_root_mpi(
     avg_init = sum(t["init_time"] for t in worker_timings) / num_workers if prewarm else None
 
     _print_timing_summary(
-        load_time, avg_proc, agg_time, t_wall,
+        load_time,
+        avg_proc,
+        agg_time,
+        t_wall,
         prewarm_init=avg_init,
         gossip_info=gossip_info,
         seed_time=seed_time,
@@ -406,18 +419,29 @@ def run_root_mpi(
 
         if app == "wordcount":
             from mpj_spark.applications.baseline_spark import run_baseline
+
             _, baseline_timing = run_baseline(input_file, num_workers, cores_override)
         elif app == "kmeans":
             from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
+
             _, baseline_timing = run_baseline_kmeans(
-                input_file, num_workers, cores_override,
-                kmeans_k, kmeans_iter, baseline_threads=baseline_threads
+                input_file,
+                num_workers,
+                cores_override,
+                kmeans_k,
+                kmeans_iter,
+                baseline_threads=baseline_threads,
             )
         elif app == "logreg":
             from mpj_spark.applications.baseline_logreg import run_baseline_logreg
+
             _, baseline_timing = run_baseline_logreg(
-                input_file, num_workers, cores_override,
-                logreg_iter, logreg_reg_param, logreg_features,
+                input_file,
+                num_workers,
+                cores_override,
+                logreg_iter,
+                logreg_reg_param,
+                logreg_features,
                 baseline_threads=baseline_threads,
                 parity_iter=logreg_parity_iter,
             )
@@ -429,7 +453,10 @@ def run_root_mpi(
             "total_time": t_wall,
         }
         _print_comparison(
-            multi_timing, baseline_timing, num_workers, app,
+            multi_timing,
+            baseline_timing,
+            num_workers,
+            app,
             baseline_threads=baseline_threads,
             parity_iter=logreg_parity_iter,
         )

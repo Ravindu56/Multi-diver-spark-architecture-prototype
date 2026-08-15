@@ -2,7 +2,6 @@
 Unit tests for mpj_spark.applications.logreg.fedavg_mpi_run helper math & mock collective logic.
 """
 
-from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
