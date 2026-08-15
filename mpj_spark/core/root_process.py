@@ -453,18 +453,18 @@ def _print_comparison(
     ]
     reassign_val = multi_timing.get("reassign_time")
     if reassign_val is not None:
-        rows.append((\"_reassign\", \"Re-assign Pass (s)\"))
-    rows.append((\"total_time\", \"Total Time (s)\"))
+        rows.append(("_reassign", "Re-assign Pass (s)"))
+    rows.append(("total_time", "Total Time (s)"))
     for key, label in rows:
-        if key == \"_reassign\":
+        if key == "_reassign":
             m = reassign_val
             b = 0.0
         else:
             m = multi_timing.get(key, 0.0)
             b = baseline_timing.get(key, 0.0)
         sp = b / m if m > 0 else 0.0
-        flag = \"  ⚡\" if sp >= 1.5 else (\"  ⚠\" if sp < 1.0 else \"\")
-        print(f\"  {label:<28} {m:>12.4f}s {b:>12.4f}s {sp:>8.2f}x{flag}\")
+        flag = "  ⚡" if sp >= 1.5 else ("  ⚠" if sp < 1.0 else "")
+        print(f"  {label:<28} {m:>12.4f}s {b:>12.4f}s {sp:>8.2f}x{flag}")
     print(SEP)
 
 
@@ -479,26 +479,26 @@ def _print_timing_summary(
     reassign_time=None,
     model_label=None,
 ):
-    print(f\"\\n{DASH}\")
-    label = \"Timing Summary\" + (f\"  [{model_label}]\" if model_label else \"\")
-    print(f\"  {label}\")
+    print(f"\n{DASH}")
+    label = "Timing Summary" + (f"  [{model_label}]" if model_label else "")
+    print(f"  {label}")
     print(DASH)
     if seed_time is not None:
-        print(f\"  {'Global Seed Sampling':<28} {seed_time:>8.4f} s\")
-    print(f\"  {'Partition Load Time':<28} {load_time:>8.4f} s\")
+        print(f"  {'Global Seed Sampling':<28} {seed_time:>8.4f} s")
+    print(f"  {'Partition Load Time':<28} {load_time:>8.4f} s")
     if prewarm_init is not None:
-        print(f\"  {'Pre-warm JVM Init (avg)':<28} {prewarm_init:>8.4f} s\")
-    print(f\"  {'Processing Time (avg fit)':<28} {avg_proc:>8.4f} s\")
+        print(f"  {'Pre-warm JVM Init (avg)':<28} {prewarm_init:>8.4f} s")
+    print(f"  {'Processing Time (avg fit)':<28} {avg_proc:>8.4f} s")
     if reassign_time is not None:
-        print(f\"  {'Re-assignment Pass':<28} {reassign_time:>8.4f} s\")
-    print(f\"  {'Aggregation Time':<28} {agg_time:>8.4f} s\")
+        print(f"  {'Re-assignment Pass':<28} {reassign_time:>8.4f} s")
+    print(f"  {'Aggregation Time':<28} {agg_time:>8.4f} s")
     if gossip_info:
-        if \"rounds_run\" in gossip_info:
-            print(f\"  {'Gossip Rounds':<28} {gossip_info['rounds_run']:>8d}\")
-            print(f\"  {'Gossip Converged':<28} {str(gossip_info['converged']):>8}\")
-        elif \"iterations_done\" in gossip_info:
-            print(f\"  {'Allreduce Rounds':<28} {gossip_info['iterations_done']:>8d}\")
-    print(f\"  {'Total Wall-clock Time':<28} {t_wall:>8.4f} s\")
+        if "rounds_run" in gossip_info:
+            print(f"  {'Gossip Rounds':<28} {gossip_info['rounds_run']:>8d}")
+            print(f"  {'Gossip Converged':<28} {str(gossip_info['converged']):>8}")
+        elif "iterations_done" in gossip_info:
+            print(f"  {'Allreduce Rounds':<28} {gossip_info['iterations_done']:>8d}")
+    print(f"  {'Total Wall-clock Time':<28} {t_wall:>8.4f} s")
     print(DASH)
 
 
@@ -508,7 +508,7 @@ def run_root(
     compare=False,
     prewarm=True,
     cores_override=None,
-    app=\"wordcount\",
+    app="wordcount",
     kmeans_k=3,
     kmeans_iter=20,
     baseline_threads=None,
@@ -522,33 +522,359 @@ def run_root(
     logreg_iter=10,
     logreg_reg_param=0.01,
     logreg_features=10,
-    results_dir=\"results\",
+    results_dir="results",
     sync_mode=MODE_PS_SYNC_FEDAVG_QUEUE,
     **_extra_kwargs,
 ):
     from mpj_spark.config import DATA_DIR, TOTAL_CORES
 
-    logger = DevLogger(worker_id=\"root\")
+    logger = DevLogger(worker_id="root")
 
     if _extra_kwargs:
-        ignored = \", \".join(_extra_kwargs.keys())
-        print(f\"  [run_root] Extra kwargs ignored: {ignored}\")
+        ignored = ", ".join(_extra_kwargs.keys())
+        print(f"  [run_root] Extra kwargs ignored: {ignored}")
 
     sync_mode = normalize_sync_mode(sync_mode)
 
-    do_seed = use_global_seed and use_gossip and app == \"kmeans\"
-    do_reassign = use_reassign and use_gossip and app == \"kmeans\"
-    do_logreg_allreduce = app == \"logreg\" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
-    do_logreg_nosync = app == \"logreg\" and sync_mode == MODE_NONE
+    do_seed = use_global_seed and use_gossip and app == "kmeans"
+    do_reassign = use_reassign and use_gossip and app == "kmeans"
+    do_logreg_allreduce = app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
+    do_logreg_nosync = app == "logreg" and sync_mode == MODE_NONE
 
-    if app == \"logreg\":
+    if app == "logreg":
         if sync_mode == MODE_NONE:
-            model_label = \"M1 — Multi-driver, NO sync\"
+            model_label = "M1 — Multi-driver, NO sync"
         elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI:
-            model_label = \"P3-08 — Multi-driver, Native MPI FedAvg\"
+            model_label = "P3-08 — Multi-driver, Native MPI FedAvg"
         else:
-            model_label = \"M2 — Multi-driver, Queue/FedAvg\"
+            model_label = "M2 — Multi-driver, Queue/FedAvg"
     else:
         model_label = None
 
-    agg_mode = (\n        f\"Adaptive Gossip (threshold={gossip_threshold}, max_rounds={gossip_max_rounds})\"\n        if (use_gossip and app == \"kmeans\")\n        else \"Batch Hungarian\"\n        if app == \"kmeans\"\n        else f\"Queue FedAvg, {logreg_iter} iters [M2]\"\n        if do_logreg_allreduce\n        else \"Post-hoc row-weighted average [M1]\"\n        if do_logreg_nosync\n        else \"N/A\"\n    )\n\n    if app == \"logreg\":\n        title_extra = (\n            f\"  iter={logreg_iter}  reg_param={logreg_reg_param}  features={logreg_features}\\n\"\n            f\"  Aggregation : {agg_mode}\"\n        )\n    elif app == \"kmeans\":\n        correctness_flags = \"\"\n        if use_gossip:\n            correctness_flags = (\n                f\"  Global Seed     : {'ON' if do_seed else 'OFF'}\\n\"\n                f\"  Re-assign Pass  : {'ON' if do_reassign else 'OFF'}\"\n            )\n        title_extra = f\"  k={kmeans_k}  max_iter={kmeans_iter}\\n  Aggregation : {agg_mode}\\n{correctness_flags}\"\n    else:\n        title_extra = \"\"\n\n    num_workers = resolve_worker_count(num_workers)\\n    _hdr(f\"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\\n{title_extra}\")\n\n    cores = max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / max(1, num_workers)))\n    print(f\"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)\")\n    if model_label:\n        print(f\"  Benchmark   : {model_label}\")\n\n    seed_centres = None\n    seed_time = None\n    if do_seed:\n        _phase(\"1b\", \"Computing global seed centroids (isolated subprocess)\")\n        t_seed = time.perf_counter()\n        seed_centres = compute_global_seed_centres(\n            input_file=input_file,\n            k=kmeans_k,\n            total_cores=TOTAL_CORES,\n            sample_fraction=0.05,\n            seed=42,\n        )\n        seed_time = time.perf_counter() - t_seed\n        _ok(f\"Global seed centroids ready ({seed_time:.3f}s)\")\n\n    worker_cfg = {\n        \"app\": app,\n        \"cores_override\": cores,\n        \"kmeans_k\": kmeans_k,\n        \"kmeans_max_iter\": kmeans_iter,\n        \"num_workers\": num_workers,\n        \"seed_centres\": seed_centres,\n        \"logreg_iter\": logreg_iter,\n        \"logreg_reg_param\": logreg_reg_param,\n        \"logreg_features\": logreg_features,\n        \"results_dir\": results_dir,\n        \"sync_mode\": sync_mode,\n    }\n\n    _phase(1, \"Partitioning dataset\")\n    t_load_start = time.perf_counter()\n    partition_paths = dynamic_partition(input_file, num_workers, DATA_DIR)\n    load_time = time.perf_counter() - t_load_start\n    _ok(f\"Split into {num_workers} partitions ({load_time:.3f}s)\")\n\n    _phase(2, f\"Spawning {num_workers} worker processes\")\n    processes = []\n    result_queue = Queue()\n    timing_queue = Queue()\n    from multiprocessing import Event\n\n    ready_signals = [Event() for _ in range(num_workers)]\n    go_signals = [Event() for _ in range(num_workers)]\n\n    gossip_queue = Queue() if (use_gossip and app == \"kmeans\") else None\n    reassign_queue = Queue() if do_reassign else None\n    allreduce_up_queue = Queue() if do_logreg_allreduce else None\n    allreduce_down_queue = Queue() if do_logreg_allreduce else None\n\n    for i in range(num_workers):\n        p = Process(\n            target=worker_process,\n            args=(\n                i,\n                partition_paths[i],\n                result_queue,\n                go_signals[i],\n                ready_signals[i],\n                timing_queue,\n                worker_cfg,\n            ),\n            kwargs={\n                \"allreduce_up_queue\": gossip_queue or allreduce_up_queue,\n                \"reassign_queue\": reassign_queue,\n                \"allreduce_down_queue\": allreduce_down_queue,\n            },\n        )\n        p.start()\n        processes.append(p)\n        _info(f\"Worker {i} (PID {p.pid}) spawned for {partition_paths[i]}\")\n\n    _phase(\"3a\", \"Waiting for JVM-ready signals from all workers\")\n    for sig in ready_signals:\n        sig.wait()\n    _ok(f\"All {num_workers} workers initialized Spark and are ready\")\n\n    _phase(\"3b\", \"Firing all workers simultaneously\")\n    t_proc_start = time.perf_counter()\n    for sig in go_signals:\n        sig.set()\n\n    allreduce_result = None\n    allreduce_thread = None\n\n    if do_logreg_allreduce:\n        _allreduce_store = []\n\n        def _allreduce_thread_fn():\n            res = run_logreg_allreduce(\n                up_queue=allreduce_up_queue,\n                down_queue=allreduce_down_queue,\n                num_workers=num_workers,\n                num_iterations=logreg_iter,\n                num_features=logreg_features,\n            )\n            _allreduce_store.append(res)\n\n        allreduce_thread = threading.Thread(target=_allreduce_thread_fn, daemon=True)\n        allreduce_thread.start()\n        print(\"  [M2] LogReg FedAvg coordinator started in background thread\")\n    elif do_logreg_nosync:\n        print(\"  [M1] Workers training independently — no sync coordinator\")\n\n    _phase(4, \"Collecting results\")\n    worker_results = []\n    worker_timings = []\n    errors = []\n\n    for _ in range(num_workers):\n        res = result_queue.get()\n        timing = timing_queue.get()\n        if res.get(\"status\") == \"success\":\n            worker_results.append(res[\"result\"])\n        else:\n            errors.append(res)\n            print(f\"  ✗  Worker {res.get('worker_id')} FAILED: {res.get('error')}\")\n        worker_timings.append(timing)\n\n    for p in processes:\n        p.join()\n\n    proc_time = time.perf_counter() - t_proc_start\n    if errors:\n        print(f\"  {len(errors)} worker(s) failed. Aborting.\")\n        return\n\n    _ok(f\"All {num_workers} workers completed\")\n\n    if allreduce_thread is not None:\n        allreduce_thread.join(timeout=60)\n        if _allreduce_store:\n            allreduce_result = _allreduce_store[0]\n\n    _phase(5, \"Aggregating results\")\n    t_agg_start = time.perf_counter()\n    gossip_info = None\n    agg = None\n\n    if app == \"wordcount\":\n        from mpj_spark.core.key_value import KeyValueStructure\n\n        kv = KeyValueStructure()\n        for r in worker_results:\n            kv.merge(KeyValueStructure.from_serializable(r))\n        top = kv.get_top_n(20)\n        print(\"\\n  Top-20 words:\")\n        for word, count in top:\n            print(f\"    {word:<22} {count:>12,}\")\n\n    elif app == \"kmeans\":\n        if use_gossip:\n            from mpj_spark.core.gossip_aggregator import GossipAggregator\n\n            gagg = GossipAggregator(\n                num_workers=num_workers,\n                convergence_threshold=gossip_threshold,\n                max_rounds=gossip_max_rounds,\n                initial_fanout=gossip_fanout,\n                verbose=True,\n            )\n            agg = gagg.aggregate(\n                gossip_queue,\n                timeout_per_worker=120.0,\n                seed_centres=seed_centres,\n            )\n            gossip_info = agg\n            _ok(f\"Gossip done  rounds={agg['rounds_run']}  converged={agg['converged']}\")\n        else:\n            agg = aggregate_kmeans_results(worker_results)\n        _info(f\"Total rows : {agg['total_rows']:,}\")\n        _info(f\"Total WCSS : {agg['total_wcss']:.4f}\")\n\n    elif app == \"logreg\":\n        _run_id = datetime.now(timezone.utc).strftime(\"%Y%m%dT%H%M%SZ\")\n        agg = aggregate_logreg_results(\n            worker_results,\n            allreduce_result=allreduce_result,\n            results_dir=results_dir,\n            run_id=_run_id,\n            num_workers=num_workers,\n            reg_param=logreg_reg_param,\n            num_features=logreg_features,\n            sync_mode=sync_mode,\n        )\n        gossip_info = {"iterations_done": logreg_iter}\n        _info(f\"Total rows       : {agg['total_rows']:,}\")\n        _info(f\"Weighted accuracy: {agg['avg_accuracy']:.4f}\")\n        _info(f\"Agg mode         : {agg['agg_mode']}\")\n\n    agg_time = time.perf_counter() - t_agg_start\n    reassign_time = None\n\n    if do_reassign and agg is not None and app == \"kmeans\":\n        _phase(\"5b\", \"Re-assignment pass — exact global centroid correction\")\n        t_reassign = time.perf_counter()\n        gossip_centres = agg[\"centres\"]\n        k_val = len(gossip_centres)\n        d_val = len(gossip_centres[0])\n        corrected_centres = reassign_pass_root(\n            processes_alive=processes,\n            gossip_centres=gossip_centres,\n            reassign_queue=reassign_queue,\n            num_workers=num_workers,\n            k=k_val,\n            dims=d_val,\n        )\n        reassign_time = time.perf_counter() - t_reassign\n        agg[\"centres\"] = corrected_centres\n        _ok(f\"Re-assignment done ({reassign_time:.3f}s)\")\n\n    t_wall = load_time + proc_time + agg_time + (reassign_time or 0.0)\n    avg_proc = sum(t[\"processing_time\"] for t in worker_timings) / num_workers\n    avg_init = sum(t[\"init_time\"] for t in worker_timings) / num_workers if prewarm else None\n\n    _print_timing_summary(\n        load_time,\n        avg_proc,\n        agg_time,\n        t_wall,\n        prewarm_init=avg_init,\n        gossip_info=gossip_info,\n        seed_time=seed_time,\n        reassign_time=reassign_time,\n        model_label=model_label,\n    )\n\n    logger.log_run(\n        app=app,\n        num_workers=num_workers,\n        cores=cores,\n        load_time=load_time,\n        proc_time=avg_proc,\n        agg_time=agg_time,\n        total_time=t_wall,\n    )\n\n    if compare:\n        logreg_parity_iter = num_workers * logreg_iter if app == \"logreg\" else None\n        b_label = \"B2 — Standalone cluster\" if baseline_master else \"B1 — local[N]\"\n        _phase(\n            \"B\",\n            f\"Running {app} baseline ({b_label}) for comparison\"\n            + (\n                f\"  [parity maxIter={logreg_parity_iter} = {num_workers} workers × {logreg_iter} iters]\"\n                if logreg_parity_iter is not None\n                else \"\"\n            ),\n        )\n\n        if app == \"wordcount\":\n            from mpj_spark.applications.baseline_spark import run_baseline\n            _, baseline_timing = run_baseline(input_file, num_workers, cores_override)\n        elif app == \"kmeans\":\n            from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans\n            _, baseline_timing = run_baseline_kmeans(\n                input_file,\n                num_workers,\n                cores_override,\n                kmeans_k,\n                kmeans_iter,\n                baseline_threads=baseline_threads,\n            )\n        elif app == \"logreg\":\n            from mpj_spark.applications.baseline_logreg import run_baseline_logreg\n            _, baseline_timing = run_baseline_logreg(\n                input_file,\n                num_workers,\n                cores_override,\n                logreg_iter,\n                logreg_reg_param,\n                logreg_features,\n                baseline_threads=baseline_threads,\n                parity_iter=logreg_parity_iter,\n                baseline_master=baseline_master,\n            )\n\n        multi_timing = {\n            \"load_time\": load_time,\n            \"processing_time\": avg_proc,\n            \"reassign_time\": reassign_time,\n            \"total_time\": t_wall,\n        }\n        _print_comparison(\n            multi_timing,\n            baseline_timing,\n            num_workers,\n            app,\n            baseline_threads=baseline_threads,\n            parity_iter=logreg_parity_iter,\n            model_label=model_label,\n        )\n
+    agg_mode = (
+        f"Adaptive Gossip (threshold={gossip_threshold}, max_rounds={gossip_max_rounds})"
+        if (use_gossip and app == "kmeans")
+        else "Batch Hungarian"
+        if app == "kmeans"
+        else f"Queue FedAvg, {logreg_iter} iters [M2]"
+        if do_logreg_allreduce
+        else "Post-hoc row-weighted average [M1]"
+        if do_logreg_nosync
+        else "N/A"
+    )
+
+    if app == "logreg":
+        title_extra = (
+            f"  iter={logreg_iter}  reg_param={logreg_reg_param}  features={logreg_features}\n"
+            f"  Aggregation : {agg_mode}"
+        )
+    elif app == "kmeans":
+        correctness_flags = ""
+        if use_gossip:
+            correctness_flags = (
+                f"  Global Seed     : {'ON' if do_seed else 'OFF'}\n"
+                f"  Re-assign Pass  : {'ON' if do_reassign else 'OFF'}"
+            )
+        title_extra = f"  k={kmeans_k}  max_iter={kmeans_iter}\n  Aggregation : {agg_mode}\n{correctness_flags}"
+    else:
+        title_extra = ""
+
+    num_workers = resolve_worker_count(num_workers)
+    _hdr(f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n{title_extra}")
+
+    cores = max(1, cores_override) if cores_override else max(1, math.ceil(TOTAL_CORES / max(1, num_workers)))
+    print(f"  Core budget : local[{cores}]  ({TOTAL_CORES} total ÷ {num_workers} workers)")
+    if model_label:
+        print(f"  Benchmark   : {model_label}")
+
+    seed_centres = None
+    seed_time = None
+    if do_seed:
+        _phase("1b", "Computing global seed centroids (isolated subprocess)")
+        t_seed = time.perf_counter()
+        seed_centres = compute_global_seed_centres(
+            input_file=input_file,
+            k=kmeans_k,
+            total_cores=TOTAL_CORES,
+            sample_fraction=0.05,
+            seed=42,
+        )
+        seed_time = time.perf_counter() - t_seed
+        _ok(f"Global seed centroids ready ({seed_time:.3f}s)")
+
+    worker_cfg = {
+        "app": app,
+        "cores_override": cores,
+        "kmeans_k": kmeans_k,
+        "kmeans_max_iter": kmeans_iter,
+        "num_workers": num_workers,
+        "seed_centres": seed_centres,
+        "logreg_iter": logreg_iter,
+        "logreg_reg_param": logreg_reg_param,
+        "logreg_features": logreg_features,
+        "results_dir": results_dir,
+        "sync_mode": sync_mode,
+    }
+
+    _phase(1, "Partitioning dataset")
+    t_load_start = time.perf_counter()
+    partition_paths = dynamic_partition(input_file, num_workers, DATA_DIR)
+    load_time = time.perf_counter() - t_load_start
+    _ok(f"Split into {num_workers} partitions ({load_time:.3f}s)")
+
+    _phase(2, f"Spawning {num_workers} worker processes")
+    processes = []
+    result_queue = Queue()
+    timing_queue = Queue()
+    from multiprocessing import Event
+
+    ready_signals = [Event() for _ in range(num_workers)]
+    go_signals = [Event() for _ in range(num_workers)]
+
+    gossip_queue = Queue() if (use_gossip and app == "kmeans") else None
+    reassign_queue = Queue() if do_reassign else None
+    allreduce_up_queue = Queue() if do_logreg_allreduce else None
+    allreduce_down_queue = Queue() if do_logreg_allreduce else None
+
+    for i in range(num_workers):
+        p = Process(
+            target=worker_process,
+            args=(
+                i,
+                partition_paths[i],
+                result_queue,
+                go_signals[i],
+                ready_signals[i],
+                timing_queue,
+                worker_cfg,
+            ),
+            kwargs={
+                "allreduce_up_queue": gossip_queue or allreduce_up_queue,
+                "reassign_queue": reassign_queue,
+                "allreduce_down_queue": allreduce_down_queue,
+            },
+        )
+        p.start()
+        processes.append(p)
+        _info(f"Worker {i} (PID {p.pid}) spawned for {partition_paths[i]}")
+
+    _phase("3a", "Waiting for JVM-ready signals from all workers")
+    for sig in ready_signals:
+        sig.wait()
+    _ok(f"All {num_workers} workers initialized Spark and are ready")
+
+    _phase("3b", "Firing all workers simultaneously")
+    t_proc_start = time.perf_counter()
+    for sig in go_signals:
+        sig.set()
+
+    allreduce_result = None
+    allreduce_thread = None
+
+    if do_logreg_allreduce:
+        _allreduce_store = []
+
+        def _allreduce_thread_fn():
+            res = run_logreg_allreduce(
+                up_queue=allreduce_up_queue,
+                down_queue=allreduce_down_queue,
+                num_workers=num_workers,
+                num_iterations=logreg_iter,
+                num_features=logreg_features,
+            )
+            _allreduce_store.append(res)
+
+        allreduce_thread = threading.Thread(target=_allreduce_thread_fn, daemon=True)
+        allreduce_thread.start()
+        print("  [M2] LogReg FedAvg coordinator started in background thread")
+    elif do_logreg_nosync:
+        print("  [M1] Workers training independently — no sync coordinator")
+
+    _phase(4, "Collecting results")
+    worker_results = []
+    worker_timings = []
+    errors = []
+
+    for _ in range(num_workers):
+        res = result_queue.get()
+        timing = timing_queue.get()
+        if res.get("status") == "success":
+            worker_results.append(res["result"])
+        else:
+            errors.append(res)
+            print(f"  ✗  Worker {res.get('worker_id')} FAILED: {res.get('error')}")
+        worker_timings.append(timing)
+
+    for p in processes:
+        p.join()
+
+    proc_time = time.perf_counter() - t_proc_start
+    if errors:
+        print(f"  {len(errors)} worker(s) failed. Aborting.")
+        return
+
+    _ok(f"All {num_workers} workers completed")
+
+    if allreduce_thread is not None:
+        allreduce_thread.join(timeout=60)
+        if _allreduce_store:
+            allreduce_result = _allreduce_store[0]
+
+    _phase(5, "Aggregating results")
+    t_agg_start = time.perf_counter()
+    gossip_info = None
+    agg = None
+
+    if app == "wordcount":
+        from mpj_spark.core.key_value import KeyValueStructure
+
+        kv = KeyValueStructure()
+        for r in worker_results:
+            kv.merge(KeyValueStructure.from_serializable(r))
+        top = kv.get_top_n(20)
+        print("\n  Top-20 words:")
+        for word, count in top:
+            print(f"    {word:<22} {count:>12,}")
+
+    elif app == "kmeans":
+        if use_gossip:
+            from mpj_spark.core.gossip_aggregator import GossipAggregator
+
+            gagg = GossipAggregator(
+                num_workers=num_workers,
+                convergence_threshold=gossip_threshold,
+                max_rounds=gossip_max_rounds,
+                initial_fanout=gossip_fanout,
+                verbose=True,
+            )
+            agg = gagg.aggregate(
+                gossip_queue,
+                timeout_per_worker=120.0,
+                seed_centres=seed_centres,
+            )
+            gossip_info = agg
+            _ok(f"Gossip done  rounds={agg['rounds_run']}  converged={agg['converged']}")
+        else:
+            agg = aggregate_kmeans_results(worker_results)
+        _info(f"Total rows : {agg['total_rows']:,}")
+        _info(f"Total WCSS : {agg['total_wcss']:.4f}")
+
+    elif app == "logreg":
+        _run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        agg = aggregate_logreg_results(
+            worker_results,
+            allreduce_result=allreduce_result,
+            results_dir=results_dir,
+            run_id=_run_id,
+            num_workers=num_workers,
+            reg_param=logreg_reg_param,
+            num_features=logreg_features,
+            sync_mode=sync_mode,
+        )
+        gossip_info = {"iterations_done": logreg_iter}
+        _info(f"Total rows       : {agg['total_rows']:,}")
+        _info(f"Weighted accuracy: {agg['avg_accuracy']:.4f}")
+        _info(f"Agg mode         : {agg['agg_mode']}")
+
+    agg_time = time.perf_counter() - t_agg_start
+    reassign_time = None
+
+    if do_reassign and agg is not None and app == "kmeans":
+        _phase("5b", "Re-assignment pass — exact global centroid correction")
+        t_reassign = time.perf_counter()
+        gossip_centres = agg["centres"]
+        k_val = len(gossip_centres)
+        d_val = len(gossip_centres[0])
+        corrected_centres = reassign_pass_root(
+            processes_alive=processes,
+            gossip_centres=gossip_centres,
+            reassign_queue=reassign_queue,
+            num_workers=num_workers,
+            k=k_val,
+            dims=d_val,
+        )
+        reassign_time = time.perf_counter() - t_reassign
+        agg["centres"] = corrected_centres
+        _ok(f"Re-assignment done ({reassign_time:.3f}s)")
+
+    t_wall = load_time + proc_time + agg_time + (reassign_time or 0.0)
+    avg_proc = sum(t["processing_time"] for t in worker_timings) / num_workers
+    avg_init = sum(t["init_time"] for t in worker_timings) / num_workers if prewarm else None
+
+    _print_timing_summary(
+        load_time,
+        avg_proc,
+        agg_time,
+        t_wall,
+        prewarm_init=avg_init,
+        gossip_info=gossip_info,
+        seed_time=seed_time,
+        reassign_time=reassign_time,
+        model_label=model_label,
+    )
+
+    logger.log_run(
+        app=app,
+        num_workers=num_workers,
+        cores=cores,
+        load_time=load_time,
+        proc_time=avg_proc,
+        agg_time=agg_time,
+        total_time=t_wall,
+    )
+
+    if compare:
+        logreg_parity_iter = num_workers * logreg_iter if app == "logreg" else None
+        b_label = "B2 — Standalone cluster" if baseline_master else "B1 — local[N]"
+        _phase(
+            "B",
+            f"Running {app} baseline ({b_label}) for comparison"
+            + (
+                f"  [parity maxIter={logreg_parity_iter} = {num_workers} workers × {logreg_iter} iters]"
+                if logreg_parity_iter is not None
+                else ""
+            ),
+        )
+
+        if app == "wordcount":
+            from mpj_spark.applications.baseline_spark import run_baseline
+            _, baseline_timing = run_baseline(input_file, num_workers, cores_override)
+        elif app == "kmeans":
+            from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
+            _, baseline_timing = run_baseline_kmeans(
+                input_file,
+                num_workers,
+                cores_override,
+                kmeans_k,
+                kmeans_iter,
+                baseline_threads=baseline_threads,
+            )
+        elif app == "logreg":
+            from mpj_spark.applications.baseline_logreg import run_baseline_logreg
+            _, baseline_timing = run_baseline_logreg(
+                input_file,
+                num_workers,
+                cores_override,
+                logreg_iter,
+                logreg_reg_param,
+                logreg_features,
+                baseline_threads=baseline_threads,
+                parity_iter=logreg_parity_iter,
+                baseline_master=baseline_master,
+            )
+
+        multi_timing = {
+            "load_time": load_time,
+            "processing_time": avg_proc,
+            "reassign_time": reassign_time,
+            "total_time": t_wall,
+        }
+        _print_comparison(
+            multi_timing,
+            baseline_timing,
+            num_workers,
+            app,
+            baseline_threads=baseline_threads,
+            parity_iter=logreg_parity_iter,
+            model_label=model_label,
+        )
