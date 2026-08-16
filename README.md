@@ -40,13 +40,14 @@ Existing scalable multi-driver execution frameworks (e.g., MPJ-Spark) are valida
 
 | # | Objective | Maps to |
 |---|---|---|
-| 1a | Adapt and validate the multi-driver Spark execution model from HPC/SLURM to Docker (primary) / Kubernetes (secondary), using NFS shared volume as the functional equivalent of Lustre shared storage | O1 |
-| 1b | Design and implement a per-iteration cross-driver parameter synchronisation mechanism (Allreduce-based or parameter-server-based) enabling iterative ML algorithms to converge on a shared global model state | O1 |
-| 1c | Validate the adapted architecture on iterative ML workloads (K-Means, Logistic Regression) in addition to batch analytics (WordCount) | O1 |
-| 2a | Profile CPU and memory behaviour across heterogeneous ML workloads to build a workload characterisation dataset | O2 |
-| 2b | Develop a lightweight prediction model (LSTM or regression-based) for per-driver resource demand estimation | O2 |
-| 2c | Implement a workload-aware heuristic resource allocation strategy that dynamically assigns CPU cores and memory to each Spark driver | O2 |
-| 2d | Evaluate the full framework against two baselines: (i) single-driver Spark with static allocation, and (ii) multi-driver execution without workload-aware allocation or parameter synchronisation | O2 |
+| *1a* | Adapt and validate the multi-driver Spark execution model from HPC/SLURM to Docker (primary) / Kubernetes (secondary), using NFS shared volume as the functional equivalent of Lustre shared storage | O1 |
+| *1b* | Design and implement a per-iteration cross-driver parameter synchronisation mechanism (Allreduce-based or parameter-server-based) enabling iterative ML algorithms to converge on a shared global model state | O1 |
+| *1c* | Validate the adapted architecture on iterative ML workloads (K-Means, Logistic Regression) in addition to batch analytics (WordCount) | O1 |
+| *2a* | Profile CPU and memory behaviour across heterogeneous ML workloads to build a workload characterisation dataset | O2 |
+| *2b* | Develop a lightweight prediction model (LSTM or regression-based) for per-driver resource demand estimation | O2 |
+| *2c* | Implement a workload-aware heuristic resource allocation strategy that dynamically assigns CPU cores and memory to each Spark driver | O2 |
+| *2d* | Evaluate the full framework against two baselines: (i) single-driver Spark with static allocation, and (ii) multi-driver execution without workload-aware allocation or parameter synchronisation | O2 |
+
 This prototype implements and benchmarks the **multi-driver Spark architecture** described in the state-of-the-art reference paper (Saleh et al., 2025). Each MPJ Worker owns an independent `SparkSession` and processes its data partition in parallel. A Root Process orchestrates the full pipeline — partition, launch, synchronise (Allreduce), collect, aggregate — mirroring how MPJ-Express coordinates processes across HPC cluster nodes.
 
 **Phase 2 extends the architecture from batch analytics (WordCount) to iterative ML workloads** — K-Means clustering and binary Logistic Regression — with per-iteration cross-driver parameter synchronisation via a simulated Queue-based Allreduce.
