@@ -13,14 +13,22 @@
 # B1/B2 are invoked when compare=True (inside run_root phase B).
 # M3 is dispatched directly from main.py via _run_mpi_logreg().
 # ================================================================
+from __future__ import annotations
+
 import math
 import os
+import threading
 import time
-from datetime import UTC
-from multiprocessing import Event, Process, Queue
+from datetime import UTC, datetime
+from multiprocessing import Process, Queue
 
 from mpj_spark.core.file_manager import MPJSparkFileManager
-from mpj_spark.core.key_value import KeyValueStructure
+from mpj_spark.core.sync_modes import (
+    MODE_NONE,
+    MODE_PS_SYNC_FEDAVG_MPI,
+    MODE_PS_SYNC_FEDAVG_QUEUE,
+    normalize_sync_mode,
+)
 from mpj_spark.utils.dev_logger import DevLogger
 from mpj_spark.workers.worker_process import worker_process
 
@@ -56,11 +64,10 @@ def _seeding_worker(result_q, input_file, k, total_cores, sample_fraction, seed)
         from pyspark.sql import SparkSession
 
         spark = (
-            SparkSession.builder.appName("MPJ-Root-Seeding")
-            .master(f"local[{min(total_cores, 8)}]")
+            SparkSession.builder.appName("MPJ-Global-Seeding")
+            .master(f"local[{total_cores}]")
             .config("spark.ui.enabled", "false")
-            .config("spark.sql.shuffle.partitions", "8")
-            .config("spark.driver.memory", "2g")
+            .config("spark.sql.shuffle.partitions", str(total_cores * 2))
             .getOrCreate()
         )
         spark.sparkContext.setLogLevel("ERROR")
@@ -74,7 +81,7 @@ def _seeding_worker(result_q, input_file, k, total_cores, sample_fraction, seed)
         model = KMeans(
             k=k, maxIter=20, seed=seed, featuresCol="features", initMode="k-means||"
         ).fit(df_vec)
-        centres = [c.tolist() for c in model.clusterCenters()]
+        centres = [c.tolist() for c in model.clusterCenters]
         spark.stop()
         result_q.put({"status": "ok", "centres": centres})
     except Exception as exc:
@@ -91,7 +98,6 @@ def compute_global_seed_centres(input_file, k, total_cores, sample_fraction=0.05
     p = Process(
         target=_seeding_worker,
         args=(result_q, input_file, k, total_cores, sample_fraction, seed),
-        daemon=False,
     )
     p.start()
     p.join()
@@ -115,19 +121,9 @@ def compute_global_seed_centres(input_file, k, total_cores, sample_fraction=0.05
 
 
 def dynamic_partition(input_path, num_partitions, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    manager = MPJSparkFileManager(shared_storage_path=output_dir)
-    raw = manager.dynamic_partition(input_path, num_partitions)
-    paths = []
-    for item in raw:
-        if isinstance(item, dict):
-            p = item.get("path") or item.get("file_path") or item.get("partition_path")
-            if p is None:
-                p = list(item.values())[0]
-            paths.append(str(p))
-        else:
-            paths.append(str(item))
-    return paths
+    fm = MPJSparkFileManager(output_dir)
+    res = fm.dynamic_partition(input_path, num_partitions)
+    return [p["partition_path"] if isinstance(p, dict) else p for p in res]
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -139,11 +135,10 @@ def align_centres_hungarian(reference, candidate):
     import numpy as np
     from scipy.optimize import linear_sum_assignment
 
-    ref = np.array(reference)
-    cand = np.array(candidate)
-    diff = ref[:, np.newaxis, :] - cand[np.newaxis, :, :]
-    cost = np.linalg.norm(diff, axis=2)
-    _, col_ind = linear_sum_assignment(cost)
+    cost_matrix = np.array(
+        [[np.linalg.norm(np.array(r) - np.array(c)) for c in candidate] for r in reference]
+    )
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
     return [candidate[i] for i in col_ind.tolist()], col_ind.tolist()
 
 
@@ -158,7 +153,7 @@ def aggregate_kmeans_results(worker_results):
     import numpy as np
 
     total_rows = sum(r["row_count"] for r in worker_results)
-    k = worker_results[0]["k"]
+    k = len(worker_results[0]["centres"])
     num_dims = len(worker_results[0]["centres"][0])
     reference_centres = worker_results[0]["centres"]
     aligned_results = [worker_results[0]]
@@ -176,11 +171,10 @@ def aggregate_kmeans_results(worker_results):
     print("\n  K-Means aggregation complete")
     _info(f"Total rows : {total_rows:,}")
     _info(f"Total WCSS : {total_wcss:.4f}")
-    _info(f"Workers    : {len(worker_results)}")
     print("  Global centres:")
     for i, c in enumerate(merged):
         preview = ", ".join(f"{v:.3f}" for v in c[:4])
-        _info(f'  C{i}: [{preview}{"..." if len(c) > 4 else ""}]')
+        _info(f"  C{i}: [{preview}{'...' if len(c) > 4 else ''}]")
     return {
         "centres": merged,
         "total_wcss": total_wcss,
@@ -201,9 +195,7 @@ def run_logreg_allreduce(up_queue, down_queue, num_workers, num_iterations, num_
     """
     import numpy as np
 
-    print(
-        f"  [LogReg Allreduce] Starting — " f"{num_workers} workers × {num_iterations} iterations"
-    )
+    print(f"  [LogReg Allreduce] Starting — {num_workers} workers × {num_iterations} iterations")
     final_weights = None
     final_intercept = 0.0
     for iteration in range(num_iterations):
@@ -250,7 +242,13 @@ def run_logreg_allreduce(up_queue, down_queue, num_workers, num_iterations, num_
 
 
 def _write_merged_iter_metrics(
-    worker_results, results_dir, run_id, num_workers, reg_param, num_features
+    worker_results,
+    results_dir,
+    run_id,
+    num_workers,
+    reg_param,
+    num_features,
+    sync_mode=MODE_PS_SYNC_FEDAVG_MPI,
 ):
     import csv as _csv
 
@@ -260,6 +258,7 @@ def _write_merged_iter_metrics(
     fieldnames = [
         "run_id",
         "num_workers",
+        "sync_mode",
         "reg_param",
         "num_features",
         "worker_id",
@@ -272,7 +271,7 @@ def _write_merged_iter_metrics(
         "row_count",
     ]
     rows_written = 0
-    with open(out_path, "a", newline="") as f:
+    with open(out_path, "a", newline="", encoding="utf-8") as f:
         writer = _csv.DictWriter(f, fieldnames=fieldnames)
         if not file_exists:
             writer.writeheader()
@@ -281,11 +280,14 @@ def _write_merged_iter_metrics(
                 row = {
                     "run_id": run_id,
                     "num_workers": num_workers,
+                    "sync_mode": rec.get("sync_mode", sync_mode),
                     "reg_param": reg_param,
                     "num_features": num_features,
                     "local_weight_norm": rec.get("local_weight_norm", rec.get("weight_norm", "")),
                 }
-                row.update({k: v for k, v in rec.items() if k != "local_weight_norm"})
+                row.update(
+                    {k: v for k, v in rec.items() if k not in ("local_weight_norm", "sync_mode")}
+                )
                 writer.writerow(row)
                 rows_written += 1
     return out_path, rows_written
@@ -299,31 +301,31 @@ def aggregate_logreg_results(
     num_workers=None,
     reg_param=None,
     num_features=None,
-    sync_mode="queue",
+    sync_mode=MODE_PS_SYNC_FEDAVG_QUEUE,
 ):
     """
     Aggregate LogReg worker results.
 
-    M2 (sync_mode='queue'):  allreduce_result holds the FedAvg-averaged
-      global model from the coordinator.  That model IS the final model.
-
-    M1 (sync_mode='none'):   allreduce_result is None.  The final global
-      model is computed here as a row-weighted average of all workers'
-      independently trained models (post-hoc FedAvg).
+    M2 (sync_mode='queue' or 'ps_sync_fedavg_queue'): allreduce_result holds FedAvg model.
+    P3-08 (sync_mode='ps_sync_fedavg_mpi'): workers already aggregated via MPI gather/bcast.
+    M1 (sync_mode='none'): post-hoc row-weighted average of worker models.
     """
-    from datetime import datetime
-
     import numpy as np
 
+    sync_mode = normalize_sync_mode(sync_mode)
+
     total_rows = sum(r["row_count"] for r in worker_results)
-    avg_accuracy = sum(r["train_accuracy"] * r["row_count"] / total_rows for r in worker_results)
+    avg_accuracy = sum(r["train_accuracy"] * (r["row_count"] / total_rows) for r in worker_results)
 
     if allreduce_result is not None:
         final_weights = allreduce_result["weight_vector"]
         final_intercept = allreduce_result["intercept"]
         agg_mode = "Allreduce — FedAvg per-iteration (M2)"
+    elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI:
+        final_weights = worker_results[0]["weight_vector"]
+        final_intercept = worker_results[0].get("intercept", 0.0)
+        agg_mode = "Native MPI Collectives FedAvg (P3-08)"
     else:
-        # M1: post-hoc row-weighted average of independently trained models
         num_feat = len(worker_results[0]["weight_vector"])
         avg_w = np.zeros(num_feat)
         avg_intercept = 0.0
@@ -337,31 +339,28 @@ def aggregate_logreg_results(
 
     weight_norm = float(sum(w**2 for w in final_weights) ** 0.5)
 
-    print(f"\n  LogReg aggregation complete  [{agg_mode}]")
+    print("\n  Logistic Regression aggregation complete")
     _info(f"Total rows       : {total_rows:,}")
     _info(f"Weighted accuracy: {avg_accuracy:.4f}")
     _info(f"Final |w|        : {weight_norm:.4f}")
     _info(f"Final intercept  : {final_intercept:.4f}")
     w_preview = ", ".join(f"{v:.4f}" for v in final_weights[:5])
-    _info(f'Weight preview   : [{w_preview}{"..." if len(final_weights) > 5 else ""}]')
+    _info(f"Weight preview   : [{w_preview}{'...' if len(final_weights) > 5 else ''}]")
 
     _run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     _nw = num_workers or len(worker_results)
     _rp = reg_param or 0.0
-    _nf = num_features or (len(final_weights) if final_weights else 0)
-
-    try:
-        csv_path, rows_written = _write_merged_iter_metrics(
-            worker_results=worker_results,
-            results_dir=results_dir,
-            run_id=_run_id,
-            num_workers=_nw,
-            reg_param=_rp,
-            num_features=_nf,
-        )
-        _info(f"Iter metrics CSV : {csv_path}  ({rows_written} rows appended)")
-    except Exception as exc:
-        print(f"  [WARN] Could not write iter metrics CSV: {exc}")
+    _nf = num_features or len(final_weights)
+    csv_path, n_written = _write_merged_iter_metrics(
+        worker_results,
+        results_dir,
+        _run_id,
+        _nw,
+        _rp,
+        _nf,
+        sync_mode=sync_mode,
+    )
+    _info(f"Iter metrics CSV : {csv_path} ({n_written} rows appended)")
 
     return {
         "weight_vector": final_weights,
@@ -420,13 +419,8 @@ def reassign_pass_root(processes_alive, gossip_centres, reassign_queue, num_work
     print(f"  [Reassign] Recomputed {k} exact global centroids from {total_rows:,} rows")
     for i, c in enumerate(corrected):
         preview = ", ".join(f"{v:.3f}" for v in c[:4])
-        print(f"  [Reassign] C{i}: [{preview}...]")
+        _info(f"  C{i}: [{preview}{'...' if dims > 4 else ''}]")
     return corrected
-
-
-# ──────────────────────────────────────────────────────────────────
-# Output helpers
-# ──────────────────────────────────────────────────────────────────
 
 
 def _print_comparison(
@@ -449,7 +443,7 @@ def _print_comparison(
     bmode = baseline_timing.get("mode", "local[N]")
 
     print(f"\n{SEP}")
-    print(f"  Multi-Driver vs Baseline  |  app={app}  |  " f"workers={num_workers}{note}")
+    print(f"  Multi-Driver vs Baseline  |  app={app}  |  workers={num_workers}{note}")
     print(f"  Baseline mode: {bmode}")
     print(SEP)
     print(f"  {'Metric':<28} {'Multi-Driver':>13} {'Baseline':>13} {'Speedup':>9}")
@@ -465,10 +459,10 @@ def _print_comparison(
     for key, label in rows:
         if key == "_reassign":
             m = reassign_val
-            print(f"  {label:<28} {m:>12.4f}s {'N/A':>13} {'—':>9}")
-            continue
-        m = multi_timing[key]
-        b = baseline_timing.get(key, 0.0)
+            b = 0.0
+        else:
+            m = multi_timing.get(key, 0.0)
+            b = baseline_timing.get(key, 0.0)
         sp = b / m if m > 0 else 0.0
         flag = "  ⚡" if sp >= 1.5 else ("  ⚠" if sp < 1.0 else "")
         print(f"  {label:<28} {m:>12.4f}s {b:>12.4f}s {sp:>8.2f}x{flag}")
@@ -492,27 +486,21 @@ def _print_timing_summary(
     print(DASH)
     if seed_time is not None:
         print(f"  {'Global Seed Sampling':<28} {seed_time:>8.4f} s")
-    print(f"  {'Partition / Load':<28} {load_time:>8.4f} s")
-    print(f"  {'Avg Worker Proc':<28} {avg_proc:>8.4f} s")
-    print(f"  {'Gossip / Allreduce Agg':<28} {agg_time:>8.4f} s")
+    print(f"  {'Partition Load Time':<28} {load_time:>8.4f} s")
+    if prewarm_init is not None:
+        print(f"  {'Pre-warm JVM Init (avg)':<28} {prewarm_init:>8.4f} s")
+    print(f"  {'Processing Time (avg fit)':<28} {avg_proc:>8.4f} s")
     if reassign_time is not None:
         print(f"  {'Re-assignment Pass':<28} {reassign_time:>8.4f} s")
-    if prewarm_init is not None:
-        print(f"  {'Avg Worker JVM Init (excl.)':<28} {prewarm_init:>8.4f} s")
+    print(f"  {'Aggregation Time':<28} {agg_time:>8.4f} s")
     if gossip_info:
-        rounds = gossip_info.get("rounds_run") or gossip_info.get("iterations_done", "—")
-        converged = gossip_info.get("converged", "—")
-        print(f"  {'Allreduce Rounds / Iters':<28} {str(rounds):>8}")
-        if converged != "—":
-            print(f"  {'Converged':<28} {str(converged):>8}")
-    print(f"  {'-' * 40}")
-    print(f"  {'Total Wall-clock':<28} {t_wall:>8.4f} s")
+        if "rounds_run" in gossip_info:
+            print(f"  {'Gossip Rounds':<28} {gossip_info['rounds_run']:>8d}")
+            print(f"  {'Gossip Converged':<28} {str(gossip_info['converged']):>8}")
+        elif "iterations_done" in gossip_info:
+            print(f"  {'Allreduce Rounds':<28} {gossip_info['iterations_done']:>8d}")
+    print(f"  {'Total Wall-clock Time':<28} {t_wall:>8.4f} s")
     print(DASH)
-
-
-# ──────────────────────────────────────────────────────────────────
-# Main entry point
-# ──────────────────────────────────────────────────────────────────
 
 
 def run_root(
@@ -536,21 +524,9 @@ def run_root(
     logreg_reg_param=0.01,
     logreg_features=10,
     results_dir="results",
-    sync_mode="queue",  # 'queue' = M2 (FedAvg), 'none' = M1 (no sync)
+    sync_mode=MODE_PS_SYNC_FEDAVG_QUEUE,
     **_extra_kwargs,
 ):
-    """
-    Unified multi-driver root coordinator.
-
-    sync_mode
-    ---------
-    'queue'  →  M2: per-iteration FedAvg via Python multiprocessing.Queue
-    'none'   →  M1: workers train independently; post-hoc merge at root
-
-    B1/B2 baselines are run when compare=True (Phase B below).
-    M3 (MPI Allreduce) is dispatched directly from main.py and never
-    enters this function.
-    """
     from mpj_spark.config import DATA_DIR, TOTAL_CORES
 
     logger = DevLogger(worker_id="root")
@@ -559,59 +535,53 @@ def run_root(
         ignored = ", ".join(_extra_kwargs.keys())
         print(f"  [run_root] Extra kwargs ignored: {ignored}")
 
-    # ── Derived flags ──────────────────────────────────────────────
+    sync_mode = normalize_sync_mode(sync_mode)
+
     do_seed = use_global_seed and use_gossip and app == "kmeans"
     do_reassign = use_reassign and use_gossip and app == "kmeans"
-    do_logreg_allreduce = app == "logreg" and sync_mode == "queue"
-    # M1: logreg with no queue infrastructure at all
-    do_logreg_nosync = app == "logreg" and sync_mode == "none"
+    do_logreg_allreduce = app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
+    do_logreg_nosync = app == "logreg" and sync_mode == MODE_NONE
 
-    # ── Model label for display ────────────────────────────────────
     if app == "logreg":
-        if sync_mode == "none":
+        if sync_mode == MODE_NONE:
             model_label = "M1 — Multi-driver, NO sync"
+        elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI:
+            model_label = "P3-08 — Multi-driver, Native MPI FedAvg"
         else:
             model_label = "M2 — Multi-driver, Queue/FedAvg"
     else:
         model_label = None
 
     agg_mode = (
-        f"Adaptive Gossip  (threshold={gossip_threshold}, "
-        f"max_rounds={gossip_max_rounds}, fanout={gossip_fanout})"
+        f"Adaptive Gossip (threshold={gossip_threshold}, max_rounds={gossip_max_rounds})"
         if (use_gossip and app == "kmeans")
         else "Batch Hungarian"
         if app == "kmeans"
-        else f"Queue FedAvg, {logreg_iter} iters  [M2]"
+        else f"Queue FedAvg, {logreg_iter} iters [M2]"
         if do_logreg_allreduce
-        else "Post-hoc row-weighted average  [M1]"
+        else "Post-hoc row-weighted average [M1]"
         if do_logreg_nosync
         else "N/A"
     )
 
     if app == "logreg":
         title_extra = (
-            f"  iter={logreg_iter}  reg_param={logreg_reg_param}  "
-            f"features={logreg_features}\n"
+            f"  iter={logreg_iter}  reg_param={logreg_reg_param}  features={logreg_features}\n"
             f"  Aggregation : {agg_mode}"
         )
     elif app == "kmeans":
         correctness_flags = ""
         if use_gossip:
             correctness_flags = (
-                f'  Global Seed     : {"ON" if do_seed else "OFF"}\n'
-                f'  Re-assign Pass  : {"ON" if do_reassign else "OFF"}'
+                f"  Global Seed     : {'ON' if do_seed else 'OFF'}\n"
+                f"  Re-assign Pass  : {'ON' if do_reassign else 'OFF'}"
             )
-        title_extra = (
-            f"  k={kmeans_k}  max_iter={kmeans_iter}\n"
-            f"  Aggregation : {agg_mode}\n"
-            f"{correctness_flags}"
-        )
+        title_extra = f"  k={kmeans_k}  max_iter={kmeans_iter}\n  Aggregation : {agg_mode}\n{correctness_flags}"
     else:
         title_extra = ""
 
     num_workers = resolve_worker_count(num_workers)
-
-    _hdr(f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n" f"{title_extra}")
+    _hdr(f"MPJ-Spark Multi-Driver  |  app={app}  |  workers={num_workers}\n{title_extra}")
 
     cores = (
         max(1, cores_override)
@@ -622,7 +592,6 @@ def run_root(
     if model_label:
         print(f"  Benchmark   : {model_label}")
 
-    # ── K-Means global seed centroids ─────────────────────────────
     seed_centres = None
     seed_time = None
     if do_seed:
@@ -636,9 +605,8 @@ def run_root(
             seed=42,
         )
         seed_time = time.perf_counter() - t_seed
-        _ok(f"Global seed centroids ready  ({seed_time:.3f}s)")
+        _ok(f"Global seed centroids ready ({seed_time:.3f}s)")
 
-    # ── Worker config dict ─────────────────────────────────────────
     worker_cfg = {
         "app": app,
         "cores_override": cores,
@@ -650,28 +618,26 @@ def run_root(
         "logreg_reg_param": logreg_reg_param,
         "logreg_features": logreg_features,
         "results_dir": results_dir,
-        "sync_mode": sync_mode,  # ← M1 vs M2 dispatch key
+        "sync_mode": sync_mode,
     }
 
-    # ── Phase 1: Partition ─────────────────────────────────────────
-    _phase(1, "Partitioning")
+    _phase(1, "Partitioning dataset")
     t_load_start = time.perf_counter()
     partition_paths = dynamic_partition(input_file, num_workers, DATA_DIR)
     load_time = time.perf_counter() - t_load_start
-    _ok(f"Split into {num_workers} partitions  ({load_time:.3f}s)")
+    _ok(f"Split into {num_workers} partitions ({load_time:.3f}s)")
 
-    # ── Phase 2: Launch workers ────────────────────────────────────
-    _phase(2, f"Launching {num_workers} workers")
+    _phase(2, f"Spawning {num_workers} worker processes")
+    processes = []
     result_queue = Queue()
     timing_queue = Queue()
-    go_signals = [Event() for _ in range(num_workers)]
+    from multiprocessing import Event
+
     ready_signals = [Event() for _ in range(num_workers)]
-    processes = []
+    go_signals = [Event() for _ in range(num_workers)]
 
     gossip_queue = Queue() if (use_gossip and app == "kmeans") else None
     reassign_queue = Queue() if do_reassign else None
-
-    # M2: create queues; M1 and all others: None (no queue infrastructure)
     allreduce_up_queue = Queue() if do_logreg_allreduce else None
     allreduce_down_queue = Queue() if do_logreg_allreduce else None
 
@@ -686,35 +652,32 @@ def run_root(
                 ready_signals[i],
                 timing_queue,
                 worker_cfg,
-                gossip_queue if app == "kmeans" else allreduce_up_queue,
-                reassign_queue,
             ),
-            kwargs={"allreduce_down_queue": allreduce_down_queue},
-            daemon=True,
+            kwargs={
+                "allreduce_up_queue": gossip_queue or allreduce_up_queue,
+                "reassign_queue": reassign_queue,
+                "allreduce_down_queue": allreduce_down_queue,
+            },
         )
         p.start()
         processes.append(p)
-        _info(f"Worker {i} started  (PID {p.pid})")
+        _info(f"Worker {i} (PID {p.pid}) spawned for {partition_paths[i]}")
 
-    print("  Waiting for JVM barrier ...")
-    for i, sig in enumerate(ready_signals):
+    _phase("3a", "Waiting for JVM-ready signals from all workers")
+    for sig in ready_signals:
         sig.wait()
-        _ok(f"Worker {i} JVM ready")
+    _ok(f"All {num_workers} workers initialized Spark and are ready")
 
-    # ── Phase 3: Fire ──────────────────────────────────────────────
-    _phase(3, "Firing all workers simultaneously")
+    _phase("3b", "Firing all workers simultaneously")
     t_proc_start = time.perf_counter()
     for sig in go_signals:
         sig.set()
 
-    # ── Phase 3b: M2 Allreduce coordinator (background thread) ────
     allreduce_result = None
     allreduce_thread = None
 
     if do_logreg_allreduce:
-        import threading
-
-        _allreduce_container = []
+        _allreduce_store = []
 
         def _allreduce_thread_fn():
             res = run_logreg_allreduce(
@@ -724,49 +687,52 @@ def run_root(
                 num_iterations=logreg_iter,
                 num_features=logreg_features,
             )
-            _allreduce_container.append(res)
+            _allreduce_store.append(res)
 
         allreduce_thread = threading.Thread(target=_allreduce_thread_fn, daemon=True)
         allreduce_thread.start()
         print("  [M2] LogReg FedAvg coordinator started in background thread")
-
     elif do_logreg_nosync:
         print("  [M1] Workers training independently — no sync coordinator")
 
-    # ── Phase 4: Collect ───────────────────────────────────────────
     _phase(4, "Collecting results")
     worker_results = []
     worker_timings = []
     errors = []
+
     for _ in range(num_workers):
-        res = result_queue.get(timeout=600)
-        if res["status"] == "success":
+        res = result_queue.get()
+        timing = timing_queue.get()
+        if res.get("status") == "success":
             worker_results.append(res["result"])
         else:
             errors.append(res)
-            print(f"  ✗  Worker {res['worker_id']} FAILED: {res.get('error')}")
-    for _ in range(num_workers):
-        worker_timings.append(timing_queue.get(timeout=60))
+            print(f"  ✗  Worker {res.get('worker_id')} FAILED: {res.get('error')}")
+        worker_timings.append(timing)
+
+    for p in processes:
+        p.join()
+
     proc_time = time.perf_counter() - t_proc_start
     if errors:
-        for p in processes:
-            p.join(timeout=5)
         print(f"  {len(errors)} worker(s) failed. Aborting.")
         return
+
     _ok(f"All {num_workers} workers completed")
 
     if allreduce_thread is not None:
         allreduce_thread.join(timeout=60)
-        if _allreduce_container:
-            allreduce_result = _allreduce_container[0]
+        if _allreduce_store:
+            allreduce_result = _allreduce_store[0]
 
-    # ── Phase 5: Aggregate ─────────────────────────────────────────
     _phase(5, "Aggregating results")
     t_agg_start = time.perf_counter()
     gossip_info = None
     agg = None
 
     if app == "wordcount":
+        from mpj_spark.core.key_value import KeyValueStructure
+
         kv = KeyValueStructure()
         for r in worker_results:
             kv.merge(KeyValueStructure.from_serializable(r))
@@ -776,8 +742,7 @@ def run_root(
             print(f"    {word:<22} {count:>12,}")
 
     elif app == "kmeans":
-        if use_gossip and gossip_queue is not None:
-            print("  Using Adaptive Gossip aggregation ...")
+        if use_gossip:
             from mpj_spark.core.gossip_aggregator import GossipAggregator
 
             gagg = GossipAggregator(
@@ -800,12 +765,10 @@ def run_root(
         _info(f"Total WCSS : {agg['total_wcss']:.4f}")
 
     elif app == "logreg":
-        from datetime import datetime
-
         _run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         agg = aggregate_logreg_results(
             worker_results,
-            allreduce_result=allreduce_result,  # None for M1, populated for M2
+            allreduce_result=allreduce_result,
             results_dir=results_dir,
             run_id=_run_id,
             num_workers=num_workers,
@@ -837,16 +800,7 @@ def run_root(
         )
         reassign_time = time.perf_counter() - t_reassign
         agg["centres"] = corrected_centres
-        print(f"\n{DASH}")
-        print("  Final Corrected Centres (post re-assignment):")
-        for i, c in enumerate(corrected_centres):
-            preview = ", ".join(f"{v:.3f}" for v in c[:4])
-            _info(f'C{i}: [{preview}{"..." if d_val > 4 else ""}]')
-        print(DASH)
-        _ok(f"Re-assignment done  ({reassign_time:.3f}s)")
-
-    for p in processes:
-        p.join(timeout=30)
+        _ok(f"Re-assignment done ({reassign_time:.3f}s)")
 
     t_wall = load_time + proc_time + agg_time + (reassign_time or 0.0)
     avg_proc = sum(t["processing_time"] for t in worker_timings) / num_workers
@@ -874,7 +828,6 @@ def run_root(
         total_time=t_wall,
     )
 
-    # ── Phase B: Baseline comparison (B1 or B2) ────────────────────
     if compare:
         logreg_parity_iter = num_workers * logreg_iter if app == "logreg" else None
         b_label = "B2 — Standalone cluster" if baseline_master else "B1 — local[N]"
@@ -882,8 +835,7 @@ def run_root(
             "B",
             f"Running {app} baseline ({b_label}) for comparison"
             + (
-                f"  [parity maxIter={logreg_parity_iter} "
-                f"= {num_workers} workers × {logreg_iter} iters]"
+                f"  [parity maxIter={logreg_parity_iter} = {num_workers} workers × {logreg_iter} iters]"
                 if logreg_parity_iter is not None
                 else ""
             ),
@@ -893,7 +845,6 @@ def run_root(
             from mpj_spark.applications.baseline_spark import run_baseline
 
             _, baseline_timing = run_baseline(input_file, num_workers, cores_override)
-
         elif app == "kmeans":
             from mpj_spark.applications.baseline_kmeans import run_baseline_kmeans
 
@@ -905,7 +856,6 @@ def run_root(
                 kmeans_iter,
                 baseline_threads=baseline_threads,
             )
-
         elif app == "logreg":
             from mpj_spark.applications.baseline_logreg import run_baseline_logreg
 
@@ -936,6 +886,3 @@ def run_root(
             parity_iter=logreg_parity_iter,
             model_label=model_label,
         )
-
-
-mpj_root_process = run_root
