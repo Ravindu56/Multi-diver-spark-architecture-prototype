@@ -243,9 +243,9 @@ def run_root_mpi(
     # the go-signal to build the worker-only sub-communicator used by the
     # K-Means / LogReg MPI collectives.  MPI_Comm_split is COLLECTIVE over
     # COMM_WORLD: every rank must call it.  Root joins no worker subgroup
-    # (color=MPI_UNDEFINED -> returns COMM_NULL here).  Without this call
+    # (color=MPI.UNDEFINED -> returns COMM_NULL here).  Without this call
     # workers block forever inside Split right after the go-signal.
-    comm.Split(color=MPI_UNDEFINED, key=rank)
+    comm.Split(color=MPI.UNDEFINED, key=rank)
 
     allreduce_result = None
     allreduce_thread = None
