@@ -2,10 +2,10 @@
 # mpj_spark/workers/worker_process.py
 # ================================================================
 import time
-
 from mpj_spark.core.sync_modes import (
     MODE_NONE,
     MODE_PS_SYNC_FEDAVG_MPI,
+    MODE_PS_SYNC_FEDAVG_QUEUE,
     normalize_sync_mode,
 )
 
@@ -35,19 +35,32 @@ def run_worker_core(
 
     if app == "wordcount":
         from mpj_spark.applications.wordcount import run_wordcount
-
         result = run_wordcount(partition_path, spark)
 
     elif app == "kmeans":
         try:
             from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
-
             use_allreduce = True
         except ImportError:
             use_allreduce = False
             run_kmeans_allreduce = None
 
-        if use_allreduce:
+        if sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
+            from mpj_spark.applications.kmeans.fedavg_mpi_run import run_kmeans_fedavg_mpi
+            result = run_kmeans_fedavg_mpi(
+                comm=comm,
+                rank=worker_id,
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
+                tol=1e-4,
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif use_allreduce:
             result = run_kmeans_allreduce(
                 comm=comm,
                 rank=worker_id,
@@ -92,11 +105,9 @@ def run_worker_core(
 
         if sync_mode == MODE_NONE:
             from mpj_spark.applications.logreg import nosync_run
-
             result = nosync_run.run(**logreg_kwargs)
         elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
             from mpj_spark.applications.logreg import fedavg_mpi_run
-
             result = fedavg_mpi_run.run(
                 partition_path=partition_path,
                 comm=comm,
@@ -109,7 +120,6 @@ def run_worker_core(
             )
         else:
             from mpj_spark.applications.logreg import queue_run
-
             result = queue_run.run(
                 **logreg_kwargs,
                 allreduce_up_queue=up_queue,
