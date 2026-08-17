@@ -189,10 +189,10 @@ class TestModuleContract:
         assert params["sync_mode"].default == "ps_sync_fedavg_mpi"
 
     def test_sync_mode_constant_matches_registry(self):
+        import inspect
+
         from mpj_spark.applications.kmeans.fedavg_mpi_run import run_kmeans_fedavg_mpi
         from mpj_spark.core.sync_modes import MODE_PS_SYNC_FEDAVG_MPI
-
-        import inspect
 
         assert (
             inspect.signature(run_kmeans_fedavg_mpi).parameters["sync_mode"].default
