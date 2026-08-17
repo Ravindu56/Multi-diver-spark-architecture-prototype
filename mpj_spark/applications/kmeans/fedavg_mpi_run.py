@@ -7,8 +7,10 @@
 # ----------
 # fix(p3-08): compute_local_stats() returns a tuple, not a dict.
 #   _unpack_stats() handles both (sums, counts[, wcss]) tuples and
-#   dict shapes defensively.  centroid_shift (Frobenius) and global
-#   WCSS are now computed per round instead of stubbed 0.0 values.
+#   dict shapes defensively.
+# fix(p3-08): KMeansMetricsCollector.record_run() has no 'tol' kwarg —
+#   dropped.  WCSS is computed via _local_wcss() whenever the stats
+#   tuple carries no WCSS element (was reporting 0.0 every round).
 # ================================================================
 from __future__ import annotations
 
@@ -130,6 +132,10 @@ def run_kmeans_fedavg_mpi(
                 # empty cluster: retain previous position
         spark_time_s = time.perf_counter() - t_spark
 
+        # compute_local_stats() tuples carry no WCSS — compute it directly
+        if local_wcss <= 0.0:
+            local_wcss = _local_wcss(points_rdd, centroids)
+
         centroid_shift = float(np.linalg.norm(centroids - prev_centroids))
 
         # ── MPI collective sync: gather → align → FedAvg → bcast ──────
@@ -198,7 +204,6 @@ def run_kmeans_fedavg_mpi(
         dataset_size=row_count,
         num_ranks=size,
         k=k,
-        tol=tol,
     )
     collector.to_csv()
     collector.to_json()
