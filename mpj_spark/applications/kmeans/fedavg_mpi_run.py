@@ -11,13 +11,16 @@
 # fix(p3-08): KMeansMetricsCollector.record_run() has no 'tol' kwarg —
 #   dropped.  WCSS is computed via _local_wcss() whenever the stats
 #   tuple carries no WCSS element (was reporting 0.0 every round).
+# fix(p3-08): mpi4py import moved inside run_kmeans_fedavg_mpi() so
+#   this module stays importable on CI runners that have the mpi4py
+#   wheel but no system OpenMPI (libmpi.so).  Unit tests import this
+#   module; only the MPI runtime path needs the real library.
 # ================================================================
 from __future__ import annotations
 
 import time
 
 import numpy as np
-from mpi4py import MPI
 
 from mpj_spark.applications.kmeans.local_iteration import (
     compute_local_stats,
@@ -82,6 +85,7 @@ def run_kmeans_fedavg_mpi(
 
     Convergence: stop early when Frobenius centroid shift < tol.
     """
+    from mpi4py import MPI  # lazy: module must import without libmpi (CI)
     from pyspark.sql import SparkSession
 
     spark = SparkSession.getActiveSession()
