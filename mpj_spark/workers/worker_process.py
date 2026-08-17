@@ -28,7 +28,7 @@ def run_worker_core(
     num_workers = worker_config.get("num_workers", 1)
     results_dir = worker_config.get("results_dir", "results")
     sync_mode = normalize_sync_mode(worker_config.get("sync_mode", MODE_PS_SYNC_FEDAVG_MPI))
-    sync_mode = normalize_sync_mode(worker_config.get("sync_mode", MODE_PS_SYNC_FEDAVG_MPI))
+    
 
     t_load_start = time.perf_counter()
     load_time = time.perf_counter() - t_load_start
@@ -104,7 +104,7 @@ def run_worker_core(
             results_dir=results_dir,
         )
 
-        if sync_mode == MODE_NONE:
+
         if sync_mode == MODE_NONE:
             from mpj_spark.applications.logreg import nosync_run
             result = nosync_run.run(**logreg_kwargs)
