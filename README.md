@@ -1,8 +1,8 @@
 # MPJ-SPARK Multi-Driver Architecture Prototype
 
-> **BScEng Research Prototype — University of Jaffna, EC6070**  
-> **v0.2.0 — Phase 2: Iterative ML Workloads with Simulated Allreduce**  
-> Implements a cloud-native multi-driver Spark architecture on a single machine using Python `multiprocessing` + PySpark, validating the MPJ-Spark execution model for iterative ML workloads.
+> **BScEng Research Prototype — University of Jaffna, EC6070**
+> **Phase 3 — Real MPI Layer + Native MPI FedAvg (P3-08)**
+> Implements a cloud-native multi-driver Spark architecture using `mpi4py` + OpenMPI + PySpark, validating the MPJ-Spark execution model for iterative ML workloads with pluggable cross-driver synchronization policies.
 
 ---
 
@@ -47,11 +47,12 @@ Existing scalable multi-driver execution frameworks (e.g., MPJ-Spark) are valida
 | 2b | Develop a lightweight prediction model (LSTM or regression-based) for per-driver resource demand estimation | O2 |
 | 2c | Implement a workload-aware heuristic resource allocation strategy that dynamically assigns CPU cores and memory to each Spark driver | O2 |
 | 2d | Evaluate the full framework against two baselines: (i) single-driver Spark with static allocation, and (ii) multi-driver execution without workload-aware allocation or parameter synchronisation | O2 |
+
 This prototype implements and benchmarks the **multi-driver Spark architecture** described in the state-of-the-art reference paper (Saleh et al., 2025). Each MPJ Worker owns an independent `SparkSession` and processes its data partition in parallel. A Root Process orchestrates the full pipeline — partition, launch, synchronise (Allreduce), collect, aggregate — mirroring how MPJ-Express coordinates processes across HPC cluster nodes.
 
 **Phase 2 extends the architecture from batch analytics (WordCount) to iterative ML workloads** — K-Means clustering and binary Logistic Regression — with per-iteration cross-driver parameter synchronisation via a simulated Queue-based Allreduce.
 
-> **State-of-the-Art Reference:**  
+> **State-of-the-Art Reference:**
 > Saleh et al. (2025). *MPJ-SPARK Integration-Based Technique to Enhance Big Data Analytics in High Performance Computing Environments.* IEEE Access. DOI: [10.1109/ACCESS.2025.3584744](https://doi.org/10.1109/ACCESS.2025.3584744)
 
 ---
@@ -61,7 +62,7 @@ This prototype implements and benchmarks the **multi-driver Spark architecture**
 | Objective | Status |
 |---|---|
 | **1a** — Adapt multi-driver Spark from HPC/SLURM to containerised cloud (Phase 4) | 🔜 Phase 4 |
-| **1b** — Per-iteration cross-driver parameter synchronisation (Allreduce-based) | ✅ Phase 2 — Queue-simulated FedAvg |
+| **1b** — Per-iteration cross-driver parameter synchronisation (Allreduce-based) | ✅ Phase 2 — Queue-simulated FedAvg · Phase 3 — native MPI Allreduce + FedAvg (P3-08) |
 | **1c** — Validate on iterative ML workloads (k-means, logistic regression) | ✅ Phase 2 |
 | **2a** — Profile CPU/memory across heterogeneous ML workloads | ✅ `results/logreg_iter_metrics.csv` |
 | **2b** — Prediction model for per-driver resource demand | 🔜 Phase 6 |
@@ -94,6 +95,8 @@ This prototype implements and benchmarks the **multi-driver Spark architecture**
   │           Workers send local model → root (TAG_ALLREDUCE_UP)
   │           Root computes FedAvg weighted mean
   │           Root broadcasts global model back (TAG_ALLREDUCE_DOWN)
+  │           ── P3-08: native collective FedAvg (comm.gather / comm.bcast)
+  │              over the worker sub-communicator (sync_mode=ps_sync_fedavg_mpi)
   │           ── Gossip variant: adaptive peer-to-peer convergence
   │           ── (TAG_REASSIGN_BCAST / TAG_REASSIGN_STATS)
   │
@@ -121,6 +124,7 @@ mpj_spark/
 │   ├── file_manager.py       # MPJSparkFileManager — O(1) RAM streaming partition
 │   ├── gossip_aggregator.py  # Adaptive gossip Allreduce for K-Means centroid sync
 │   ├── key_value.py          # KeyValueStructure   (RDD ↔ MPJ buffer)
+│   ├── sync_modes.py         # P3-08: central sync-mode registry (none / queue / mpi / allreduce)
 │   ├── main_mpi.py           # Phase-3 MPI entry point — rank-dispatch shim
 │   ├── root_mpi.py           # MPI root coordinator (rank 0) — replaces root_process
 │   └── root_process.py       # Multiprocessing root coordinator (Phase 1–2)
@@ -132,12 +136,16 @@ mpj_spark/
 │   ├── wordcount.py          # WordCount RDD pipeline
 │   ├── kmeans/
 │   │   ├── allreduce.py      # K-Means MPI Allreduce (Phase 3)
+│   │   ├── fedavg_mpi_run.py # P3-08: K-Means periodic FedAvg over native MPI collectives
+│   │   ├── driver.py         # Parity facade (dual-signature MPI/local)
 │   │   ├── partition.py      # K-Means data partition + centroid init
 │   │   └── metrics.py        # K-Means metrics collector
 │   ├── logreg/
-│   │   ├── allreduce.py      # LogReg MPI Allreduce — FedAvg (Phase 3)
+│   │   ├── allreduce.py      # LogReg MPI Allreduce — per-iteration SGD (Phase 3)
+│   │   ├── fedavg_mpi_run.py # P3-08: LogReg periodic FedAvg over native MPI collectives
 │   │   ├── queue_run.py      # LogReg Queue-based worker (Phase 2 — deprecated)
 │   │   ├── nosync_run.py     # LogReg no-sync worker — M1 benchmark condition
+│   │   ├── driver.py         # Parity facade (dual-signature MPI/local)
 │   │   ├── partition.py      # LogReg data partition
 │   │   └── metrics.py        # LogReg metrics collector
 │   ├── baseline_kmeans.py    # Single-driver K-Means baseline
@@ -182,7 +190,10 @@ tests/
 │   ├── test_spark_session.py                # SparkSession factory — core allocation
 │   ├── test_key_value.py                    # KeyValueStructure serialisation
 │   ├── test_gossip_aggregator.py            # Gossip Allreduce correctness
-│   └── test_baseline_applications.py       # Baseline K-Means + LogReg return shapes
+│   ├── test_baseline_applications.py        # Baseline K-Means + LogReg return shapes
+│   ├── test_sync_modes.py                   # P3-08 sync-mode registry
+│   ├── test_fedavg_mpi_run.py               # P3-08 LogReg FedAvg MPI helpers + mock collectives
+│   └── test_kmeans_fedavg_mpi_run.py        # P3-08 K-Means FedAvg MPI helpers + mock collectives
 ├── phase3/
 │   ├── test_kmeans_allreduce.py             # K-Means MPI Allreduce — guarded @NEEDS_MPI
 │   ├── test_kmeans_convergence.py           # K-Means convergence over iterations
@@ -233,7 +244,7 @@ mpirun --version           # e.g. Open MPI 4.1.x
 python -c "from mpi4py import MPI; print('MPI OK, version:', MPI.Get_version())"
 ```
 
-> **Note — Phase 2 Queue simulation is deprecated.** `mpj_spark/applications/logreg/queue_run.py` remains in the codebase as the M2 benchmark condition (Queue FedAvg) for comparative evaluation (Objective 2d), but it is no longer the primary execution path. Phase 3 `mpi4py` + OpenMPI Allreduce (`allreduce.py`) is the current production execution model.
+> **Note — Phase 2 Queue simulation is deprecated.** `mpj_spark/applications/logreg/queue_run.py` remains in the codebase as the M2 benchmark condition (Queue FedAvg) for comparative evaluation (Objective 2d), but it is no longer the primary execution path. Phase 3 `mpi4py` + OpenMPI is the current production execution model, with two selectable synchronisation policies: per-iteration Allreduce (`allreduce.py`) and periodic FedAvg over native MPI collectives (`fedavg_mpi_run.py`, P3-08).
 
 ---
 
@@ -243,10 +254,12 @@ python -c "from mpi4py import MPI; print('MPI OK, version:', MPI.Get_version())"
 |---|---|---|
 | **Phase 1** | Single-machine prototype — Python `multiprocessing` + PySpark, WordCount | ✅ Complete |
 | **Phase 2** | Iterative ML workloads (K-Means, LogReg) + simulated per-iteration Allreduce via `Queue` | ✅ Complete |
-| **Phase 3** | Real MPI layer — `mpi4py` + OpenMPI replacing `Queue` simulation; MPI root + worker refactor; K-Means + LogReg Allreduce validated | ✅ Complete |
+| **Phase 3** | Real MPI layer — `mpi4py` + OpenMPI replacing `Queue` simulation; MPI root + worker refactor; K-Means + LogReg Allreduce validated; FedAvg over native MPI collectives (P3-08) | ✅ Complete |
 | **Phase 4** | Docker containerisation — one container per MPI rank, NFS shared volume, multi-node Docker Swarm | 🔧 In progress |
 | **Phase 5** | Multi-node Docker Swarm cluster validation at scale; full comparative evaluation | 📋 Planned |
 | **Phase 6** | ML-aware resource allocator integrated; LSTM/regression demand prediction; full O1+O2 evaluation | 📋 Planned |
+
+```
   ├─ Phase 1 : dynamic_partition()      — O(1) RAM stream-split → N partition files
   │
   ├─ Phase 1b: global seed centroids    — isolated subprocess, 5% sample (k-means only)
@@ -341,6 +354,30 @@ mpirun -n 5 python -m mpj_spark.applications.logreg.allreduce
 mpirun -n 5 python -m mpj_spark.applications.logreg.allreduce \
   --epochs 50
 ```
+
+**Periodic FedAvg over native MPI collectives (P3-08) — LogReg and K-Means:**
+
+```bash
+# LogReg — native MPI FedAvg (default sync mode on main_mpi.py)
+mpirun --oversubscribe -np 3 python -m mpj_spark.core.main_mpi \
+  --app logreg --sync-mode ps_sync_fedavg_mpi \
+  --input ./shared_storage/logreg_data.csv \
+  --logreg-iter 10 --logreg-features 10
+
+# K-Means — native MPI FedAvg with Hungarian label alignment
+mpirun --oversubscribe -np 3 python -m mpj_spark.core.main_mpi \
+  --app kmeans --sync-mode ps_sync_fedavg_mpi \
+  --input ./shared_storage/kmeans_data.csv \
+  --kmeans-k 3 --kmeans-iter 10
+
+# Legacy Queue-transport FedAvg fallback (M2 over MPI P2P adapters)
+mpirun --oversubscribe -np 3 python -m mpj_spark.core.main_mpi \
+  --app logreg --sync-mode ps_sync_fedavg_queue \
+  --input ./shared_storage/logreg_data.csv \
+  --logreg-iter 10 --logreg-features 10
+```
+
+> **FedAvg over Native MPI (P3-08, Issue #65).** Phase 3 FedAvg aggregation runs entirely on the real mpi4py transport for both iterative ML workloads — `comm.gather()` of per-worker model state to the aggregator rank and `comm.bcast()` of the row-weighted global model back, once per synchronisation round (every E local epochs). K-Means additionally Hungarian-aligns centroid labels before averaging to prevent cross-cluster blending. No `multiprocessing.Queue` or go-signal simulation is involved when `--sync-mode ps_sync_fedavg_mpi` is selected. Validated 2026-08-16/17 (540 K rows, 10 rounds): identical LogReg convergence across transports (|w| = 0.3228, accuracy = 0.6308 for both `ps_sync_fedavg_mpi` and `ps_sync_fedavg_queue`), native-MPI scaling verified at 2, 3, and 4 workers; K-Means FedAvg converged deterministically (round-1 shift 8.51 → stable 0.0278, global WCSS 77.69 M). Per-iteration metrics are tagged via the `sync_mode` column in `results/logreg_iter_metrics.csv`.
 
 **WordCount — MPI multi-driver, N=5 workers:**
 
@@ -539,6 +576,9 @@ pytest tests/unit/ -v --cov=mpj_spark --cov-report=term-missing
 | `unit/test_key_value.py` | `KeyValueStructure` serialisation | No |
 | `unit/test_gossip_aggregator.py` | Gossip Allreduce centroid convergence | No |
 | `unit/test_baseline_applications.py` | Baseline K-Means + LogReg return shapes, accuracy range | No |
+| `unit/test_sync_modes.py` | P3-08 sync-mode registry — canonical names, aliases, descriptors | No |
+| `unit/test_fedavg_mpi_run.py` | P3-08 LogReg FedAvg MPI helpers + simulated gather/bcast FedAvg math | No |
+| `unit/test_kmeans_fedavg_mpi_run.py` | P3-08 K-Means FedAvg MPI — stats unpacking, WCSS, aligned FedAvg math | No |
 | `phase3/test_kmeans_allreduce.py` | K-Means MPI Allreduce correctness | Yes (skipped in CI) |
 | `phase3/test_kmeans_convergence.py` | K-Means convergence over iterations | No |
 | `phase3/test_kmeans_metrics.py` | K-Means metrics collector | No |
@@ -581,6 +621,7 @@ pytest tests/unit/ -v --cov=mpj_spark --cov-report=term-missing
 | `--input PATH` | `./test_dataset.txt` | Path to input dataset |
 | `--generate N` | `50` | Auto-generate N MB dataset if `--input` not found |
 | `--app NAME` | `wordcount` | Workload: `wordcount` \| `kmeans` \| `logreg` |
+| `--sync-mode MODE` | `ps_sync_fedavg_mpi` | Sync strategy: `ps_sync_fedavg_mpi` (native MPI gather/bcast FedAvg) \| `ps_sync_fedavg_queue` (legacy P2P fallback) \| `allreduce_mpi` (per-iteration collective) \| `none` (M1 no-sync) |
 | `--cores N` | auto | Override `local[N]` core count per worker |
 | `--compare` | off | Run single-driver baseline |
 | `--gossip` | off | Use gossip Allreduce for K-Means centroid sync |
@@ -656,6 +697,25 @@ mpirun --oversubscribe -np 5 python -m mpj_spark.core.main_mpi \
 > Sync overhead benchmark in `results/sync_overhead_benchmark.csv`.
 > Controller feature matrix in `results/timing/controller_feature_matrix.csv` — input for Objective 2b predictor.
 
+### P3-08 — FedAvg Transport Comparison (540 K rows, 10 rounds, reg_param=0.01)
+
+| Run | Workers | Cores/Worker | Wall-Clock | Proc Time | Final \|w\| | Accuracy |
+|---|---|---|---|---|---|---|
+| FedAvg — native MPI (`ps_sync_fedavg_mpi`) | 2 | 11 | 26.05 s | 25.70 s | 0.3228 | 0.6308 |
+| FedAvg — Queue fallback (`ps_sync_fedavg_queue`) | 2 | 11 | 26.41 s | 26.13 s | 0.3228 | 0.6308 |
+| FedAvg — native MPI | 3 | 8 | 32.37 s | 31.75 s | 0.3228 | 0.6308 |
+| FedAvg — native MPI | 4 | 6 | 40.21 s | 39.55 s | 0.3228 | 0.6308 |
+
+> Identical final model across transports (convergence parity); transport overhead within noise at this compute-bound scale. Single-machine wall-clock rises with worker count due to fixed-core subdivision — multi-node scaling is validated in Phase 5.
+
+### P3-08 — K-Means FedAvg over Native MPI (540 K rows, k=3, 10 rounds)
+
+| Workers | Cores/Worker | Wall-Clock | Proc Time (avg) | Round-1 Shift | Stable Shift | Global WCSS |
+|---|---|---|---|---|---|---|
+| 2 | 11 | 123.45 s | 122.64 s | 8.508 | 0.0278 | 77,688,047.92 |
+
+> Round-1 centroid shift drops from 8.51 to a stable 0.0278 — FedAvg rounds converge deterministically across workers; root-side Hungarian aggregation reports the summed WCSS (2 × 38,844,023.96).
+
 ---
 
 ## Branching Strategy
@@ -673,6 +733,7 @@ mpirun --oversubscribe -np 5 python -m mpj_spark.core.main_mpi \
 |---|---|
 | `feature/p3-ml-workload-parity` | Issues #10 #12 #13 #14 — parity + sync benchmark + docs + WordCount regression |
 | `feature/adaptive-gossip-aggregation` | Objective 1b — Gossip Allreduce sync |
+| `feature/p3-fedavg-mpi` | Issue #65 — FedAvg aggregation over native MPI transport |
 
 ---
 

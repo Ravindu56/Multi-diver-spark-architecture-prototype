@@ -47,7 +47,23 @@ def run_worker_core(
             use_allreduce = False
             run_kmeans_allreduce = None
 
-        if use_allreduce:
+        if sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
+            from mpj_spark.applications.kmeans.fedavg_mpi_run import run_kmeans_fedavg_mpi
+
+            result = run_kmeans_fedavg_mpi(
+                comm=comm,
+                rank=worker_id,
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
+                tol=1e-4,
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif use_allreduce:
             result = run_kmeans_allreduce(
                 comm=comm,
                 rank=worker_id,
