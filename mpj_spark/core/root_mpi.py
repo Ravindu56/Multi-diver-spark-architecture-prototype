@@ -283,8 +283,6 @@ def run_root_mpi(
         print("  [LogReg Allreduce MPI] Coordinator thread started (P2P Queue-fallback)")
 
     if do_logreg_async_ps:
-        import threading
-
         from mpj_spark.core.async_ps import run_logreg_async_ps
 
         def _async_ps_thread_fn():

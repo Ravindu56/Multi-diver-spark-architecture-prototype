@@ -127,9 +127,7 @@ class TestServe:
 
     def test_first_update_bootstraps_global_model(self):
         comm = _FakeComm([_msg(1, 0, [1.5, -2.5], 0.75, base_version=0)])
-        result = _serve(
-            comm, num_workers=1, num_features=2, num_iterations=1, any_source=-1
-        )
+        result = _serve(comm, num_workers=1, num_features=2, num_iterations=1, any_source=-1)
         np.testing.assert_allclose(result["weight_vector"], [1.5, -2.5])
         assert result["intercept"] == pytest.approx(0.75)
         assert result["staleness_records"][0]["alpha_eff"] == pytest.approx(1.0)

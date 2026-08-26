@@ -37,8 +37,9 @@ TAG_ALLREDUCE_UP = 30
 TAG_ALLREDUCE_DOWN = 31
 
 
-def blend(global_w: np.ndarray, global_b: float,
-          worker_w: np.ndarray, worker_b: float, alpha: float):
+def blend(
+    global_w: np.ndarray, global_b: float, worker_w: np.ndarray, worker_b: float, alpha: float
+):
     """FedAsync mixing step: g <- (1 - alpha) * g + alpha * w."""
     new_w = (1.0 - alpha) * np.asarray(global_w, dtype=np.float64) + alpha * np.asarray(
         worker_w, dtype=np.float64
