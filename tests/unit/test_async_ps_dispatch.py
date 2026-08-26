@@ -44,6 +44,7 @@ class TestAsyncPsDispatch:
             run_worker_core(
                 worker_id=0,
                 partition_path="/nonexistent/partition.csv",
+                spark=None,
                 worker_config=_cfg(),
                 root_comm=None,
             )
@@ -75,6 +76,7 @@ class TestAsyncPsDispatch:
         run_worker_core(
             worker_id=0,
             partition_path="/nonexistent/partition.csv",
+            spark=None,
             worker_config=_cfg(),
             root_comm=sentinel,
         )
