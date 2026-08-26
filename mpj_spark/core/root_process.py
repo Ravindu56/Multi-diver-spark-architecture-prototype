@@ -273,7 +273,7 @@ def _write_merged_iter_metrics(
     ]
     rows_written = 0
     with open(out_path, "a", newline="", encoding="utf-8") as f:
-        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        writer = _csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         if not file_exists:
             writer.writeheader()
         for r in worker_results:
