@@ -163,6 +163,7 @@ def run_worker_mpi(comm):
         down_queue=down_queue,
         reassign_adapter=reassign,
         comm=worker_comm,
+        root_comm=comm,  # P3-09: COMM_WORLD channel for the async-PS P2P protocol
     )
 
     outcome["timing"]["init_time"] = init_time

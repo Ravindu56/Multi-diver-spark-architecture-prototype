@@ -25,6 +25,7 @@ from multiprocessing import Process, Queue
 from mpj_spark.core.file_manager import MPJSparkFileManager
 from mpj_spark.core.sync_modes import (
     MODE_NONE,
+    MODE_PS_ASYNC,
     MODE_PS_SYNC_FEDAVG_MPI,
     MODE_PS_SYNC_FEDAVG_QUEUE,
     normalize_sync_mode,
@@ -320,7 +321,11 @@ def aggregate_logreg_results(
     if allreduce_result is not None:
         final_weights = allreduce_result["weight_vector"]
         final_intercept = allreduce_result["intercept"]
-        agg_mode = "Allreduce — FedAvg per-iteration (M2)"
+        agg_mode = (
+            "Async Parameter Server — FedAsync mixing (P3-09)"
+            if sync_mode == MODE_PS_ASYNC
+            else "Allreduce — FedAvg per-iteration (M2)"
+        )
     elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI:
         final_weights = worker_results[0]["weight_vector"]
         final_intercept = worker_results[0].get("intercept", 0.0)

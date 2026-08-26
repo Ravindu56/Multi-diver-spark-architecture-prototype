@@ -5,7 +5,9 @@ import time
 
 from mpj_spark.core.sync_modes import (
     MODE_NONE,
+    MODE_PS_ASYNC,
     MODE_PS_SYNC_FEDAVG_MPI,
+    MODE_PS_SYNC_FEDAVG_QUEUE,
     normalize_sync_mode,
 )
 
@@ -23,6 +25,7 @@ def run_worker_core(
     down_queue=None,
     reassign_adapter=None,
     comm=None,
+    root_comm=None,
 ):
     app = worker_config.get("app", "wordcount")
     num_workers = worker_config.get("num_workers", 1)
@@ -110,6 +113,26 @@ def run_worker_core(
             from mpj_spark.applications.logreg import nosync_run
 
             result = nosync_run.run(**logreg_kwargs)
+        elif sync_mode == MODE_PS_ASYNC:
+            if root_comm is None:
+                raise RuntimeError(
+                    f"[W{worker_id}] sync_mode='ps_async' requires the MPI execution path "
+                    "(python -m mpj_spark.core.main_mpi) — root_comm is None on the "
+                    "multiprocessing transport."
+                )
+            from mpj_spark.applications.logreg import async_ps_run
+
+            result = async_ps_run.run(
+                partition_path=partition_path,
+                comm=root_comm,  # COMM_WORLD: root PS is rank 0
+                rank=worker_id + 1,  # COMM_WORLD rank (workers are 1..N)
+                num_workers=num_workers,
+                max_iter=worker_config.get("logreg_iter", 10),
+                reg_param=worker_config.get("logreg_reg_param", 0.01),
+                num_features=worker_config.get("logreg_features", 10),
+                results_dir=results_dir,
+                local_epochs=worker_config.get("logreg_local_epochs", 5),
+            )
         elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
             from mpj_spark.applications.logreg import fedavg_mpi_run
 
@@ -124,6 +147,11 @@ def run_worker_core(
                 results_dir=results_dir,
             )
         else:
+            if sync_mode != MODE_PS_SYNC_FEDAVG_QUEUE:
+                raise RuntimeError(
+                    f"[W{worker_id}] sync_mode='{sync_mode}' is registered but not wired "
+                    "for logreg on this transport — refusing silent fallback to queue_run."
+                )
             from mpj_spark.applications.logreg import queue_run
 
             result = queue_run.run(
