@@ -12,6 +12,7 @@ from datetime import UTC
 from mpi4py import MPI
 
 from mpj_spark.core.sync_modes import (
+    MODE_PS_ASYNC,
     MODE_PS_SYNC_FEDAVG_MPI,
     MODE_PS_SYNC_FEDAVG_QUEUE,
     normalize_sync_mode,
@@ -54,7 +55,6 @@ def run_logreg_allreduce_mpi(
     num_features: int,
 ) -> dict:
     """Root-side MPI coordinator for per-iteration FedAvg weight synchronisation (Point-to-Point legacy)."""
-    """Root-side MPI coordinator for per-iteration FedAvg weight synchronisation (Point-to-Point legacy)."""
     import numpy as np
 
     print(
@@ -75,7 +75,6 @@ def run_logreg_allreduce_mpi(
         avg_w = np.zeros(num_features)
         avg_intercept = 0.0
         for m in msgs:
-            frac = m["row_count"] / total_rows if total_rows > 0 else (1.0 / len(msgs))
             frac = m["row_count"] / total_rows if total_rows > 0 else (1.0 / len(msgs))
             avg_w += frac * np.array(m["weights"])
             avg_intercept += frac * m["intercept"]
@@ -143,7 +142,7 @@ def run_root_mpi(
     do_seed = use_global_seed and use_gossip and app == "kmeans"
     do_reassign = use_reassign and use_gossip and app == "kmeans"
     do_logreg_allreduce_p2p = app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
-    do_logreg_allreduce_p2p = app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
+    do_logreg_async_ps = app == "logreg" and sync_mode == MODE_PS_ASYNC
 
     from mpj_spark.config import DATA_DIR, TOTAL_CORES
     from mpj_spark.core.key_value import KeyValueStructure
@@ -161,7 +160,6 @@ def run_root_mpi(
 
     agg_mode = (
         f"Adaptive Gossip (threshold={gossip_threshold}, max_rounds={gossip_max_rounds})"
-        f"Adaptive Gossip (threshold={gossip_threshold}, max_rounds={gossip_max_rounds})"
         if (use_gossip and app == "kmeans")
         else "Batch Hungarian"
         if app == "kmeans"
@@ -169,6 +167,8 @@ def run_root_mpi(
         if (app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_MPI)
         else f"Native MPI FedAvg ({logreg_iter} iters)"
         if (app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_MPI)
+        else f"Async Parameter Server ({logreg_iter} rounds, FedAsync)"
+        if (app == "logreg" and sync_mode == MODE_PS_ASYNC)
         else f"Allreduce FedAvg MPI ({logreg_iter} iters)"
         if app == "logreg"
         else "N/A"
@@ -179,8 +179,6 @@ def run_root_mpi(
         title_extra = (
             f"  iter={logreg_iter}  reg_param={logreg_reg_param}  features={logreg_features}\n"
             f"  Aggregation : {agg_mode}  [sync_mode={sync_mode}]"
-            f"  iter={logreg_iter}  reg_param={logreg_reg_param}  features={logreg_features}\n"
-            f"  Aggregation : {agg_mode}  [sync_mode={sync_mode}]"
         )
     elif app == "kmeans":
         cf = f"  Global Seed    : {'ON' if do_seed else 'OFF'}\n  Re-assign Pass : {'ON' if do_reassign else 'OFF'}"
@@ -189,7 +187,6 @@ def run_root_mpi(
 
     _hdr(
         f"MPJ-Spark Multi-Driver [MPI]  |  app={app}  |  workers={num_workers}\n"
-        f"  MPI_COMM_WORLD size={size}  root=rank-0  workers=ranks-1..{size-1}\n"
         f"  MPI_COMM_WORLD size={size}  root=rank-0  workers=ranks-1..{size-1}\n"
         f"{title_extra}"
     )
@@ -213,13 +210,11 @@ def run_root_mpi(
         )
         seed_time = time.perf_counter() - t_seed
         _ok(f"Global seed centroids ready ({seed_time:.3f}s)")
-        _ok(f"Global seed centroids ready ({seed_time:.3f}s)")
 
     _phase(1, "Partitioning dataset")
     t_load_start = time.perf_counter()
     partition_paths = dynamic_partition(input_file, num_workers, DATA_DIR)
     load_time = time.perf_counter() - t_load_start
-    _ok(f"Split into {num_workers} partitions ({load_time:.3f}s)")
     _ok(f"Split into {num_workers} partitions ({load_time:.3f}s)")
 
     _phase(2, f"Distributing config to {num_workers} worker ranks")
@@ -238,8 +233,6 @@ def run_root_mpi(
     }
 
     for i in range(num_workers):
-        w_rank = i + 1
-        cfg = {**worker_cfg_base, "partition_path": partition_paths[i], "worker_id": i}
         w_rank = i + 1
         cfg = {**worker_cfg_base, "partition_path": partition_paths[i], "worker_id": i}
         comm.send(cfg, dest=w_rank, tag=TAG_CONFIG)
@@ -288,7 +281,25 @@ def run_root_mpi(
         )
         allreduce_thread.start()
         print("  [LogReg Allreduce MPI] Coordinator thread started (P2P Queue-fallback)")
-        print("  [LogReg Allreduce MPI] Coordinator thread started (P2P Queue-fallback)")
+
+    if do_logreg_async_ps:
+        from mpj_spark.core.async_ps import run_logreg_async_ps
+
+        def _async_ps_thread_fn():
+            res = run_logreg_async_ps(
+                comm,  # COMM_WORLD on root — P2P with worker ranks 1..N
+                num_workers=num_workers,
+                num_iterations=logreg_iter,
+                num_features=logreg_features,
+                results_dir=results_dir,
+            )
+            _allreduce_store.append(res)  # same result shape as run_logreg_allreduce_mpi()
+
+        allreduce_thread = threading.Thread(
+            target=_async_ps_thread_fn, daemon=True, name="logreg-async-ps"
+        )
+        allreduce_thread.start()
+        print("  [LogReg Async PS] Coordinator thread started (P3-09, non-blocking P2P)")
 
     _phase(4, "Collecting results from worker ranks")
     worker_results = []
@@ -299,8 +310,6 @@ def run_root_mpi(
         w_rank = i + 1
         res = comm.recv(source=w_rank, tag=TAG_RESULT)
         timing = comm.recv(source=w_rank, tag=TAG_TIMING)
-        if res.get("status") == "success":
-            worker_results.append(res.get("result"))
         if res.get("status") == "success":
             worker_results.append(res.get("result"))
         else:
@@ -354,7 +363,6 @@ def run_root_mpi(
                 seed_centres=seed_centres,
             )
             gossip_info = agg
-            _ok(f"Gossip done rounds={agg['rounds_run']} converged={agg['converged']}")
             _ok(f"Gossip done rounds={agg['rounds_run']} converged={agg['converged']}")
         else:
             agg = aggregate_kmeans_results(worker_results)
@@ -417,7 +425,6 @@ def run_root_mpi(
         reassign_time = time.perf_counter() - t_reassign
         agg["centres"] = corrected
         _ok(f"Re-assignment done ({reassign_time:.3f}s) from {total_rows:,} rows")
-        _ok(f"Re-assignment done ({reassign_time:.3f}s) from {total_rows:,} rows")
 
     t_wall = load_time + proc_time + agg_time + (reassign_time or 0.0)
     avg_proc = sum(t["processing_time"] for t in worker_timings) / num_workers
@@ -446,7 +453,6 @@ def run_root_mpi(
 
     if compare:
         logreg_parity_iter = num_workers * logreg_iter if app == "logreg" else None
-        _phase("B", f"Running {app} baseline for comparison")
         _phase("B", f"Running {app} baseline for comparison")
 
         if app == "wordcount":

@@ -7,6 +7,7 @@ cross-driver parameter synchronization strategies across Phases 2-3:
 - PS_SYNC_FEDAVG_QUEUE  ("ps_sync_fedavg_queue"): M2 Queue-based periodic FedAvg
 - PS_SYNC_FEDAVG_MPI    ("ps_sync_fedavg_mpi"): M2-MPI mpi4py periodic FedAvg
 - ALLREDUCE_MPI         ("allreduce_mpi"): M3 per-iteration Allreduce collective
+- PS_ASYNC              ("ps_async"): P3-09 asynchronous parameter server (MPI P2P)
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ MODE_NONE = "none"
 MODE_PS_SYNC_FEDAVG_QUEUE = "ps_sync_fedavg_queue"
 MODE_PS_SYNC_FEDAVG_MPI = "ps_sync_fedavg_mpi"
 MODE_ALLREDUCE_MPI = "allreduce_mpi"
+MODE_PS_ASYNC = "ps_async"
 
 # Legacy aliases accepted during CLI normalization
 _ALIASES: dict[str, str] = {
@@ -33,6 +35,9 @@ _ALIASES: dict[str, str] = {
     "mpi": MODE_ALLREDUCE_MPI,
     "allreduce": MODE_ALLREDUCE_MPI,
     "allreduce_mpi": MODE_ALLREDUCE_MPI,
+    "async": MODE_PS_ASYNC,
+    "async_ps": MODE_PS_ASYNC,
+    "ps_async": MODE_PS_ASYNC,
 }
 
 SyncMode = Literal[
@@ -40,6 +45,7 @@ SyncMode = Literal[
     "ps_sync_fedavg_queue",
     "ps_sync_fedavg_mpi",
     "allreduce_mpi",
+    "ps_async",
 ]
 
 
@@ -81,6 +87,13 @@ REGISTRY: dict[str, SyncModeDescriptor] = {
         transport="mpi4py (Allreduce)",
         description="M3 - Synchronous per-iteration Allreduce collective",
         is_periodic=False,
+        requires_mpi=True,
+    ),
+    MODE_PS_ASYNC: SyncModeDescriptor(
+        name=MODE_PS_ASYNC,
+        transport="mpi4py (P2P send/recv)",
+        description="P3-09 - Asynchronous parameter server, FedAsync-style mixing",
+        is_periodic=True,
         requires_mpi=True,
     ),
 }

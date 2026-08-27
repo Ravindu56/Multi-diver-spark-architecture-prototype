@@ -7,6 +7,7 @@ import pytest
 from mpj_spark.core.sync_modes import (
     MODE_ALLREDUCE_MPI,
     MODE_NONE,
+    MODE_PS_ASYNC,
     MODE_PS_SYNC_FEDAVG_MPI,
     MODE_PS_SYNC_FEDAVG_QUEUE,
     REGISTRY,
@@ -22,6 +23,7 @@ def test_registry_contains_all_canonical_modes():
         MODE_PS_SYNC_FEDAVG_QUEUE,
         MODE_PS_SYNC_FEDAVG_MPI,
         MODE_ALLREDUCE_MPI,
+        MODE_PS_ASYNC,
     }
     assert set(REGISTRY.keys()) == expected
 
@@ -31,6 +33,7 @@ def test_normalization_canonical_names():
     assert normalize_sync_mode("ps_sync_fedavg_queue") == MODE_PS_SYNC_FEDAVG_QUEUE
     assert normalize_sync_mode("ps_sync_fedavg_mpi") == MODE_PS_SYNC_FEDAVG_MPI
     assert normalize_sync_mode("allreduce_mpi") == MODE_ALLREDUCE_MPI
+    assert normalize_sync_mode("ps_async") == MODE_PS_ASYNC
 
 
 def test_normalization_aliases():
@@ -41,12 +44,15 @@ def test_normalization_aliases():
     assert normalize_sync_mode("mpi_fedavg") == MODE_PS_SYNC_FEDAVG_MPI
     assert normalize_sync_mode("mpi") == MODE_ALLREDUCE_MPI
     assert normalize_sync_mode("allreduce") == MODE_ALLREDUCE_MPI
+    assert normalize_sync_mode("async") == MODE_PS_ASYNC
+    assert normalize_sync_mode("async_ps") == MODE_PS_ASYNC
 
 
 def test_normalization_default_and_case_insensitivity():
     assert normalize_sync_mode(None) == MODE_PS_SYNC_FEDAVG_MPI
     assert normalize_sync_mode("  PS_SYNC_FEDAVG_MPI  ") == MODE_PS_SYNC_FEDAVG_MPI
     assert normalize_sync_mode("QUEUE") == MODE_PS_SYNC_FEDAVG_QUEUE
+    assert normalize_sync_mode("PS_Async") == MODE_PS_ASYNC
 
 
 def test_normalization_invalid_mode_raises():
@@ -65,9 +71,15 @@ def test_get_descriptor_properties():
     assert desc_none.is_periodic is False
     assert desc_none.requires_mpi is False
 
+    desc_async = get_descriptor("ps_async")
+    assert desc_async.name == MODE_PS_ASYNC
+    assert desc_async.is_periodic is True
+    assert desc_async.requires_mpi is True
+
 
 def test_is_mpi_required_helper():
     assert is_mpi_required("ps_sync_fedavg_mpi") is True
     assert is_mpi_required("allreduce_mpi") is True
+    assert is_mpi_required("ps_async") is True
     assert is_mpi_required("ps_sync_fedavg_queue") is False
     assert is_mpi_required("none") is False

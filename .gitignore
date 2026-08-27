@@ -33,3 +33,7 @@ END_PRESENTATION_2022E033_2022E090.toc
 *.zip
 .env
 *.bak
+venv/*
+.venv/*
+.venv/
+.coverage
