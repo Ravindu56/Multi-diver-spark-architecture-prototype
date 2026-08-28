@@ -24,6 +24,7 @@ from multiprocessing import Process, Queue
 
 from mpj_spark.core.file_manager import MPJSparkFileManager
 from mpj_spark.core.sync_modes import (
+    MODE_HYBRID_PS_ALLREDUCE,
     MODE_NONE,
     MODE_PS_ASYNC,
     MODE_PS_SYNC_FEDAVG_MPI,
@@ -318,7 +319,19 @@ def aggregate_logreg_results(
     total_rows = sum(r["row_count"] for r in worker_results)
     avg_accuracy = sum(r["train_accuracy"] * (r["row_count"] / total_rows) for r in worker_results)
 
-    if allreduce_result is not None:
+    if sync_mode == MODE_HYBRID_PS_ALLREDUCE:
+        # Dense weights are identical across workers post-Allreduce (collective
+        # result); the scalar PS result carries the global intercept.  Must
+        # precede the generic allreduce_result branch: the hybrid PS result
+        # has weight_vector=None by design.
+        final_weights = worker_results[0]["weight_vector"]
+        final_intercept = (
+            allreduce_result["intercept"]
+            if allreduce_result is not None
+            else worker_results[0].get("intercept", 0.0)
+        )
+        agg_mode = "Hybrid PS+Allreduce (P3-10)"
+    elif allreduce_result is not None:
         final_weights = allreduce_result["weight_vector"]
         final_intercept = allreduce_result["intercept"]
         agg_mode = (
