@@ -6,6 +6,7 @@ import pytest
 
 from mpj_spark.core.sync_modes import (
     MODE_ALLREDUCE_MPI,
+    MODE_GOSSIP,
     MODE_HYBRID_PS_ALLREDUCE,
     MODE_NONE,
     MODE_PS_ASYNC,
@@ -26,6 +27,7 @@ def test_registry_contains_all_canonical_modes():
         MODE_ALLREDUCE_MPI,
         MODE_PS_ASYNC,
         MODE_HYBRID_PS_ALLREDUCE,
+        MODE_GOSSIP,
     }
     assert set(REGISTRY.keys()) == expected
 
@@ -37,6 +39,7 @@ def test_normalization_canonical_names():
     assert normalize_sync_mode("allreduce_mpi") == MODE_ALLREDUCE_MPI
     assert normalize_sync_mode("ps_async") == MODE_PS_ASYNC
     assert normalize_sync_mode("hybrid_ps_allreduce") == MODE_HYBRID_PS_ALLREDUCE
+    assert normalize_sync_mode("gossip") == MODE_GOSSIP
 
 
 def test_normalization_aliases():
@@ -51,6 +54,8 @@ def test_normalization_aliases():
     assert normalize_sync_mode("async_ps") == MODE_PS_ASYNC
     assert normalize_sync_mode("hybrid") == MODE_HYBRID_PS_ALLREDUCE
     assert normalize_sync_mode("hybrid_ps_allreduce") == MODE_HYBRID_PS_ALLREDUCE
+    assert normalize_sync_mode("gossip") == MODE_GOSSIP
+    assert normalize_sync_mode("decentralized") == MODE_GOSSIP
 
 
 def test_normalization_default_and_case_insensitivity():
@@ -59,6 +64,7 @@ def test_normalization_default_and_case_insensitivity():
     assert normalize_sync_mode("QUEUE") == MODE_PS_SYNC_FEDAVG_QUEUE
     assert normalize_sync_mode("PS_Async") == MODE_PS_ASYNC
     assert normalize_sync_mode("Hybrid_PS_AllReduce") == MODE_HYBRID_PS_ALLREDUCE
+    assert normalize_sync_mode("GOSSIP") == MODE_GOSSIP
 
 
 def test_normalization_invalid_mode_raises():
@@ -87,11 +93,17 @@ def test_get_descriptor_properties():
     assert desc_hybrid.is_periodic is True
     assert desc_hybrid.requires_mpi is True
 
+    desc_gossip = get_descriptor("gossip")
+    assert desc_gossip.name == MODE_GOSSIP
+    assert desc_gossip.is_periodic is True
+    assert desc_gossip.requires_mpi is True
+
 
 def test_is_mpi_required_helper():
     assert is_mpi_required("ps_sync_fedavg_mpi") is True
     assert is_mpi_required("allreduce_mpi") is True
     assert is_mpi_required("ps_async") is True
     assert is_mpi_required("hybrid_ps_allreduce") is True
+    assert is_mpi_required("gossip") is True
     assert is_mpi_required("ps_sync_fedavg_queue") is False
     assert is_mpi_required("none") is False

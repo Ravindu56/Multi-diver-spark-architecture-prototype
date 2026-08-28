@@ -10,6 +10,8 @@ cross-driver parameter synchronization strategies across Phases 2-3:
 - PS_ASYNC              ("ps_async"): P3-09 asynchronous parameter server (MPI P2P)
 - HYBRID_PS_ALLREDUCE   ("hybrid_ps_allreduce"): P3-10 hybrid split — dense
   weights via Allreduce collective, scalars via root parameter server
+- GOSSIP                ("gossip"): P3-11 decentralized ring gossip — workers
+  exchange with fixed-ring neighbours only; no root PS, no collectives
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ MODE_PS_SYNC_FEDAVG_MPI = "ps_sync_fedavg_mpi"
 MODE_ALLREDUCE_MPI = "allreduce_mpi"
 MODE_PS_ASYNC = "ps_async"
 MODE_HYBRID_PS_ALLREDUCE = "hybrid_ps_allreduce"
+MODE_GOSSIP = "gossip"
 
 # Legacy aliases accepted during CLI normalization
 _ALIASES: dict[str, str] = {
@@ -43,6 +46,8 @@ _ALIASES: dict[str, str] = {
     "ps_async": MODE_PS_ASYNC,
     "hybrid": MODE_HYBRID_PS_ALLREDUCE,
     "hybrid_ps_allreduce": MODE_HYBRID_PS_ALLREDUCE,
+    "gossip": MODE_GOSSIP,
+    "decentralized": MODE_GOSSIP,
 }
 
 SyncMode = Literal[
@@ -52,6 +57,7 @@ SyncMode = Literal[
     "allreduce_mpi",
     "ps_async",
     "hybrid_ps_allreduce",
+    "gossip",
 ]
 
 
@@ -106,6 +112,13 @@ REGISTRY: dict[str, SyncModeDescriptor] = {
         name=MODE_HYBRID_PS_ALLREDUCE,
         transport="mpi4py (Allreduce + P2P)",
         description="P3-10 - Hybrid split: dense weights via Allreduce, scalars via root PS",
+        is_periodic=True,
+        requires_mpi=True,
+    ),
+    MODE_GOSSIP: SyncModeDescriptor(
+        name=MODE_GOSSIP,
+        transport="mpi4py (P2P ring, decentralized)",
+        description="P3-11 - Decentralized gossip consensus over ring neighbours",
         is_periodic=True,
         requires_mpi=True,
     ),
