@@ -65,7 +65,7 @@ def _build_arg_parser():
         "--sync-mode",
         type=str,
         default=MODE_PS_SYNC_FEDAVG_MPI,
-        help="Cross-driver synchronization mode (ps_sync_fedavg_mpi | ps_sync_fedavg_queue | allreduce_mpi | ps_async | none)",
+        help="Cross-driver synchronization mode (ps_sync_fedavg_mpi | ps_sync_fedavg_queue | allreduce_mpi | ps_async | hybrid_ps_allreduce | none)",
     )
 
     p.add_argument("--kmeans-k", type=int, default=3)

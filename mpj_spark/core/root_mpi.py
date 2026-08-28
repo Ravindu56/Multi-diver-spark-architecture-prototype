@@ -12,6 +12,7 @@ from datetime import UTC
 from mpi4py import MPI
 
 from mpj_spark.core.sync_modes import (
+    MODE_HYBRID_PS_ALLREDUCE,
     MODE_PS_ASYNC,
     MODE_PS_SYNC_FEDAVG_MPI,
     MODE_PS_SYNC_FEDAVG_QUEUE,
@@ -143,6 +144,7 @@ def run_root_mpi(
     do_reassign = use_reassign and use_gossip and app == "kmeans"
     do_logreg_allreduce_p2p = app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
     do_logreg_async_ps = app == "logreg" and sync_mode == MODE_PS_ASYNC
+    do_logreg_hybrid = app == "logreg" and sync_mode == MODE_HYBRID_PS_ALLREDUCE
 
     from mpj_spark.config import DATA_DIR, TOTAL_CORES
     from mpj_spark.core.key_value import KeyValueStructure
@@ -167,6 +169,8 @@ def run_root_mpi(
         if (app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_MPI)
         else f"Native MPI FedAvg ({logreg_iter} iters)"
         if (app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_MPI)
+        else f"Hybrid PS+Allreduce ({logreg_iter} iters)"
+        if (app == "logreg" and sync_mode == MODE_HYBRID_PS_ALLREDUCE)
         else f"Async Parameter Server ({logreg_iter} rounds, FedAsync)"
         if (app == "logreg" and sync_mode == MODE_PS_ASYNC)
         else f"Allreduce FedAvg MPI ({logreg_iter} iters)"
@@ -300,6 +304,24 @@ def run_root_mpi(
         )
         allreduce_thread.start()
         print("  [LogReg Async PS] Coordinator thread started (P3-09, non-blocking P2P)")
+
+    if do_logreg_hybrid:
+        from mpj_spark.core.hybrid_ps import run_logreg_hybrid_scalar_ps
+
+        def _hybrid_ps_thread_fn():
+            res = run_logreg_hybrid_scalar_ps(
+                comm,  # COMM_WORLD on root — scalar P2P with worker ranks 1..N
+                num_workers=num_workers,
+                num_iterations=logreg_iter,
+                results_dir=results_dir,
+            )
+            _allreduce_store.append(res)  # intercept-only result; weights via Allreduce
+
+        allreduce_thread = threading.Thread(
+            target=_hybrid_ps_thread_fn, daemon=True, name="logreg-hybrid-ps"
+        )
+        allreduce_thread.start()
+        print("  [LogReg Hybrid PS] Scalar coordinator thread started (P3-10)")
 
     _phase(4, "Collecting results from worker ranks")
     worker_results = []
