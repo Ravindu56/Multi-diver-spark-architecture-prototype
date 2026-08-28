@@ -81,7 +81,6 @@ def _build_arg_parser():
     p.add_argument("--gossip", action="store_true")
     p.add_argument("--gossip-threshold", type=float, default=1e-3)
     p.add_argument("--gossip-max-rounds", type=int, default=10)
-    p.add_argument("--gossip-fanout", type=int, default=2)
     p.add_argument("--global-seed", action="store_true")
     p.add_argument("--reassign", action="store_true")
 
@@ -113,7 +112,6 @@ def _run_root(args):
         cores_override=args.cores,
         app=args.app,
         sync_mode=sync_mode,
-        **({"gossip_fanout": args.gossip_fanout} if args.gossip_fanout is not None else {}),
         kmeans_k=args.kmeans_k,
         kmeans_iter=args.kmeans_iter,
         baseline_threads=args.baseline_threads,
