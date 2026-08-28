@@ -12,6 +12,7 @@ from datetime import UTC
 from mpi4py import MPI
 
 from mpj_spark.core.sync_modes import (
+    MODE_GOSSIP,
     MODE_HYBRID_PS_ALLREDUCE,
     MODE_PS_ASYNC,
     MODE_PS_SYNC_FEDAVG_MPI,
@@ -145,6 +146,7 @@ def run_root_mpi(
     do_logreg_allreduce_p2p = app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
     do_logreg_async_ps = app == "logreg" and sync_mode == MODE_PS_ASYNC
     do_logreg_hybrid = app == "logreg" and sync_mode == MODE_HYBRID_PS_ALLREDUCE
+    do_logreg_gossip = app == "logreg" and sync_mode == MODE_GOSSIP
 
     from mpj_spark.config import DATA_DIR, TOTAL_CORES
     from mpj_spark.core.key_value import KeyValueStructure
@@ -169,6 +171,8 @@ def run_root_mpi(
         if (app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_MPI)
         else f"Native MPI FedAvg ({logreg_iter} iters)"
         if (app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_MPI)
+        else f"Decentralized Gossip ({logreg_iter} rounds)"
+        if (app == "logreg" and sync_mode == MODE_GOSSIP)
         else f"Hybrid PS+Allreduce ({logreg_iter} iters)"
         if (app == "logreg" and sync_mode == MODE_HYBRID_PS_ALLREDUCE)
         else f"Async Parameter Server ({logreg_iter} rounds, FedAsync)"
@@ -233,6 +237,7 @@ def run_root_mpi(
         "logreg_iter": logreg_iter,
         "logreg_reg_param": logreg_reg_param,
         "logreg_features": logreg_features,
+        "gossip_fanout": gossip_fanout,
         "results_dir": results_dir,
     }
 
@@ -322,6 +327,12 @@ def run_root_mpi(
         )
         allreduce_thread.start()
         print("  [LogReg Hybrid PS] Scalar coordinator thread started (P3-10)")
+
+    if do_logreg_gossip:
+        print(
+            "  [LogReg Gossip] Decentralized mode — workers exchange over the ring; "
+            "no root coordinator thread (P3-11)"
+        )
 
     _phase(4, "Collecting results from worker ranks")
     worker_results = []
