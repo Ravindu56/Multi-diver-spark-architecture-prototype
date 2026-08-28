@@ -16,7 +16,6 @@ from scripts.analyze_sync_benchmark import (
 )
 from scripts.run_sync_benchmark import (
     M3_MODE,
-    WIRED_MODES,
     build_command,
     build_run_plan,
     parse_log_metrics,
