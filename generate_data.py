@@ -93,7 +93,7 @@ def generate_logreg(path: str):
         f"[generate_data] logreg_data.csv  {len(df):,} rows  "
         f"class_balance={balance:.3f}  ({elapsed:.1f}s)"
     )
-    print(f"[generate_data] Feature means: " f"{np.abs(X).mean(axis=0).round(3).tolist()}")
+    print(f"[generate_data] Feature means: {np.abs(X).mean(axis=0).round(3).tolist()}")
 
 
 def generate_kmeans(path: str):

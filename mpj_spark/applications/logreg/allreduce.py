@@ -245,8 +245,7 @@ def run_logreg_allreduce(
 
         if rank == 0:
             logger.info(
-                "epoch %d/%d  lr=%.5f  |w|=%.4f  |grad|=%.6f  loss=%.6f  "
-                "spark=%.3fs  sync=%.3fs",
+                "epoch %d/%d  lr=%.5f  |w|=%.4f  |grad|=%.6f  loss=%.6f  spark=%.3fs  sync=%.3fs",
                 epoch + 1,
                 max_epochs,
                 lr_t,

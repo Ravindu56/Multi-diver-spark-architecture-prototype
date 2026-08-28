@@ -241,9 +241,7 @@ def run(
         f"[NoSync Worker {worker_id}] Final local accuracy : {train_accuracy:.4f}  "
         f"[no sync — local partition only]"
     )
-    print(
-        f"[NoSync Worker {worker_id}] Local weight norm    : " f"{_weight_norm(weight_vector):.4f}"
-    )
+    print(f"[NoSync Worker {worker_id}] Local weight norm    : {_weight_norm(weight_vector):.4f}")
 
     df_vec.unpersist()
     df_base.unpersist()
@@ -251,8 +249,7 @@ def run(
     # ── 4. Write per-worker metrics CSV ──────────────────────────────
     worker_csv_path = _write_worker_metrics(worker_id, iter_metrics, results_dir)
     print(
-        f"[NoSync Worker {worker_id}] Iter metrics → {worker_csv_path} "
-        f"({len(iter_metrics)} rows)"
+        f"[NoSync Worker {worker_id}] Iter metrics → {worker_csv_path} ({len(iter_metrics)} rows)"
     )
 
     return {

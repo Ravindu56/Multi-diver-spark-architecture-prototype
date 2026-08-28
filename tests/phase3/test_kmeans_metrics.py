@@ -105,9 +105,9 @@ def test_sync_overhead_pct_arithmetic():
         # iter 2: sync=0.2, iter=1.2 → 0.2/1.2*100 = 16.6667
         # (values are rounded; compare to 4dp precision)
         for overhead in overheads:
-            assert (
-                abs(overhead - round(0.1 / 0.6 * 100.0, 4)) < 1e-3
-            ), f"Unexpected sync overhead: {overhead}"
+            assert abs(overhead - round(0.1 / 0.6 * 100.0, 4)) < 1e-3, (
+                f"Unexpected sync overhead: {overhead}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +139,9 @@ def test_convergence_rate_series():
         # shifts were recorded as 1/i for i in [1, 2, 3]
         expected = [round(1.0 / i, 8) for i in range(1, 4)]
         for actual, exp in zip(rate, expected, strict=False):
-            assert (
-                abs(actual - exp) < 1e-10
-            ), f"Convergence rate mismatch: got {actual}, expected {exp}"
+            assert abs(actual - exp) < 1e-10, (
+                f"Convergence rate mismatch: got {actual}, expected {exp}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +166,9 @@ def test_summary_table_has_overhead_field():
         table = collector.summary_table()
         assert len(table) == 2
         for row in table:
-            assert (
-                "sync_overhead_pct" in row
-            ), f"summary_table row missing 'sync_overhead_pct': {row.keys()}"
+            assert "sync_overhead_pct" in row, (
+                f"summary_table row missing 'sync_overhead_pct': {row.keys()}"
+            )
             assert isinstance(row["sync_overhead_pct"], float)
 
 
@@ -190,7 +190,7 @@ def test_to_csv_header_and_row_count():
         assert len(rows) == n_iters, f"Expected {n_iters} rows, got {len(rows)}"
         expected_headers = set(_ITER_FIELDS) | {"sync_overhead_pct"}
         assert set(reader.fieldnames) == expected_headers, (
-            f"CSV header mismatch: got {set(reader.fieldnames)}, " f"expected {expected_headers}"
+            f"CSV header mismatch: got {set(reader.fieldnames)}, expected {expected_headers}"
         )
 
 
@@ -269,9 +269,9 @@ def test_aggregate_across_ranks_mean():
         rows = list(csv.DictReader(open(agg_path)))
         assert len(rows) == 2, f"Expected 2 aggregated rows, got {len(rows)}"
 
-        assert (
-            abs(float(rows[0]["sync_overhead_pct_mean"]) - 20.0) < 1e-4
-        ), f"Iter 1 mean mismatch: {rows[0]['sync_overhead_pct_mean']}"
-        assert (
-            abs(float(rows[1]["sync_overhead_pct_mean"]) - 30.0) < 1e-4
-        ), f"Iter 2 mean mismatch: {rows[1]['sync_overhead_pct_mean']}"
+        assert abs(float(rows[0]["sync_overhead_pct_mean"]) - 20.0) < 1e-4, (
+            f"Iter 1 mean mismatch: {rows[0]['sync_overhead_pct_mean']}"
+        )
+        assert abs(float(rows[1]["sync_overhead_pct_mean"]) - 30.0) < 1e-4, (
+            f"Iter 2 mean mismatch: {rows[1]['sync_overhead_pct_mean']}"
+        )

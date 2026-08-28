@@ -96,7 +96,7 @@ def run_logreg_allreduce_mpi(
         iter_time = time.perf_counter() - t_iter
         weight_norm = float(np.linalg.norm(avg_w))
         print(
-            f"  [LogReg Allreduce MPI] iter {iteration+1}/{num_iterations}  ({iter_time:.3f}s)  |w|={weight_norm:.4f}"
+            f"  [LogReg Allreduce MPI] iter {iteration + 1}/{num_iterations}  ({iter_time:.3f}s)  |w|={weight_norm:.4f}"
         )
 
     print("  [LogReg Allreduce MPI] Complete")
@@ -195,7 +195,7 @@ def run_root_mpi(
 
     _hdr(
         f"MPJ-Spark Multi-Driver [MPI]  |  app={app}  |  workers={num_workers}\n"
-        f"  MPI_COMM_WORLD size={size}  root=rank-0  workers=ranks-1..{size-1}\n"
+        f"  MPI_COMM_WORLD size={size}  root=rank-0  workers=ranks-1..{size - 1}\n"
         f"{title_extra}"
     )
 

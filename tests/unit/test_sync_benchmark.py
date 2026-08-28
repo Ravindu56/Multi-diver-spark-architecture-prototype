@@ -106,9 +106,9 @@ class TestRankfile:
 class TestThrottleWrapper:
     def test_wrapper_pins_only_the_throttled_rank(self):
         content = render_throttle_wrapper()
-        assert 'OMPI_COMM_WORLD_RANK' in content
-        assert 'THROTTLE_RANK' in content
-        assert 'taskset -c' in content
+        assert "OMPI_COMM_WORLD_RANK" in content
+        assert "THROTTLE_RANK" in content
+        assert "taskset -c" in content
         # non-throttled ranks exec the command untouched
         assert content.rstrip().endswith('exec "$@"')
 
@@ -157,7 +157,15 @@ class TestAnalyzer:
         self._write_worker_csv(
             tmp_path,
             "worker_0_gossip_metrics.csv",
-            [{"worker_id": 0, "iteration": 1, "iter_time_s": 1.5, "weight_norm": 0.32, "gossip_time_s": 0.01}],
+            [
+                {
+                    "worker_id": 0,
+                    "iteration": 1,
+                    "iter_time_s": 1.5,
+                    "weight_norm": 0.32,
+                    "gossip_time_s": 0.01,
+                }
+            ],
         )
         self._write_worker_csv(
             tmp_path,
@@ -173,12 +181,20 @@ class TestAnalyzer:
             run_dir,
             "worker_0_hybrid_metrics.csv",
             [
-                {"worker_id": 0, "iteration": i, "iter_time_s": 2.0,
-                 "weight_norm": 0.32, "allreduce_time_s": 0.10, "ps_time_s": 0.01}
+                {
+                    "worker_id": 0,
+                    "iteration": i,
+                    "iter_time_s": 2.0,
+                    "weight_norm": 0.32,
+                    "allreduce_time_s": 0.10,
+                    "ps_time_s": 0.01,
+                }
                 for i in (1, 2)
             ],
         )
-        rows = build_summary_rows([self._manifest_row(run_dir, mode="hybrid_ps_allreduce")], str(tmp_path))
+        rows = build_summary_rows(
+            [self._manifest_row(run_dir, mode="hybrid_ps_allreduce")], str(tmp_path)
+        )
         assert len(rows) == 1
         # (0.10 + 0.01) x 2 rounds / 1 worker
         assert rows[0]["sync_channel_time_s"] == 0.22
@@ -211,7 +227,15 @@ class TestAnalyzer:
         self._write_worker_csv(
             run_dir,
             "worker_0_gossip_metrics.csv",
-            [{"worker_id": 0, "iteration": 1, "iter_time_s": 1.5, "weight_norm": 0.32, "gossip_time_s": 0.01}],
+            [
+                {
+                    "worker_id": 0,
+                    "iteration": 1,
+                    "iter_time_s": 1.5,
+                    "weight_norm": 0.32,
+                    "gossip_time_s": 0.01,
+                }
+            ],
         )
         summary = build_summary_rows([self._manifest_row(run_dir)], str(tmp_path))
         md = render_markdown(summary)

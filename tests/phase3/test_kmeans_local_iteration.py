@@ -104,12 +104,12 @@ def test_init_centroids_within_data_range(spark, points_rdd):
     centroids = init_centroids(points_rdd, k=2, seed=42)
     data_min = _ALL_POINTS.min()
     data_max = _ALL_POINTS.max()
-    assert np.all(
-        centroids >= data_min - 1e-9
-    ), f"Centroid value below data min ({data_min}): {centroids}"
-    assert np.all(
-        centroids <= data_max + 1e-9
-    ), f"Centroid value above data max ({data_max}): {centroids}"
+    assert np.all(centroids >= data_min - 1e-9), (
+        f"Centroid value below data min ({data_min}): {centroids}"
+    )
+    assert np.all(centroids <= data_max + 1e-9), (
+        f"Centroid value above data max ({data_max}): {centroids}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +169,9 @@ def test_zero_count_cluster_stays_zero(spark):
     centroids = np.array([[1.0, 1.0], [1000.0, 1000.0]], dtype=np.float64)
     local_sums, local_counts = compute_local_stats(rdd, centroids)
 
-    assert (
-        local_counts[1] == 0.0
-    ), f"Expected local_counts[1] == 0 for unreachable centroid, got {local_counts[1]}"
+    assert local_counts[1] == 0.0, (
+        f"Expected local_counts[1] == 0 for unreachable centroid, got {local_counts[1]}"
+    )
     np.testing.assert_array_equal(
         local_sums[1],
         np.zeros(2),

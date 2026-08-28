@@ -219,7 +219,7 @@ def _run_mpi_logreg(args, dataset_path):
         "--features",
         str(args.logreg_features),
     ]
-    print(f'\n[main] [M3] Launching MPI Allreduce: {" ".join(cmd)}')
+    print(f"\n[main] [M3] Launching MPI Allreduce: {' '.join(cmd)}")
     t_start = __import__("time").perf_counter()
     ret = subprocess.run(cmd)
     mpi_elapsed = __import__("time").perf_counter() - t_start
@@ -236,10 +236,10 @@ def _run_mpi_logreg(args, dataset_path):
         b_label = "B2 — standalone" if args.baseline_master else "B1 — local[N]"
         print(f"\n{SEP}")
         print(f"  M3 (MPI Allreduce) vs {b_label}  |  workers={args.workers}")
-        print(f'  Baseline mode: {baseline_timing.get("mode", "local[N]")}')
+        print(f"  Baseline mode: {baseline_timing.get('mode', 'local[N]')}")
         print(SEP)
         print(f"  {'Metric':<26} {'Baseline':>12} {'M3 (MPI)':>12} {'Speedup':>8}")
-        print(f"  {'-'*26} {'-'*12} {'-'*12} {'-'*8}")
+        print(f"  {'-' * 26} {'-' * 12} {'-' * 12} {'-' * 8}")
         for key, label in [
             ("load_time", "Load Time (s)"),
             ("processing_time", "Proc Time (s)"),

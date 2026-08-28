@@ -334,7 +334,7 @@ def main() -> None:
 
     if SIZE != args.ranks:
         if RANK == 0:
-            print(f"ERROR: launched with {SIZE} MPI ranks, " f"but --ranks={args.ranks}")
+            print(f"ERROR: launched with {SIZE} MPI ranks, but --ranks={args.ranks}")
         if COMM is not None:
             COMM.Abort(2)
         raise SystemExit(2)

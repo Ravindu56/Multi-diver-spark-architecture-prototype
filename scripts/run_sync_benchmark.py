@@ -285,7 +285,9 @@ def main(argv=None):
         help="Also run the M3 standalone Allreduce module entry (verify its CLI via --help first).",
     )
     p.add_argument("--workers", nargs="*", type=int, default=[2, 4])
-    p.add_argument("--arms", nargs="*", default=["homogeneous"], choices=["homogeneous", "throttled"])
+    p.add_argument(
+        "--arms", nargs="*", default=["homogeneous"], choices=["homogeneous", "throttled"]
+    )
     p.add_argument(
         "--throttle-method",
         default="taskset",
@@ -320,7 +322,9 @@ def main(argv=None):
         help="Forwarded to gossip runs (use 1 to expose ring partial consensus at 4+ workers).",
     )
     p.add_argument("--base-dir", default="results/benchmark")
-    p.add_argument("--dry-run", action="store_true", help="Print the plan and commands without running.")
+    p.add_argument(
+        "--dry-run", action="store_true", help="Print the plan and commands without running."
+    )
     args = p.parse_args(argv)
 
     modes = list(args.modes)

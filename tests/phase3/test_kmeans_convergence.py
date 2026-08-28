@@ -63,9 +63,9 @@ def test_frobenius_shift_arithmetic():
     from mpj_spark.applications.kmeans.convergence import frobenius_shift
 
     result = frobenius_shift(_NEW, _OLD)
-    assert (
-        abs(result - _EXPECTED_SHIFT) < 1e-10
-    ), f"Expected {_EXPECTED_SHIFT:.10f}, got {result:.10f}"
+    assert abs(result - _EXPECTED_SHIFT) < 1e-10, (
+        f"Expected {_EXPECTED_SHIFT:.10f}, got {result:.10f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ def test_broadcast_convergence_bcast_call_count():
     broadcast_convergence(comm=comm, rank=0, shift=1e-6, tol=1e-4, iteration=3)
 
     assert comm.bcast_calls == 2, (
-        f"Expected 2 Bcast calls (one per broadcast_convergence call), " f"got {comm.bcast_calls}"
+        f"Expected 2 Bcast calls (one per broadcast_convergence call), got {comm.bcast_calls}"
     )
 
 
@@ -166,9 +166,9 @@ def test_check_and_broadcast_return_type_and_shift():
 
     assert isinstance(converged, bool), f"converged must be bool, got {type(converged)}"
     assert isinstance(shift, float), f"shift must be float, got {type(shift)}"
-    assert (
-        abs(shift - expected_shift) < 1e-10
-    ), f"shift={shift:.10f} != frobenius_shift={expected_shift:.10f}"
-    assert (
-        converged is True
-    ), f"Expected True (shift={shift:.6f} < tol=1.0, iter=2), got {converged}"
+    assert abs(shift - expected_shift) < 1e-10, (
+        f"shift={shift:.10f} != frobenius_shift={expected_shift:.10f}"
+    )
+    assert converged is True, (
+        f"Expected True (shift={shift:.6f} < tol=1.0, iter=2), got {converged}"
+    )

@@ -297,7 +297,7 @@ def mpj_root_process(input_file_path, num_workers):
         )
         workers.append(p)
         p.start()
-        print(f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) " f"→ independent Spark Driver")
+        print(f"  [ROOT] Launched MPJ Worker {i} (PID: {p.pid}) → independent Spark Driver")
 
     # ── PHASE 3: Wait for Parallel Execution ────────────────────────────
     print(f"\n[ROOT] Phase 3: Waiting for {num_workers} workers to complete...")

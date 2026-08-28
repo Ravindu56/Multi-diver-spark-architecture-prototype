@@ -79,7 +79,7 @@ patch_first(
         (
             "        sync_mode=sync_mode,\n",
             "        sync_mode=sync_mode,\n"
-            "        **({\"gossip_fanout\": args.gossip_fanout} "
+            '        **({"gossip_fanout": args.gossip_fanout} '
             "if args.gossip_fanout is not None else {}),\n",
         )
     ],

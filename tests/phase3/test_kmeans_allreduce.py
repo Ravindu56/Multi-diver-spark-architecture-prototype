@@ -201,9 +201,9 @@ def test_allreduce_empty_cluster_reinit():
         err_msg=f"Non-empty cluster 1 altered: got {result[1]}",
     )
     # Bcast must have been called exactly once (for the one empty cluster)
-    assert (
-        comm._bcast_calls == 1
-    ), f"Expected 1 Bcast call for empty-cluster reinit, got {comm._bcast_calls}"
+    assert comm._bcast_calls == 1, (
+        f"Expected 1 Bcast call for empty-cluster reinit, got {comm._bcast_calls}"
+    )
 
 
 # ---------------------------------------------------------------------------

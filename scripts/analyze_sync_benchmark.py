@@ -106,9 +106,7 @@ def build_summary_rows(manifest_rows: list[dict], base_dir: str) -> list[dict]:
         cols = SYNC_COLUMNS.get(m["mode"], [])
         if cols and rows:
             per_worker = len({r.get("worker_id") for r in rows}) or 1
-            sync_time = round(
-                sum(_f(r.get(c)) or 0.0 for r in rows for c in cols) / per_worker, 6
-            )
+            sync_time = round(sum(_f(r.get(c)) or 0.0 for r in rows for c in cols) / per_worker, 6)
 
         mean_stale, max_stale = _staleness_stats(run_dir)
         out.append(
@@ -263,7 +261,15 @@ def main(argv=None):
     _write_csv(
         out_dir / "convergence.csv",
         convergence,
-        ["arm", "mode", "workers", "iteration", "mean_weight_norm", "min_weight_norm", "max_weight_norm"],
+        [
+            "arm",
+            "mode",
+            "workers",
+            "iteration",
+            "mean_weight_norm",
+            "min_weight_norm",
+            "max_weight_norm",
+        ],
     )
     (out_dir / "report.md").write_text(render_markdown(summary), encoding="utf-8")
     _make_plots(convergence, summary, out_dir / "plots")
