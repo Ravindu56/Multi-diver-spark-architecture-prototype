@@ -68,6 +68,13 @@ def _build_arg_parser():
         help="Cross-driver synchronization mode (ps_sync_fedavg_mpi | ps_sync_fedavg_queue | allreduce_mpi | ps_async | hybrid_ps_allreduce | gossip | none)",
     )
 
+    p.add_argument(
+        "--gossip-fanout",
+        type=int,
+        default=None,
+        help="Ring distance contacted per gossip round (default: inherit the run_root_mpi gossip_fanout default).",
+    )
+
     p.add_argument("--kmeans-k", type=int, default=3)
     p.add_argument("--kmeans-iter", type=int, default=20)
     p.add_argument("--baseline-threads", type=int, default=None)
@@ -106,6 +113,7 @@ def _run_root(args):
         cores_override=args.cores,
         app=args.app,
         sync_mode=sync_mode,
+        **({"gossip_fanout": args.gossip_fanout} if args.gossip_fanout is not None else {}),
         kmeans_k=args.kmeans_k,
         kmeans_iter=args.kmeans_iter,
         baseline_threads=args.baseline_threads,
