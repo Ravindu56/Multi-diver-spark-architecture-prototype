@@ -14,6 +14,12 @@ a manifest row per run.  Two arms:
                 real: the worker's Spark local[N] budget is unchanged, so
                 the pinned rank is genuinely over-subscribed.
 
+Child output is streamed live to the console AND written to the run's
+log.txt (a run takes 30-60s; silent capture looked like a hang).  Ctrl+C
+terminates the mpirun child cleanly (SIGTERM -> orterun kills the ranks),
+records the interrupted run in the manifest, and stops the sweep - no
+orphaned worker JVMs left holding cores/ports.
+
 Usage (from repo root):
 
     python scripts/run_sync_benchmark.py \
@@ -183,6 +189,55 @@ def parse_log_metrics(log_text: str) -> dict:
     return out
 
 
+def stream_and_log(cmd: list[str], log_path: str):
+    """Run cmd with child output streamed live to the console AND logged.
+
+    On Ctrl+C the mpirun child is terminated with SIGTERM (orterun kills
+    its ranks; a bare SIGKILL would orphan the worker JVMs) before the
+    interrupt propagates.  Returns (exit_code, elapsed_s, full_log_text).
+    """
+    t0 = time.perf_counter()
+    lines: list[str] = []
+    with open(log_path, "w", encoding="utf-8") as lf:
+        with subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        ) as proc:
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    print(line, end="")
+                    lf.write(line)
+                    lines.append(line)
+                exit_code = proc.wait()
+            except KeyboardInterrupt:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise
+    return exit_code, time.perf_counter() - t0, "".join(lines)
+
+
+def _manifest_row(spec: RunSpec, exit_code, elapsed, metrics: dict) -> dict:
+    return {
+        "arm": spec.arm,
+        "mode": spec.mode,
+        "workers": spec.workers,
+        "np": spec.np_,
+        "gossip_fanout": spec.gossip_fanout if spec.gossip_fanout is not None else "",
+        "exit_code": exit_code,
+        "elapsed_s": round(elapsed, 3),
+        "final_weight_norm": metrics.get("final_weight_norm"),
+        "weighted_accuracy": metrics.get("weighted_accuracy"),
+        "wall_clock_s": metrics.get("wall_clock_s"),
+        "proc_time_s": metrics.get("proc_time_s"),
+        "run_dir": spec.run_dir,
+        "log_path": spec.log_path,
+    }
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="python scripts/run_sync_benchmark.py",
@@ -248,30 +303,19 @@ def main(argv=None):
             print(" ".join(cmd))
             if args.dry_run:
                 continue
-            t0 = time.perf_counter()
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            elapsed = time.perf_counter() - t0
-            Path(spec.log_path).write_text(proc.stdout + "\n" + proc.stderr, encoding="utf-8")
-            metrics = parse_log_metrics(proc.stdout)
-            writer.writerow(
-                {
-                    "arm": spec.arm,
-                    "mode": spec.mode,
-                    "workers": spec.workers,
-                    "np": spec.np_,
-                    "gossip_fanout": spec.gossip_fanout if spec.gossip_fanout is not None else "",
-                    "exit_code": proc.returncode,
-                    "elapsed_s": round(elapsed, 3),
-                    "final_weight_norm": metrics["final_weight_norm"],
-                    "weighted_accuracy": metrics["weighted_accuracy"],
-                    "wall_clock_s": metrics["wall_clock_s"],
-                    "proc_time_s": metrics["proc_time_s"],
-                    "run_dir": spec.run_dir,
-                    "log_path": spec.log_path,
-                }
-            )
+            try:
+                exit_code, elapsed, log_text = stream_and_log(cmd, spec.log_path)
+            except KeyboardInterrupt:
+                writer.writerow(_manifest_row(spec, -2, 0.0, {}))  # -2 = interrupted
+                mf.flush()
+                print(
+                    f"\nSweep interrupted during [{spec.arm}] {spec.mode} "
+                    f"(workers={spec.workers}); partial manifest kept at {manifest_path}"
+                )
+                return
+            writer.writerow(_manifest_row(spec, exit_code, elapsed, parse_log_metrics(log_text)))
             mf.flush()
-            print(f"exit={proc.returncode}  elapsed={elapsed:.1f}s  -> {spec.log_path}")
+            print(f"exit={exit_code}  elapsed={elapsed:.1f}s  -> {spec.log_path}")
 
     print(f"\nManifest: {manifest_path}")
     print(f"Next: python scripts/analyze_sync_benchmark.py --base-dir {args.base_dir}")
