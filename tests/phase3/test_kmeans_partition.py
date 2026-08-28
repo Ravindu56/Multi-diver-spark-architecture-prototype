@@ -89,9 +89,9 @@ def test_scatter_metadata_keys(spark_partition_session):
     for every rank, confirming comm.scatter() distributed metadata correctly.
     """
     partition_path, _ = spark_partition_session
-    assert isinstance(partition_path, str) and len(partition_path) > 0, (
-        f"[rank {rank}] Expected a non-empty partition path, got: {partition_path!r}"
-    )
+    assert (
+        isinstance(partition_path, str) and len(partition_path) > 0
+    ), f"[rank {rank}] Expected a non-empty partition path, got: {partition_path!r}"
 
 
 @_NEEDS_MPI
@@ -102,9 +102,9 @@ def test_partition_file_exists(spark_partition_session):
     and the file manager wrote to a path visible to all ranks.
     """
     partition_path, _ = spark_partition_session
-    assert os.path.exists(partition_path), (
-        f"[rank {rank}] Partition file not found: {partition_path}"
-    )
+    assert os.path.exists(
+        partition_path
+    ), f"[rank {rank}] Partition file not found: {partition_path}"
 
 
 @_NEEDS_MPI
@@ -131,9 +131,9 @@ def test_total_lines_equal_input(spark_partition_session):
         local_lines = sum(1 for _ in f)
     total = comm.reduce(local_lines, op=MPI.SUM, root=0)
     if rank == 0:
-        assert total == _DATASET_LINES, (
-            f"Total partitioned lines ({total}) != input lines ({_DATASET_LINES})"
-        )
+        assert (
+            total == _DATASET_LINES
+        ), f"Total partitioned lines ({total}) != input lines ({_DATASET_LINES})"
 
 
 # ---------------------------------------------------------------------------
