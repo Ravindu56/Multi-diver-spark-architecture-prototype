@@ -47,9 +47,7 @@ from mpj_spark.core.gossip_protocol import (
 from mpj_spark.core.sync_modes import MODE_GOSSIP
 
 
-def _write_gossip_worker_metrics(
-    rank: int, records: list[dict[str, Any]], results_dir: str
-) -> str:
+def _write_gossip_worker_metrics(rank: int, records: list[dict[str, Any]], results_dir: str) -> str:
     os.makedirs(results_dir, exist_ok=True)
     path = os.path.join(results_dir, f"worker_{rank}_gossip_metrics.csv")
     fieldnames = [

@@ -354,7 +354,11 @@ def aggregate_logreg_results(
             avg_intercept += frac * r["intercept"]
         final_weights = avg_w.tolist()
         final_intercept = float(avg_intercept)
-        agg_mode = ("Decentralized gossip consensus (P3-11)" if sync_mode == MODE_GOSSIP else "Post-hoc row-weighted average — no sync (M1)")
+        agg_mode = (
+            "Decentralized gossip consensus (P3-11)"
+            if sync_mode == MODE_GOSSIP
+            else "Post-hoc row-weighted average — no sync (M1)"
+        )
 
     weight_norm = float(sum(w**2 for w in final_weights) ** 0.5)
 
