@@ -70,12 +70,13 @@ class TestCommandBuilder:
 
     def test_taskset_wrapper_command_shape(self):
         spec = build_run_plan(["none"], [4], ["throttled"], "out")[0]
+        wrapper = spec.run_dir + "/throttle_wrapper.sh"
         cmd = build_command(
             spec,
             "data.csv",
             10,
             10,
-            wrapper_path="results/benchmark/throttled/none_w4/throttle_wrapper.sh",
+            wrapper_path=wrapper,
             throttle_rank=1,
             throttle_cores="0-1",
             python="python",
@@ -83,7 +84,7 @@ class TestCommandBuilder:
         assert "-x" in cmd
         assert "THROTTLE_RANK=1" in cmd and "THROTTLE_CORES=0-1" in cmd
         # wrapper sits between -np and the python interpreter
-        assert cmd[cmd.index("-np") + 2 : cmd.index("-np") + 4] == ["bash", spec.run_dir + "/throttle_wrapper.sh"]
+        assert cmd[cmd.index("-np") + 2 : cmd.index("-np") + 4] == ["bash", wrapper]
         assert "--rankfile" not in cmd
 
 
