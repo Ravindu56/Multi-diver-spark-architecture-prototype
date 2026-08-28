@@ -103,15 +103,15 @@ def print_comparison(multi_timing: dict, std_timing: dict):
     if p_time:
         print(
             f"  {'Wall-clock Parallel (sec)':<32} {p_time:>14.4f} "
-            f"{'\u2014':>12}   {'\u2014':>8}     [post-barrier]"
+            f"{'—':>12}   {'—':>8}     [post-barrier]"
         )
     if jvm_time:
         print(
             f"  {'JVM Pre-warm Total (sec)':<32} {jvm_time:>14.4f} "
-            f"{'\u2014':>12}   {'\u2014':>8}     [excluded from T_Proc]"
+            f"{'—':>12}   {'—':>8}     [excluded from T_Proc]"
         )
     if init_avg:
         print(
             f"  {'Avg Worker JVM Init (sec)':<32} {init_avg:>14.4f} "
-            f"{'\u2014':>12}   {'\u2014':>8}     [per worker]"
+            f"{'—':>12}   {'—':>8}     [per worker]"
         )
