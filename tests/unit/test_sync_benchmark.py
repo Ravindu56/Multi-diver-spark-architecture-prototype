@@ -2,8 +2,8 @@
 Unit tests for the P3-12 benchmark harness (Issue #64).
 
 CI-safe: no MPI, no JVM, no subprocess execution - the orchestrator's
-plan/command/rankfile builders and the analyzer's table builders are
-exercised as pure functions over synthetic inputs.
+plan/command/rankfile/wrapper builders and the analyzer's table builders
+are exercised as pure functions over synthetic inputs.
 """
 
 import csv
@@ -20,6 +20,7 @@ from scripts.run_sync_benchmark import (
     build_run_plan,
     parse_log_metrics,
     render_rankfile,
+    render_throttle_wrapper,
 )
 
 
@@ -61,10 +62,29 @@ class TestCommandBuilder:
         assert "mpj_spark.applications.logreg.allreduce" in cmd
         assert "--sync-mode" not in cmd
 
-    def test_rankfile_included_when_throttled(self):
+    def test_rankfile_included_when_selected(self):
         spec = build_run_plan(["none"], [2], ["throttled"], "out")[0]
         cmd = build_command(spec, "data.csv", 10, 10, rankfile_path="rf", python="python")
         assert "--rankfile" in cmd and cmd[cmd.index("--rankfile") + 1] == "rf"
+        assert "bash" not in cmd
+
+    def test_taskset_wrapper_command_shape(self):
+        spec = build_run_plan(["none"], [4], ["throttled"], "out")[0]
+        cmd = build_command(
+            spec,
+            "data.csv",
+            10,
+            10,
+            wrapper_path="results/benchmark/throttled/none_w4/throttle_wrapper.sh",
+            throttle_rank=1,
+            throttle_cores="0-1",
+            python="python",
+        )
+        assert "-x" in cmd
+        assert "THROTTLE_RANK=1" in cmd and "THROTTLE_CORES=0-1" in cmd
+        # wrapper sits between -np and the python interpreter
+        assert cmd[cmd.index("-np") + 2 : cmd.index("-np") + 4] == ["bash", spec.run_dir + "/throttle_wrapper.sh"]
+        assert "--rankfile" not in cmd
 
 
 class TestRankfile:
@@ -80,6 +100,16 @@ class TestRankfile:
         lines = rf.strip().splitlines()
         assert lines[1] == "rank 1=localhost slot=7-8"
         assert len(lines) == 3  # all ranks still covered
+
+
+class TestThrottleWrapper:
+    def test_wrapper_pins_only_the_throttled_rank(self):
+        content = render_throttle_wrapper()
+        assert 'OMPI_COMM_WORLD_RANK' in content
+        assert 'THROTTLE_RANK' in content
+        assert 'taskset -c' in content
+        # non-throttled ranks exec the command untouched
+        assert content.rstrip().endswith('exec "$@"')
 
 
 class TestLogParsing:
