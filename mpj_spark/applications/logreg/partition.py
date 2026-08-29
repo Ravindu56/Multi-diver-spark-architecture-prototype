@@ -225,8 +225,7 @@ def partition_and_init_spark(
         )
 
     logger.info(
-        "[rank %d] Received partition: '%s'  (%d lines, %d bytes, "
-        "num_features=%d, has_header=%s)",
+        "[rank %d] Received partition: '%s'  (%d lines, %d bytes, num_features=%d, has_header=%s)",
         rank,
         partition_path,
         my_metadata["num_lines"],

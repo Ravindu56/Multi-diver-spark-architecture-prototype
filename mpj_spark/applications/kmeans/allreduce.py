@@ -255,7 +255,7 @@ def run_kmeans_allreduce(
         )
 
         logger.info(
-            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  " "shift=%.6f  wcss=%.2f",
+            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  shift=%.6f  wcss=%.2f",
             rank,
             iteration,
             spark_time,
@@ -410,14 +410,14 @@ if __name__ == "__main__":
 
     if _rank == 0:
         print(
-            f"\n{'='*60}\n"
+            f"\n{'=' * 60}\n"
             "  K-Means Allreduce — Phase 3 / Issue #8\n"
             f"  ranks={_size}  k={args.k}  max_iter={args.max_iter}  "
             f"tol={args.tol}  seed={args.seed}\n"
             f"  init=bcast_from_rank0\n"
             f"  input  : {args.input}\n"
             f"  output : {args.output}\n"
-            f"{'='*60}\n",
+            f"{'=' * 60}\n",
             flush=True,
         )
 

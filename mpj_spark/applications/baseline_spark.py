@@ -45,9 +45,7 @@ def run_baseline(input_file_path: str, num_workers: int = 1, cores_override: int
 
     print("\n" + "=" * 70)
     print("  Standard Spark (Single Driver) — BASELINE")
-    print(
-        f"  Thread budget: local[{cores}]  " f"({TOTAL_CORES} total cores ÷ {num_workers} workers)"
-    )
+    print(f"  Thread budget: local[{cores}]  ({TOTAL_CORES} total cores ÷ {num_workers} workers)")
     print("=" * 70)
 
     t_total_start = time.time()

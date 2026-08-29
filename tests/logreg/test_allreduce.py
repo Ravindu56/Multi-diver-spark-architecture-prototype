@@ -205,7 +205,7 @@ class TestCheckLossConvergenceMath:
         def _map(fn):
             mapped = MagicMock()
             results = [fn(r) for r in rows]
-            mapped.reduce.side_effect = lambda f: (__import__("functools").reduce(f, results))
+            mapped.reduce.side_effect = lambda f: __import__("functools").reduce(f, results)
             return mapped
 
         mock_rdd.map.side_effect = _map

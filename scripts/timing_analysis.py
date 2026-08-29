@@ -542,9 +542,9 @@ def _half_avg(detail: list[dict], field: str, first: bool) -> float:
 
 def _print_section(title: str, data: dict) -> None:
     width = 52
-    print(f"\n{'='*width}")
+    print(f"\n{'=' * width}")
     print(f"  {title}")
-    print(f"{'='*width}")
+    print(f"{'=' * width}")
     for k, v in data.items():
         if isinstance(v, float):
             print(f"  {k:<38} {v:.6f}")
@@ -566,7 +566,7 @@ def _print_iteration_table(rows: list[dict], workload: str, max_rows: int = 20) 
     # For logreg, 'iteration' column is named 'epoch'
     if "epoch" in rows[0]:
         keys[0] = "epoch"
-    print(f"\n  {workload.upper()} per-step timing (first {min(max_rows,len(rows))} rows)")
+    print(f"\n  {workload.upper()} per-step timing (first {min(max_rows, len(rows))} rows)")
     header = "  ".join(f"{k:>18}" for k in keys)
     print("  " + header)
     print("  " + "-" * len(header))
@@ -587,7 +587,7 @@ def main() -> None:
     parser.add_argument(
         "--metrics-dir",
         default="./metrics",
-        help="Directory containing per-rank and aggregated metrics CSVs " "(default: ./metrics)",
+        help="Directory containing per-rank and aggregated metrics CSVs (default: ./metrics)",
     )
     parser.add_argument(
         "--out-dir",
@@ -627,12 +627,12 @@ def main() -> None:
     num_ranks = args.num_ranks
 
     print(f"""
-{'='*60}
+{"=" * 60}
   Phase 3 — Timing Analysis for Controller Design
   metrics dir : {metrics_dir}
   output dir  : {out_dir}
   num ranks   : {num_ranks}
-{'='*60}""")
+{"=" * 60}""")
 
     # -----------------------------------------------------------------------
     # K-Means
@@ -703,9 +703,9 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Controller interpretation
     # -----------------------------------------------------------------------
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  CONTROLLER DESIGN INTERPRETATION")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     for s in [km_summary, lr_summary]:
         if not s:
             continue
@@ -730,13 +730,12 @@ def main() -> None:
 
         if var > 0.5:
             print(
-                f"  => Straggler detected (rank_variance={var:.4f}s): "
-                "consider data re-partitioning"
+                f"  => Straggler detected (rank_variance={var:.4f}s): consider data re-partitioning"
             )
 
     print(f"\n  Output artefacts written to: {out_dir}")
     print("  Use controller_feature_matrix.csv as input to Objective 2b model.")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":

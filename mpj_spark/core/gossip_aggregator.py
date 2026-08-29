@@ -144,8 +144,7 @@ class GossipAggregator:
         states = self._collect_states(gossip_queue, timeout_per_worker)
         if len(states) != self.num_workers:
             raise RuntimeError(
-                f"[Gossip] Expected {self.num_workers} states, "
-                f"got {len(states)}. Worker failure?"
+                f"[Gossip] Expected {self.num_workers} states, got {len(states)}. Worker failure?"
             )
         self._log(f"Round 0 — collected {len(states)} worker states.")
 
@@ -348,8 +347,6 @@ class GossipAggregator:
         print("  Round log:")
         for r in self.round_log:
             print(
-                f"    Round {r['round']:>2} | "
-                f"fanout={r['fanout']} | "
-                f"max_drift={r['max_drift']:.6f}"
+                f"    Round {r['round']:>2} | fanout={r['fanout']} | max_drift={r['max_drift']:.6f}"
             )
         print(DASH)
