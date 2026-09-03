@@ -1,5 +1,13 @@
 # ================================================================
 # mpj_spark/workers/worker_process.py
+#
+# Single worker subprocess — launched by root_process.run_root().
+#
+# Dispatch table (logreg):
+#   sync_mode='queue'  →  logreg.queue_run.run()   [M2 — FedAvg]
+#   sync_mode='none'   →  logreg.nosync_run.run()  [M1 — no sync]
+#
+# All other apps (wordcount, kmeans) are unaffected.
 # ================================================================
 import time
 

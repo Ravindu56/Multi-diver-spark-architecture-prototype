@@ -134,6 +134,11 @@ def dynamic_partition(input_path, num_partitions, output_dir):
 # ──────────────────────────────────────────────────────────────────
 
 
+# ──────────────────────────────────────────────────────────────────
+# K-Means helpers
+# ──────────────────────────────────────────────────────────────────
+
+
 def align_centres_hungarian(reference, candidate):
     import numpy as np
     from scipy.optimize import linear_sum_assignment
@@ -630,6 +635,7 @@ def run_root(
         seed_time = time.perf_counter() - t_seed
         _ok(f"Global seed centroids ready ({seed_time:.3f}s)")
 
+    # ── Worker config dict ─────────────────────────────────────────
     worker_cfg = {
         "app": app,
         "cores_override": cores,
@@ -851,6 +857,7 @@ def run_root(
         total_time=t_wall,
     )
 
+    # ── Phase B: Baseline comparison (B1 or B2) ────────────────────
     if compare:
         logreg_parity_iter = num_workers * logreg_iter if app == "logreg" else None
         b_label = "B2 — Standalone cluster" if baseline_master else "B1 — local[N]"
