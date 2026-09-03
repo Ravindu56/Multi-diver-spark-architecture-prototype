@@ -1,0 +1,258 @@
+# =============================================================================
+# docker/docker-compose.yml
+# =============================================================================
+# Phase 4 — Docker Containerization for the MPJ-Spark Multi-Driver Framework
+#
+# University of Jaffna, Faculty of Engineering, Department of Computer Engineering
+# EC6070 BScEng Research Project
+#
+# Research: Resource Analysis and Optimization for Big Data Analytics in
+# Cloud Environments
+#
+# Architecture
+# ------------
+# This Compose deployment implements the Phase 4 single-node Docker cluster:
+#
+#   mpi-root       MPI rank 0: launches mpirun and coordinates the experiment
+#   mpi-worker-1   MPI rank 1: independent Spark-driver process
+#   mpi-worker-2   MPI rank 2: independent Spark-driver process
+#
+# All containers use one identical local image, share NFS-backed /data storage,
+# and communicate on an isolated Docker bridge network. The NFS volume acts as
+# the cloud-native functional equivalent of Lustre shared storage used by the
+# MPJ-Spark HPC reference architecture.
+#
+# Build behaviour
+# ---------------
+# The build section is intentionally included so that:
+#
+#   docker compose -f docker/docker-compose.yml build --no-cache
+#
+# rebuilds mpj-spark:latest from the repository's docker/Dockerfile. The
+# Compose file lives in docker/, therefore context: .. is the repository root.
+#
+# The image includes Python, PySpark, OpenMPI/mpi4py, SSH, BLAS runtime support,
+# and Phase 4 validation dependencies.
+#
+# Usage
+# -----
+# 1. Configure NFS shared storage:
+#      sudo bash docker/nfs-setup.sh
+#
+# 2. Build and launch:
+#      docker compose -f docker/docker-compose.yml build --no-cache
+#      docker compose -f docker/docker-compose.yml up -d --force-recreate
+#
+# 3. Verify environment:
+#      docker exec mpi-root bash -lc '
+#        echo "$PYTHONPATH"
+#        echo "$MPI_NUM_RANKS"
+#        python3 -c "import mpj_spark"
+#        command -v column
+#      '
+#
+# 4. Execute complete Phase 4 validation:
+#      RUN_ID=p4_final NP=3 bash scripts/run_phase4_validation.sh
+#
+# =============================================================================
+
+name: mpj-spark-phase4
+
+# -----------------------------------------------------------------------------
+# Common service configuration
+# -----------------------------------------------------------------------------
+# Every MPI rank uses the same image. The anchor ensures Dockerfile and runtime
+# environment consistency across root and worker containers.
+x-mpi-common: &mpi-common
+  build:
+    # docker-compose.yml is inside docker/, while source code is one level up.
+    context: ..
+    dockerfile: docker/Dockerfile
+
+  # Preserve the manually documented image tag while allowing Compose rebuilds.
+  image: mpj-spark:latest
+
+  restart: unless-stopped
+
+  environment: &mpi-common-environment
+    # Shared project package path. Prevents ModuleNotFoundError for mpj_spark.
+    PYTHONPATH: /app
+
+    # Phase 4 topology: rank 0 coordinator plus two driver ranks.
+    MPI_NUM_RANKS: "3"
+
+    # Shared NFS-backed storage and data paths.
+    MPJ_SHARED_STORAGE: /data
+    MPJ_KMEANS_DATA: /data/input/kmeans_data.csv
+    MPJ_LOGREG_DATA: /data/input/logreg_data.csv
+
+    # Dataset settings supplied through docker/.env.
+    MPJ_KMEANS_SIZE_MB: "${KMEANS_DATASET_SIZE_MB}"
+    MPJ_LOGREG_SIZE_MB: "${LOGREG_DATASET_SIZE_MB}"
+    MPJ_KMEANS_FEATURES: "${KMEANS_NUM_FEATURES}"
+    MPJ_LOGREG_FEATURES: "${LOGREG_NUM_FEATURES}"
+
+    # Required because OpenMPI runs as root in the development container.
+    OMPI_ALLOW_RUN_AS_ROOT: "1"
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: "1"
+
+  volumes:
+    - mpj-spark-data:/data
+
+  networks:
+    mpj-spark-net: {}
+
+  stdin_open: true
+  tty: true
+
+  # Tests that the container has started SSH, required by OpenMPI remote launch.
+  healthcheck:
+    test: ["CMD-SHELL", "pgrep -x sshd >/dev/null 2>&1"]
+    interval: 10s
+    timeout: 5s
+    retries: 10
+    start_period: 20s
+
+  labels:
+    org.opencontainers.image.title: "MPJ-Spark Multi-Driver Prototype"
+    org.opencontainers.image.description: >-
+      Phase 4 Docker container for multi-driver Spark workloads coordinated
+      through OpenMPI and NFS-backed shared storage.
+    org.opencontainers.image.source: >-
+      https://github.com/Ravindu56/Multi-diver-spark-architecture-prototype
+    research.phase: "Phase 4 — Docker Containerization"
+    research.project: "EC6070 Resource Analysis and Optimization"
+
+
+services:
+  # ---------------------------------------------------------------------------
+  # MPI root coordinator — rank 0
+  # ---------------------------------------------------------------------------
+  # Responsibilities:
+  # - Starts the MPI experiment with the OpenMPI hostfile
+  # - Coordinates independent Spark-driver ranks
+  # - Runs baseline/MPI parity validation and timing analysis
+  # - Writes reports and metrics to the shared NFS volume
+  mpi-root:
+    <<: *mpi-common
+    container_name: mpi-root
+    hostname: mpi-root
+
+    environment:
+      <<: *mpi-common-environment
+      MPI_RANK: "0"
+      MPI_SIZE: "${NUM_WORKERS_PLUS_ONE}"
+      SPARK_UI_PORT: "${SPARK_UI_PORT_BASE}"
+
+    ports:
+      # Optional host access for SSH troubleshooting.
+      - "2222:22"
+
+      # Spark UI for rank 0.
+      - "${SPARK_UI_PORT_BASE}:4040"
+
+    networks:
+      mpj-spark-net:
+        ipv4_address: 10.250.40.2
+
+    depends_on:
+      mpi-worker-1:
+        condition: service_started
+      mpi-worker-2:
+        condition: service_started
+
+    labels:
+      research.role: "MPI coordinator"
+      research.mpi-rank: "0"
+
+
+  # ---------------------------------------------------------------------------
+  # MPI worker — rank 1
+  # ---------------------------------------------------------------------------
+  # Runs an independent Spark driver against its assigned data partition and
+  # participates in synchronous MPI Allreduce operations.
+  mpi-worker-1:
+    <<: *mpi-common
+    container_name: mpi-worker-1
+    hostname: mpi-worker-1
+
+    environment:
+      <<: *mpi-common-environment
+      MPI_RANK: "1"
+      MPI_SIZE: "${NUM_WORKERS_PLUS_ONE}"
+      SPARK_UI_PORT: "${SPARK_UI_PORT_BASE_WORKER1}"
+
+    ports:
+      - "${SPARK_UI_PORT_BASE_WORKER1}:4040"
+
+    networks:
+      mpj-spark-net:
+        ipv4_address: 10.250.40.3
+
+    labels:
+      research.role: "MPI Spark-driver worker"
+      research.mpi-rank: "1"
+
+
+  # ---------------------------------------------------------------------------
+  # MPI worker — rank 2
+  # ---------------------------------------------------------------------------
+  # Runs the second independent Spark driver and participates in MPI-based
+  # parameter synchronization with ranks 0 and 1.
+  mpi-worker-2:
+    <<: *mpi-common
+    container_name: mpi-worker-2
+    hostname: mpi-worker-2
+
+    environment:
+      <<: *mpi-common-environment
+      MPI_RANK: "2"
+      MPI_SIZE: "${NUM_WORKERS_PLUS_ONE}"
+      SPARK_UI_PORT: "${SPARK_UI_PORT_BASE_WORKER2}"
+
+    ports:
+      - "${SPARK_UI_PORT_BASE_WORKER2}:4040"
+
+    networks:
+      mpj-spark-net:
+        ipv4_address: 10.250.40.4
+
+    labels:
+      research.role: "MPI Spark-driver worker"
+      research.mpi-rank: "2"
+
+
+# =============================================================================
+# NFS-backed shared volume
+# =============================================================================
+# The host NFS server is provisioned by docker/nfs-setup.sh. Every rank mounts
+# the same filesystem at /data, enabling shared input datasets, partition
+# metadata, per-rank metrics, parity reports, and timing-analysis artefacts.
+#
+# The Docker volume driver mounts NFS at container startup. NFS_SERVER_IP must
+# be supplied through docker/.env.
+# =============================================================================
+volumes:
+  mpj-spark-data:
+    name: mpj-spark-data
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NFS_SERVER_IP},rw,nfsvers=3,soft,timeo=100,retrans=2"
+      device: ":/data/mpj-spark-shared"
+
+
+# =============================================================================
+# Docker bridge network
+# =============================================================================
+# Static addresses provide stable OpenMPI hostfile names/address resolution and
+# predictable NFS access on one laboratory server or cloud VM.
+# =============================================================================
+networks:
+  mpj-spark-net:
+    name: mpj-spark-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.250.40.0/24
+          gateway: 10.250.40.1

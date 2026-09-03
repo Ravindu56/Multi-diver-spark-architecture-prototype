@@ -16,12 +16,16 @@ from __future__ import annotations
 
 
 def run_logreg_driver(
-    rank: int,
-    size: int,
-    comm,
-    dataset_path: str,
+    rank: int | None = None,
+    size: int | None = None,
+    comm=None,
+    dataset_path: str | None = None,
+    partition_path: str | None = None,
+    worker_id: int | None = None,
+    num_workers: int | None = None,
     max_iter: int = 20,
     learning_rate: float = 0.01,
+    reg_param: float = 0.01,
     tol: float = 1e-4,
     metrics_output_dir: str = "./logreg_results",
 ) -> dict:
@@ -34,6 +38,7 @@ def run_logreg_driver(
     dataset_path     : Shared-storage path to the input CSV.
     max_iter         : Maximum gradient-descent epochs (maps to max_epochs).
     learning_rate    : Initial SGD learning rate (cosine-decayed internally).
+    reg_param        : L2 regularization coefficient (default 0.01).
     tol              : Loss-delta convergence tolerance.
     metrics_output_dir : Directory for per-rank metrics CSV/JSON output.
 
@@ -44,6 +49,27 @@ def run_logreg_driver(
         'intercept' : float         # 0.0  (bias folded into weight vector)
     }
     """
+    actual_dataset_path = dataset_path or partition_path
+    actual_rank = rank if rank is not None else worker_id if worker_id is not None else 0
+    actual_size = size if size is not None else num_workers if num_workers is not None else 1
+
+    if comm is None or actual_dataset_path is None:
+        from mpj_spark.applications.logreg import nosync_run
+
+        raw = nosync_run.run(
+            partition_path=actual_dataset_path,
+            max_iter=max_iter,
+            reg_param=reg_param,
+            num_features=10,
+            worker_id=actual_rank,
+            num_workers=actual_size,
+            results_dir=metrics_output_dir,
+        )
+        return {
+            "weights": raw.get("weight_vector", []),
+            "intercept": float(raw.get("intercept", 0.0)),
+        }
+
     from mpj_spark.applications.logreg.allreduce import run_logreg_allreduce
 
     raw = run_logreg_allreduce(
@@ -62,6 +88,6 @@ def run_logreg_driver(
         "intercept": float(raw["intercept"]),
     }
 
-    # Broadcast from root so every rank has identical data.
-    result = comm.bcast(result, root=0)
+    if hasattr(comm, "bcast"):
+        result = comm.bcast(result, root=0)
     return result

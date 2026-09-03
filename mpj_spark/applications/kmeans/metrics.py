@@ -191,7 +191,7 @@ class KMeansMetricsCollector:
         }
         self._iterations.append(row)
         logger.debug(
-            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  " "shift=%.6f  wcss=%.2f",
+            "[rank %d] iter=%d  spark=%.4fs  sync=%.4fs  iter=%.4fs  shift=%.6f  wcss=%.2f",
             self.rank,
             iteration,
             spark_time_s,
@@ -226,7 +226,7 @@ class KMeansMetricsCollector:
             "throughput": throughput,
         }
         logger.info(
-            "[rank %d] Run complete: %d iters, converged=%s, " "total=%.2fs, throughput=%.0f pts/s",
+            "[rank %d] Run complete: %d iters, converged=%s, total=%.2fs, throughput=%.0f pts/s",
             self.rank,
             iterations_run,
             converged,

@@ -187,7 +187,7 @@ def _broadcast_global_stats(
         global_std = np.where(global_std < 1e-8, 1.0, global_std)  # floor
 
         logger.info(
-            "[rank 0] Global feature stats computed  " "n=%.0f  mean[:3]=%s  std[:3]=%s",
+            "[rank 0] Global feature stats computed  n=%.0f  mean[:3]=%s  std[:3]=%s",
             total_n,
             np.round(global_mean[:3], 4),
             np.round(global_std[:3], 4),

@@ -11,6 +11,222 @@
 # ================================================================
 import time
 
+from mpj_spark.core.sync_modes import (
+    MODE_GOSSIP,
+    MODE_HYBRID_PS_ALLREDUCE,
+    MODE_NONE,
+    MODE_PS_ASYNC,
+    MODE_PS_SYNC_FEDAVG_MPI,
+    MODE_PS_SYNC_FEDAVG_QUEUE,
+    normalize_sync_mode,
+)
+
+
+def _tag(worker_id, phase):
+    return f"[W{worker_id}|{phase}]"
+
+
+def run_worker_core(
+    worker_id,
+    partition_path,
+    spark,
+    worker_config,
+    up_queue=None,
+    down_queue=None,
+    reassign_adapter=None,
+    comm=None,
+    root_comm=None,
+):
+    app = worker_config.get("app", "wordcount")
+    num_workers = worker_config.get("num_workers", 1)
+    results_dir = worker_config.get("results_dir", "results")
+    sync_mode = normalize_sync_mode(worker_config.get("sync_mode", MODE_PS_SYNC_FEDAVG_MPI))
+
+    t_load_start = time.perf_counter()
+    load_time = time.perf_counter() - t_load_start
+    t_proc_start = time.perf_counter()
+
+    if app == "wordcount":
+        from mpj_spark.applications.wordcount import run_wordcount
+
+        result = run_wordcount(partition_path, spark)
+
+    elif app == "kmeans":
+        try:
+            from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
+
+            use_allreduce = True
+        except ImportError:
+            use_allreduce = False
+            run_kmeans_allreduce = None
+
+        if sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
+            from mpj_spark.applications.kmeans.fedavg_mpi_run import run_kmeans_fedavg_mpi
+
+            result = run_kmeans_fedavg_mpi(
+                comm=comm,
+                rank=worker_id,
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
+                tol=1e-4,
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif use_allreduce:
+            result = run_kmeans_allreduce(
+                comm=comm,
+                rank=worker_id,
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                tol=1e-4,
+                seed=42,
+                cores_override=worker_config.get("cores_override"),
+                metrics_output_dir=results_dir,
+            )
+        else:
+            from mpj_spark.applications.kmeans.driver import run_kmeans_driver
+
+            class _DummyComm:
+                def bcast(self, val, root=0):
+                    return val
+
+            result = run_kmeans_driver(
+                rank=worker_id,
+                size=num_workers,
+                comm=comm or _DummyComm(),
+                dataset_path=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                tol=1e-4,
+                seed=worker_config.get("seed_centres", 42) or 42,
+                metrics_output_dir=results_dir,
+            )
+
+    elif app == "logreg":
+        logreg_kwargs = dict(
+            partition_path=partition_path,
+            max_iter=worker_config.get("logreg_iter", 10),
+            reg_param=worker_config.get("logreg_reg_param", 0.01),
+            num_features=worker_config.get("logreg_features", 10),
+            worker_id=worker_id,
+            num_workers=num_workers,
+            results_dir=results_dir,
+        )
+
+        if sync_mode == MODE_NONE:
+            from mpj_spark.applications.logreg import nosync_run
+
+            result = nosync_run.run(**logreg_kwargs)
+        elif sync_mode == MODE_GOSSIP:
+            if comm is None:
+                raise RuntimeError(
+                    f"[W{worker_id}] sync_mode='gossip' requires the MPI worker "
+                    "sub-communicator — run via python -m mpj_spark.core.main_mpi."
+                )
+            from mpj_spark.applications.logreg import gossip_run
+
+            result = gossip_run.run(
+                partition_path=partition_path,
+                comm=comm,  # worker sub-comm: decentralized ring exchange
+                rank=worker_id,  # 0-based sub-comm rank
+                num_workers=num_workers,
+                max_iter=worker_config.get("logreg_iter", 10),
+                reg_param=worker_config.get("logreg_reg_param", 0.01),
+                num_features=worker_config.get("logreg_features", 10),
+                results_dir=results_dir,
+                local_epochs=worker_config.get("logreg_local_epochs", 5),
+                fanout=worker_config.get("gossip_fanout", 1),
+            )
+        elif sync_mode == MODE_HYBRID_PS_ALLREDUCE:
+            if comm is None or root_comm is None:
+                raise RuntimeError(
+                    f"[W{worker_id}] sync_mode='hybrid_ps_allreduce' requires both the "
+                    "worker sub-communicator and COMM_WORLD — run via "
+                    "python -m mpj_spark.core.main_mpi."
+                )
+            from mpj_spark.applications.logreg import hybrid_run
+
+            result = hybrid_run.run(
+                partition_path=partition_path,
+                comm=comm,  # worker sub-comm: dense-weight Allreduce channel
+                rank=worker_id,  # 0-based sub-comm rank
+                num_workers=num_workers,
+                root_comm=root_comm,  # COMM_WORLD: scalar PS channel
+                world_rank=worker_id + 1,
+                max_iter=worker_config.get("logreg_iter", 10),
+                reg_param=worker_config.get("logreg_reg_param", 0.01),
+                num_features=worker_config.get("logreg_features", 10),
+                results_dir=results_dir,
+                local_epochs=worker_config.get("logreg_local_epochs", 5),
+            )
+        elif sync_mode == MODE_PS_ASYNC:
+            if root_comm is None:
+                raise RuntimeError(
+                    f"[W{worker_id}] sync_mode='ps_async' requires the MPI execution path "
+                    "(python -m mpj_spark.core.main_mpi) — root_comm is None on the "
+                    "multiprocessing transport."
+                )
+            from mpj_spark.applications.logreg import async_ps_run
+
+            result = async_ps_run.run(
+                partition_path=partition_path,
+                comm=root_comm,  # COMM_WORLD: root PS is rank 0
+                rank=worker_id + 1,  # COMM_WORLD rank (workers are 1..N)
+                num_workers=num_workers,
+                max_iter=worker_config.get("logreg_iter", 10),
+                reg_param=worker_config.get("logreg_reg_param", 0.01),
+                num_features=worker_config.get("logreg_features", 10),
+                results_dir=results_dir,
+                local_epochs=worker_config.get("logreg_local_epochs", 5),
+            )
+        elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
+            from mpj_spark.applications.logreg import fedavg_mpi_run
+
+            result = fedavg_mpi_run.run(
+                partition_path=partition_path,
+                comm=comm,
+                rank=worker_id,
+                num_workers=num_workers,
+                max_iter=worker_config.get("logreg_iter", 10),
+                reg_param=worker_config.get("logreg_reg_param", 0.01),
+                num_features=worker_config.get("logreg_features", 10),
+                results_dir=results_dir,
+            )
+        else:
+            if sync_mode != MODE_PS_SYNC_FEDAVG_QUEUE:
+                raise RuntimeError(
+                    f"[W{worker_id}] sync_mode='{sync_mode}' is registered but not wired "
+                    "for logreg on this transport — refusing silent fallback to queue_run."
+                )
+            from mpj_spark.applications.logreg import queue_run
+
+            result = queue_run.run(
+                **logreg_kwargs,
+                allreduce_up_queue=up_queue,
+                allreduce_down_queue=down_queue,
+            )
+
+    else:
+        raise ValueError(f"Unknown app: {app!r}")
+
+    proc_time = time.perf_counter() - t_proc_start
+
+    return {
+        "status": "success",
+        "result": result,
+        "timing": {
+            "worker_id": worker_id,
+            "load_time": load_time,
+            "processing_time": proc_time,
+        },
+    }
+
 
 def worker_process(
     worker_id,
@@ -26,12 +242,8 @@ def worker_process(
 ):
     from mpj_spark.config import TOTAL_CORES
 
-    app = worker_cfg.get("app", "wordcount")
     cores = worker_cfg.get("cores_override", max(1, TOTAL_CORES // 2))
     num_workers = worker_cfg.get("num_workers", 1)
-    results_dir = worker_cfg.get("results_dir", "results")
-    # sync_mode drives M1 vs M2 dispatch for logreg
-    sync_mode = worker_cfg.get("sync_mode", "queue")
 
     try:
         from pyspark.sql import SparkSession
@@ -52,66 +264,30 @@ def worker_process(
         ready_signal.set()
         go_signal.wait()
 
-        t_proc_start = time.perf_counter()
+        outcome = run_worker_core(
+            worker_id=worker_id,
+            partition_path=partition_path,
+            spark=spark,
+            worker_config={**worker_cfg, "num_workers": num_workers},
+            up_queue=allreduce_up_queue,
+            down_queue=allreduce_down_queue,
+            reassign_adapter=reassign_queue,
+            comm=None,
+        )
 
-        # ── dispatch ───────────────────────────────────────────────────
-        if app == "wordcount":
-            from mpj_spark.applications.wordcount import run_wordcount
-
-            result = run_wordcount(partition_path, spark)
-
-        elif app == "kmeans":
-            from mpj_spark.applications.kmeans import run_kmeans
-
-            result = run_kmeans(
-                partition_path,
-                k=worker_cfg.get("kmeans_k", 3),
-                max_iter=worker_cfg.get("kmeans_max_iter", 20),
-                worker_id=worker_id,
-                gossip_queue=allreduce_up_queue,
-                reassign_queue=reassign_queue,
-                seed_centres=worker_cfg.get("seed_centres"),
-                num_workers=num_workers,
-            )
-
-        elif app == "logreg":
-            logreg_kwargs = dict(
-                partition_path=partition_path,
-                max_iter=worker_cfg.get("logreg_iter", 10),
-                reg_param=worker_cfg.get("logreg_reg_param", 0.01),
-                num_features=worker_cfg.get("logreg_features", 10),
-                worker_id=worker_id,
-                num_workers=num_workers,
-                results_dir=results_dir,
-            )
-
-            if sync_mode == "none":
-                # M1 — Multi-driver, NO synchronisation
-                from mpj_spark.applications.logreg import nosync_run
-
-                result = nosync_run.run(**logreg_kwargs)
-
-            else:
-                # M2 — Multi-driver, Queue/FedAvg (default)
-                from mpj_spark.applications.logreg import queue_run
-
-                result = queue_run.run(
-                    **logreg_kwargs,
-                    allreduce_up_queue=allreduce_up_queue,
-                    allreduce_down_queue=allreduce_down_queue,
-                )
-
-        else:
-            raise ValueError(f"Unknown app: {app!r}")
-
-        proc_time = time.perf_counter() - t_proc_start
-
-        result_queue.put({"status": "success", "worker_id": worker_id, "result": result})
+        result_queue.put(
+            {
+                "status": outcome["status"],
+                "worker_id": worker_id,
+                "result": outcome["result"],
+            }
+        )
         timing_queue.put(
             {
                 "worker_id": worker_id,
                 "init_time": init_time,
-                "processing_time": proc_time,
+                "load_time": outcome["timing"].get("load_time", 0.0),
+                "processing_time": outcome["timing"]["processing_time"],
             }
         )
 
@@ -130,6 +306,7 @@ def worker_process(
             {
                 "worker_id": worker_id,
                 "init_time": 0.0,
+                "load_time": 0.0,
                 "processing_time": 0.0,
             }
         )

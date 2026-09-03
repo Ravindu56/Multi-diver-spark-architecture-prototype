@@ -143,7 +143,7 @@ def partition_and_init_spark(
 
     if my_metadata is None:
         raise RuntimeError(
-            f"[rank {rank}] received None from scatter — " "num_workers may be less than MPI size."
+            f"[rank {rank}] received None from scatter — num_workers may be less than MPI size."
         )
 
     partition_path: str = my_metadata["partition_path"]

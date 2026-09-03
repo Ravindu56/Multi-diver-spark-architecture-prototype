@@ -262,7 +262,7 @@ def run(
         )
 
         print(
-            f"[LogReg Worker {worker_id}] round {iteration+1}/{max_iter}  "
+            f"[LogReg Worker {worker_id}] round {iteration + 1}/{max_iter}  "
             f"({iter_time:.3f}s)  "
             f"|w|={global_norm:.4f}  "
             f"\u0394={weight_delta:.6f}"
@@ -310,9 +310,7 @@ def run(
         intercept_final = float(model_fb.intercept)
 
     print(f"[LogReg Worker {worker_id}] Final train accuracy : {train_accuracy:.4f}")
-    print(
-        f"[LogReg Worker {worker_id}] Weight norm          : " f"{_weight_norm(weight_vector):.4f}"
-    )
+    print(f"[LogReg Worker {worker_id}] Weight norm          : {_weight_norm(weight_vector):.4f}")
 
     df_vec.unpersist()
     df_base.unpersist()
@@ -320,8 +318,7 @@ def run(
     # ─ 4. Write per-worker metrics CSV ───────────────────────────────────
     worker_csv_path = _write_worker_metrics(worker_id, iter_metrics, results_dir)
     print(
-        f"[LogReg Worker {worker_id}] Iter metrics → {worker_csv_path} "
-        f"({len(iter_metrics)} rows)"
+        f"[LogReg Worker {worker_id}] Iter metrics → {worker_csv_path} ({len(iter_metrics)} rows)"
     )
 
     return {

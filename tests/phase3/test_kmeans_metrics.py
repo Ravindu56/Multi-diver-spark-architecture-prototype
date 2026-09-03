@@ -189,9 +189,9 @@ def test_to_csv_header_and_row_count():
 
         assert len(rows) == n_iters, f"Expected {n_iters} rows, got {len(rows)}"
         expected_headers = set(_ITER_FIELDS) | {"sync_overhead_pct"}
-        assert set(reader.fieldnames) == expected_headers, (
-            f"CSV header mismatch: got {set(reader.fieldnames)}, " f"expected {expected_headers}"
-        )
+        assert (
+            set(reader.fieldnames) == expected_headers
+        ), f"CSV header mismatch: got {set(reader.fieldnames)}, expected {expected_headers}"
 
 
 # ---------------------------------------------------------------------------

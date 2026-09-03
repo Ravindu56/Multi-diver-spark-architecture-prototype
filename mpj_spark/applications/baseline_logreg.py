@@ -231,7 +231,7 @@ def run_baseline_logreg(
     row_count = df.count()
     load_time = time.perf_counter() - t_load_start
     header_mode = "with header" if has_header else "headerless (schema synthesised)"
-    print(f"  [Baseline-LogReg] {row_count:,} rows loaded  " f"({load_time:.3f}s)  [{header_mode}]")
+    print(f"  [Baseline-LogReg] {row_count:,} rows loaded  ({load_time:.3f}s)  [{header_mode}]")
 
     assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
     # NOTE: intentionally NOT calling .cache() — see module docstring.
