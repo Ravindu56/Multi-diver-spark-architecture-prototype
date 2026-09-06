@@ -35,13 +35,14 @@ overridable via environment variables (`WORKER_COUNT`, `VCPUS`, `MEM_MB`,
 
 ```bash
 sudo apt update
-sudo apt install -y qemu-kvm libvirt-daemon-system virtinst cloud-image-utils wget
+sudo apt install -y qemu-kvm libvirt-daemon-system virtinst cloud-image-utils wget dnsmasq-base
 sudo usermod -aG libvirt,kvm "$USER"   # log out and back in
 ```
 
-Docker is installed inside each VM by cloud-init (`docker.io`). `nfs-common`
-is preinstalled on all nodes so P5-02 (#27) only has to configure the NFS
-server on the manager.
+`dnsmasq-base` is required by libvirt's built-in DHCP server - without it,
+`virsh net-start default` fails. Docker is installed inside each VM by
+cloud-init (`docker.io`). `nfs-common` is preinstalled on all nodes so P5-02
+(#27) only has to configure the NFS server on the manager.
 
 ## 4. Quick start
 
@@ -64,6 +65,12 @@ and exits non-zero on failure.
 
 ## 6. Troubleshooting
 
+- `ERROR: libvirt network 'default' not found` -> the script now auto-defines
+  it from `/usr/share/libvirt/networks/default.xml` (or an embedded NAT XML
+  fallback) and starts it. Manual equivalent:
+  `sudo virsh net-define /usr/share/libvirt/networks/default.xml && sudo virsh net-start default`
+- `net-start failed` -> install dnsmasq: `sudo apt install -y dnsmasq-base`,
+  then re-run the script
 - `virt-install: unknown OS variant` -> re-run with `OS_VARIANT=ubuntu22.04`
 - No DHCP lease after 180 s -> check `virsh net-dhcp-leases default`; cloud-init
   may still be running: `ssh ubuntu@<ip> cloud-init status --wait`
@@ -87,4 +94,5 @@ and exits non-zero on failure.
 
 [1] Docker Inc., "Run Docker Engine in swarm mode," docs.docker.com.
 [2] Docker Inc., "Getting started with swarm mode: tutorial," docs.docker.com.
-[3] CloudLab, "Bare-metal cloud infrastructure for research," cloudlab.us.
+[3] libvirt, "NAT forwarding (aka virtual networks)," wiki.libvirt.org/Networking.html.
+[4] CloudLab, "Bare-metal cloud infrastructure for research," cloudlab.us.

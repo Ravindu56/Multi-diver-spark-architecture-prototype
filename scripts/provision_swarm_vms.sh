@@ -11,7 +11,7 @@
 #   WORKER_COUNT=1 MEM_MB=3072 ./scripts/provision_swarm_vms.sh
 #
 # Prerequisites (host):
-#   sudo apt install qemu-kvm libvirt-daemon-system virtinst cloud-image-utils wget
+#   sudo apt install qemu-kvm libvirt-daemon-system virtinst cloud-image-utils wget dnsmasq-base
 #   sudo usermod -aG libvirt,kvm "$USER"   # then log out and back in
 set -euo pipefail
 
@@ -42,10 +42,43 @@ done
 [[ -f $SSH_PUB_KEY_PATH ]] || ssh-keygen -t ed25519 -N '' -f "${SSH_PUB_KEY_PATH%.pub}"
 SSH_PUB_KEY="$(cat "$SSH_PUB_KEY_PATH")"
 
-$VIRSH net-info "$NETWORK" >/dev/null 2>&1 || die "libvirt network '$NETWORK' not found"
+command -v dnsmasq >/dev/null 2>&1 \
+  || log "WARNING: dnsmasq not found - install dnsmasq-base or net-start will fail"
+
+# Distinguish "cannot connect to libvirt" from "network undefined": both make
+# net-info exit non-zero, but only the second is auto-fixable.
+if ! $VIRSH list >/dev/null 2>&1; then
+  die "cannot connect to qemu:///system - run: sudo usermod -aG libvirt,kvm \$USER, then re-login"
+fi
+
+if ! $VIRSH net-info "$NETWORK" >/dev/null 2>&1; then
+  log "libvirt network '$NETWORK' not defined - defining it now"
+  if [[ $NETWORK == default && -f /usr/share/libvirt/networks/default.xml ]]; then
+    sudo virsh --connect qemu:///system net-define /usr/share/libvirt/networks/default.xml
+  else
+    netxml="$(mktemp)"
+    cat > "$netxml" <<EOF
+<network>
+  <name>${NETWORK}</name>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+    sudo virsh --connect qemu:///system net-define "$netxml"
+    rm -f "$netxml"
+  fi
+  $VIRSH net-autostart "$NETWORK" >/dev/null 2>&1 || true
+fi
+
 if ! $VIRSH net-info "$NETWORK" | grep -q 'Active:.*yes'; then
   log "starting libvirt network '$NETWORK'"
-  $VIRSH net-start "$NETWORK"
+  $VIRSH net-start "$NETWORK" \
+    || die "net-start failed - install dnsmasq-base: sudo apt install -y dnsmasq-base"
 fi
 
 sudo install -d -m 0755 "$IMAGE_DIR"
