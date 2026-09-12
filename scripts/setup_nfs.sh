@@ -23,6 +23,7 @@ EXPORT_DIR="${EXPORT_DIR:-/srv/mpj-share}"
 MOUNT_DIR="${MOUNT_DIR:-/srv/mpj-share}"   # same path on every node (uniform container bind-mount for P5-03)
 NFS_OPTS="${NFS_OPTS:-rw,sync,no_subtree_check,no_root_squash}"
 MOUNT_OPTS="${MOUNT_OPTS:-rw,nfsvers=3,soft,timeo=100,retrans=2,_netdev}"
+MOUNT_RETRIES="${MOUNT_RETRIES:-4}"
 
 log() { printf '[nfs] %s\n' "$*"; }
 die() { printf '[nfs] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -48,6 +49,10 @@ apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nfs-kernel-server
 mkdir -p $EXPORT_DIR/input $EXPORT_DIR/output $EXPORT_DIR/results $EXPORT_DIR/partitions
 chmod -R 0777 $EXPORT_DIR
+# The manager mounts its own export in step 2 for path uniformity. A directory
+# that is itself an NFS mount cannot be re-exported (exportfs: "requires
+# fsid="), so drop any existing self-mount BEFORE touching the export table.
+mountpoint -q $EXPORT_DIR && umount -f -l $EXPORT_DIR || true
 if ! grep -qsF "$EXPORT_DIR " /etc/exports; then
   echo "$EXPORT_DIR  $SUBNET($NFS_OPTS)" >> /etc/exports
 fi
@@ -68,7 +73,17 @@ if ! grep -qs "$MGR_IP:$EXPORT_DIR" /etc/fstab; then
   echo "$MGR_IP:$EXPORT_DIR  $MOUNT_DIR  nfs  $MOUNT_OPTS  0 0" >> /etc/fstab
 fi
 mountpoint -q $MOUNT_DIR && umount -f -l $MOUNT_DIR || true
-mount $MOUNT_DIR
+mounted=0
+for attempt in $(seq 1 $MOUNT_RETRIES); do
+  if mount $MOUNT_DIR; then
+    mounted=1
+    break
+  fi
+  echo "[nfs:remote] mount attempt $attempt failed on $name; client view of server exports:"
+  showmount -e $MGR_IP || true
+  sleep 3
+done
+[ "${mounted}" -eq 1 ] || { echo "[nfs:remote] ERROR: mount failed on $name after $MOUNT_RETRIES attempts" >&2; exit 1; }
 REMOTE
 done
 
