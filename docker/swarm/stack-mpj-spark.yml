@@ -20,7 +20,7 @@
 #     the NFS mount makes shard files visible to every rank while keeping the
 #     app importable. Propagated to remote ranks by `mpirun -x PYTHONPATH` (see
 #     runbook below).
-#   - endpoint_mode: dnsrr: VIP-mode service DNS gives each rank name a
+#   - deploy.endpoint_mode: dnsrr: VIP-mode service DNS gives each rank name a
 #     load-balanced virtual IP; Open MPI's TCP wireup requires each rank name
 #     to resolve to a stable per-container IP. dnsrr restores that identity.
 #     Consequence: Swarm forbids port publishing in dnsrr mode, so the former
@@ -62,6 +62,7 @@ x-common-env: &common-env
   PYTHONUNBUFFERED: "1"
 
 x-rank-deploy: &rank-deploy
+  endpoint_mode: dnsrr
   replicas: 1
   restart_policy:
     condition: on-failure
@@ -88,7 +89,6 @@ services:
     networks:
       mpj-net:
         aliases: [mpi-root]
-    endpoint_mode: dnsrr
     deploy:
       <<: *rank-deploy
       placement:
@@ -108,7 +108,6 @@ services:
     networks:
       mpj-net:
         aliases: [mpi-worker-1]
-    endpoint_mode: dnsrr
     deploy:
       <<: *rank-deploy
       placement:
@@ -128,7 +127,6 @@ services:
     networks:
       mpj-net:
         aliases: [mpi-worker-2]
-    endpoint_mode: dnsrr
     deploy:
       <<: *rank-deploy
       placement:
