@@ -59,9 +59,14 @@ and exits non-zero on failure.
 
 ## 5. Acceptance criteria mapping (issue #26)
 
-- [ ] `docker swarm init` + worker join on cluster nodes - bootstrap_swarm.sh, steps 1-2
-- [ ] Overlay network configured - `mpj-net`, attachable, step 3
-- [ ] Both verified automatically by the validation step (step 4), which fails the script otherwise
+- [x] `docker swarm init` + worker join on cluster nodes - bootstrap_swarm.sh, steps 1-2
+  (validated 2026-09-12: 3/3 nodes Ready+Active - swarm-manager Leader,
+  swarm-worker1, swarm-worker2, Docker Engine 29.1.3)
+- [x] Overlay network configured - `mpj-net`, attachable, step 3
+  (validated 2026-09-12: driver=overlay, Attachable=true)
+- [x] Both verified automatically by the validation step (step 4), which fails
+  the script otherwise - passed 2026-09-12 on the KVM host (acceptance-check
+  format fix landed in commit b72d99c)
 
 ## 6. Troubleshooting
 
@@ -71,9 +76,22 @@ and exits non-zero on failure.
   `sudo virsh net-define /usr/share/libvirt/networks/default.xml && sudo virsh net-start default`
 - `net-start failed` -> install dnsmasq: `sudo apt install -y dnsmasq-base`,
   then re-run the script
+- `dnsmasq: failed to create listening socket for 192.168.122.1: Address already in use` ->
+  a stale dnsmasq process from an earlier libvirtd run still holds the
+  network's socket. Ubuntu's libvirtd is socket-activated and idles out after
+  ~120 s without clients; across restarts it can orphan dnsmasq and leave the
+  network reporting inactive. Fix:
+  `sudo pkill -f 'dnsmasq.*libvirt/dnsmasq/default.conf'` then
+  `virsh --connect qemu:///system net-start default`. The provisioning script
+  polls the network state for up to 30 s before failing, so slow daemon
+  wake-ups and autostart races are tolerated.
 - `virt-install: unknown OS variant` -> re-run with `OS_VARIANT=ubuntu22.04`
 - No DHCP lease after 180 s -> check `virsh net-dhcp-leases default`; cloud-init
   may still be running: `ssh ubuntu@<ip> cloud-init status --wait`
+- `permission denied ... /var/run/docker.sock` on a VM right after provisioning
+  -> cloud-init's `usermod -aG docker ubuntu` step has not finished yet; wait
+  for `cloud-init status --wait` on that VM, then re-run bootstrap_swarm.sh
+  (all steps are idempotent)
 - Permission denied on `virsh` -> ensure libvirt/kvm group membership, or set
   `VIRSH="sudo virsh --connect qemu:///system"`
 
