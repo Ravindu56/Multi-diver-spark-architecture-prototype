@@ -1,6 +1,28 @@
 # P5-03 — Multi-Driver Stack on Docker Swarm
 
-Maps to GitHub issue **#28** (Phase 5 — Obj 1a, 1c).
+Maps to GitHub issue **#28** (Phase 5 — Obj 1a, 1c) — **✅ COMPLETED 2026-09-12.**
+
+## Acceptance evidence
+
+Validated on the 3-node KVM Swarm (swarm-manager Leader + swarm-worker1/2,
+Docker 29.1.3), image `mpj-spark:latest` (`sha256:14e2098…`) distributed to
+all three VM daemons:
+
+- [x] **docker-compose adapted to docker stack** — `docker/swarm/stack-mpj-spark.yml`
+      rendered via `docker compose config` and deployed with
+      `docker stack deploy`; all three services converged to `1/1`.
+- [x] **Service placement constraints set** — verified node-by-node with
+      `docker service ps`: `mpi-root → swarm-manager` (role constraint),
+      `mpi-worker-1 → swarm-worker1`, `mpi-worker-2 → swarm-worker2`
+      (hostname constraints).
+- [x] **Shared-storage round-trip** — probe written by the `mpj_mpi-root`
+      container at `/data` visible at `/srv/mpj-share` on all three VM hosts
+      (container → bind mount → NFS export → remote nodes).
+- [x] **Phase-4 DNS continuity** — `mpi-root` / `mpi-worker-1` /
+      `mpi-worker-2` resolve from inside stack containers via network aliases
+      on `mpj-net`; entrypoint hostfile logic unchanged.
+
+Issues #28 closed as completed with the full evidence comment.
 
 ## What was added
 
@@ -65,6 +87,8 @@ Successful run ends with `P5-03 acceptance criteria met - issue #28`.
 
 | Symptom | Likely cause / fix |
 |---|---|
+| `docker stack deploy` fails: "top-level object must be a mapping" | rendered file empty — caused by `compose config --quiet` (validation-only); fixed in `c9ec345` |
+| `docker stack deploy` fails: "published must be a integer" | `compose config` emits quoted ports — unquoted by sed in render step; fixed in `dcdb02d` |
 | Service stuck `0/1`; `service ps` shows "no suitable node" | placement constraint mismatch — check `docker node ls --format '{{.Hostname}}'` against the stack file |
 | Service stuck `0/1`; "No such image" | VM daemon lacks the image — run `scripts/build_and_distribute_image.sh` |
 | `bootstrap_stack.sh` fails image pre-check on one node | stale image on that node only — `NODE_IPS=<ip> ./scripts/build_and_distribute_image.sh` |
