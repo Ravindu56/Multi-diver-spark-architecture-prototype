@@ -1,0 +1,110 @@
+# =============================================================================
+# P5-03: Docker Swarm variant of the multi-driver MPJ-Spark stack
+# =============================================================================
+# Phase-4 single-host baseline (docker/docker-compose.yml) is intentionally
+# untouched - it remains the Obj 2d-i comparison baseline.
+#
+# Layout: one identifiable service PER MPI RANK (not mode:replicated with N
+# replicas). Each container hosts one independent Spark driver owned by its
+# rank; the rank identity comes from MPI_RANK / MPI_SIZE env vars injected
+# here, exactly like Phase 4 compose.
+#
+# Prerequisites (validated by P5-01 / P5-02):
+#   - Swarm active: swarm-manager (manager), swarm-worker1, swarm-worker2
+#   - overlay network: mpj-net (attachable)
+#   - NFS share /srv/mpj-share mounted on every Swarm node      (P5-02)
+#   - image mpj-spark:latest loaded on every node's daemon
+#     (scripts/build_and_distribute_image.sh)
+#
+# Deployed via scripts/bootstrap_stack.sh, which interpolates shell env
+# (docker stack deploy does not read .env files).
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------- rank 0
+  mpi-root:
+    image: mpj-spark:latest
+    # Stack services have no TTY/stdin. The Phase-4 entrypoint execs CMD args
+    # when they are passed, so `sleep infinity` keeps rank 0 alive; workloads
+    # are launched via `docker exec` on the manager (same workflow as P4).
+    command: ["sleep", "infinity"]
+    environment:
+      MPI_RANK: "0"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+      NUM_WORKERS: "${NUM_WORKERS:-2}"
+      MPJ_SHARED_STORAGE: "${MPJ_SHARED_STORAGE:-/data}"
+      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_small.txt}"
+      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_small.txt}"
+    volumes:
+      - /srv/mpj-share:/data          # P5-02 NFS export (Lustre equivalent)
+    networks:
+      mpj-net:
+        aliases:
+          - mpi-root                  # keep Phase-4 hostfile names resolvable
+    ports:
+      - "4040:4040"                   # root Spark UI via routing mesh
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: any
+
+  # ---------------------------------------------------------------- rank 1
+  mpi-worker-1:
+    image: mpj-spark:latest
+    # No command override: ranks 1+ hold sshd in the entrypoint, which keeps
+    # the container alive; mpirun spawns work on them from rank 0.
+    environment:
+      MPI_RANK: "1"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+      NUM_WORKERS: "${NUM_WORKERS:-2}"
+      MPJ_SHARED_STORAGE: "${MPJ_SHARED_STORAGE:-/data}"
+      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_small.txt}"
+      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_small.txt}"
+    volumes:
+      - /srv/mpj-share:/data
+    networks:
+      mpj-net:
+        aliases:
+          - mpi-worker-1
+    ports:
+      - "4041:4040"                   # worker-1 Spark UI via routing mesh
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+      restart_policy:
+        condition: any
+
+  # ---------------------------------------------------------------- rank 2
+  mpi-worker-2:
+    image: mpj-spark:latest
+    environment:
+      MPI_RANK: "2"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+      NUM_WORKERS: "${NUM_WORKERS:-2}"
+      MPJ_SHARED_STORAGE: "${MPJ_SHARED_STORAGE:-/data}"
+      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_small.txt}"
+      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_small.txt}"
+    volumes:
+      - /srv/mpj-share:/data
+    networks:
+      mpj-net:
+        aliases:
+          - mpi-worker-2
+    ports:
+      - "4042:4040"                   # worker-2 Spark UI via routing mesh
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == swarm-worker2
+      restart_policy:
+        condition: any
+
+networks:
+  mpj-net:
+    external: true                    # created by scripts/bootstrap_swarm.sh
