@@ -33,8 +33,8 @@ services:
       MPI_SIZE: "${MPI_SIZE:-3}"
       NUM_WORKERS: "${NUM_WORKERS:-2}"
       MPJ_SHARED_STORAGE: "${MPJ_SHARED_STORAGE:-/data}"
-      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_small.txt}"
-      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_small.txt}"
+      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_data.csv}"
+      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_data.csv}"
     volumes:
       - /srv/mpj-share:/data          # P5-02 NFS export (Lustre equivalent)
     networks:
@@ -61,8 +61,8 @@ services:
       MPI_SIZE: "${MPI_SIZE:-3}"
       NUM_WORKERS: "${NUM_WORKERS:-2}"
       MPJ_SHARED_STORAGE: "${MPJ_SHARED_STORAGE:-/data}"
-      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_small.txt}"
-      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_small.txt}"
+      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_data.csv}"
+      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_data.csv}"
     volumes:
       - /srv/mpj-share:/data
     networks:
@@ -87,8 +87,8 @@ services:
       MPI_SIZE: "${MPI_SIZE:-3}"
       NUM_WORKERS: "${NUM_WORKERS:-2}"
       MPJ_SHARED_STORAGE: "${MPJ_SHARED_STORAGE:-/data}"
-      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_small.txt}"
-      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_small.txt}"
+      MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_data.csv}"
+      MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_data.csv}"
     volumes:
       - /srv/mpj-share:/data
     networks:
