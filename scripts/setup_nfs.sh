@@ -48,6 +48,9 @@ ssh_vm() { # ssh_vm <ip> <remote command...>
 }
 
 # ---- 1. NFS server on the manager ----
+# NOTE: <<REMOTE is an unquoted heredoc; variables intended for the LOCAL
+# side ($EXPORT_DIR, $SUBNET, ...) expand here. Remote-side bookkeeping
+# variables must be escaped (\$changed) or set -u kills the run locally.
 log "configuring NFS server on $MGR_NAME"
 ssh_vm "$MGR_IP" 'sudo bash -s' <<REMOTE
 set -euo pipefail
@@ -65,7 +68,7 @@ systemctl enable nfs-kernel-server >/dev/null
 # Full restart only when the table changed or the service is down: restarting
 # while an (older-style) self-mount unit exists triggers a systemd ordering
 # cycle; exportfs -ra already reloaded the table above.
-if [ "${changed}" -eq 1 ] || ! systemctl is-active --quiet nfs-kernel-server; then
+if [ "\${changed}" -eq 1 ] || ! systemctl is-active --quiet nfs-kernel-server; then
   systemctl restart nfs-kernel-server
 fi
 REMOTE
@@ -92,7 +95,7 @@ for attempt in 1 2 3 4; do
   showmount -e $MGR_IP || true
   sleep 3
 done
-if [ "${mounted}" -ne 1 ]; then
+if [ "\${mounted}" -ne 1 ]; then
   echo "[nfs:remote] ERROR: mount failed on ${name} after retries" >&2
   exit 1
 fi
