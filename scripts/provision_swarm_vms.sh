@@ -77,8 +77,12 @@ fi
 
 if ! $VIRSH net-info "$NETWORK" | grep -q 'Active:.*yes'; then
   log "starting libvirt network '$NETWORK'"
-  $VIRSH net-start "$NETWORK" \
-    || die "net-start failed - install dnsmasq-base: sudo apt install -y dnsmasq-base"
+  if ! $VIRSH net-start "$NETWORK" 2>/dev/null; then
+    log "net-start returned an error - re-checking state (may have lost an autostart race)"
+    sleep 2
+    $VIRSH net-info "$NETWORK" | grep -q 'Active:.*yes' \
+      || die "network '$NETWORK' still inactive after net-start - install dnsmasq-base: sudo apt install -y dnsmasq-base"
+  fi
 fi
 
 sudo install -d -m 0755 "$IMAGE_DIR"
