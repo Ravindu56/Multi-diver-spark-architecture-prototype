@@ -48,6 +48,11 @@ grep -q "^services:" "$RENDERED" || {
   echo "[stack] ERROR: rendered stack is empty - compose config produced no services"
   exit 1
 }
+# `docker compose config` renders published ports as quoted strings, which
+# `docker stack deploy` rejects ('published must be a integer'). Unquote
+# them, and drop the compose-only top-level `name:` field.
+sed -i -E 's/(published: ?)"([0-9]+)"/\1\2/g' "$RENDERED"
+sed -i -E '/^name: /d' "$RENDERED"
 scp -q "$RENDERED" "$SSH_USER@$MANAGER:/tmp/stack-mpj-spark.rendered.yml"
 rm -f "$RENDERED"
 echo "[stack] stack file rendered and staged on manager"
