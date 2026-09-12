@@ -67,7 +67,7 @@ fi
 log "docker node ls:"
 ssh_vm "$MGR_IP" 'docker node ls'
 
-ready="$(ssh_vm "$MGR_IP" "docker node ls --format '{{.Status.State}} {{.Availability}}'" \
+ready="$(ssh_vm "$MGR_IP" "docker node ls --format '{{.Status}} {{.Availability}}'" \
         | grep -c 'Ready Active' || true)"
 expected="${#NODES[@]}"
 driver="$(ssh_vm "$MGR_IP" "docker network inspect $OVERLAY_NET --format '{{.Driver}}/attachable={{.Attachable}}'")"
