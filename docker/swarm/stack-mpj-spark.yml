@@ -4,7 +4,7 @@
 # equivalents, keeping every rank contract identical:
 #   - service names / DNS aliases:  mpi-root, mpi-worker-1, mpi-worker-2
 #   - shared storage mount point:   /data  (NFS bind mount, one export /srv/mpj-share)
-#   - env contract read by entrypoint.sh: MPI_SIZE / MPI_HOSTS / NFS_* / metrics envs
+#   - env contract read by entrypoint.sh: MPI_SIZE / MPI_HOSTS / MPI_RANK / NFS_* / metrics envs
 #   - rank identity + sshd wiring:    unchanged image entrypoint
 #
 # Swarm-native replacements:
@@ -82,6 +82,7 @@ services:
     command: ["sleep", "infinity"]
     environment:
       <<: *common-env
+      MPI_RANK: "0"
       MPI_SIZE: "${MPI_SIZE:-3}"
       MPI_HOSTS: "${MPI_HOSTS:-mpi-root,mpi-worker-1,mpi-worker-2}"
     volumes:
@@ -101,6 +102,7 @@ services:
     working_dir: /data
     environment:
       <<: *common-env
+      MPI_RANK: "1"
       MPI_SIZE: "${MPI_SIZE:-3}"
       MPI_HOSTS: "${MPI_HOSTS:-mpi-root,mpi-worker-1,mpi-worker-2}"
     volumes:
@@ -120,6 +122,7 @@ services:
     working_dir: /data
     environment:
       <<: *common-env
+      MPI_RANK: "2"
       MPI_SIZE: "${MPI_SIZE:-3}"
       MPI_HOSTS: "${MPI_HOSTS:-mpi-root,mpi-worker-1,mpi-worker-2}"
     volumes:
