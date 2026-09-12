@@ -39,9 +39,15 @@ for ip in $NODE_IPS; do
 done
 
 # --- render (shell env interpolation) and copy to the manager ---------------
+# NOTE: `docker compose config --quiet` VALIDATES ONLY and prints nothing;
+# piping it to a file produced an empty stack ('top-level object must be a
+# mapping'). Use plain `config` and sanity-check the rendered YAML.
 RENDERED="$(mktemp)"
-docker compose -f docker/swarm/stack-mpj-spark.yml config --quiet > "$RENDERED" \
-  || docker compose -f docker/swarm/stack-mpj-spark.yml config > "$RENDERED"
+docker compose -f docker/swarm/stack-mpj-spark.yml config > "$RENDERED"
+grep -q "^services:" "$RENDERED" || {
+  echo "[stack] ERROR: rendered stack is empty - compose config produced no services"
+  exit 1
+}
 scp -q "$RENDERED" "$SSH_USER@$MANAGER:/tmp/stack-mpj-spark.rendered.yml"
 rm -f "$RENDERED"
 echo "[stack] stack file rendered and staged on manager"
