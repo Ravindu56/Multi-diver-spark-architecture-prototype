@@ -75,14 +75,33 @@ EOF
   $VIRSH net-autostart "$NETWORK" >/dev/null 2>&1 || true
 fi
 
-if ! $VIRSH net-info "$NETWORK" | grep -q 'Active:.*yes'; then
-  log "starting libvirt network '$NETWORK'"
-  if ! $VIRSH net-start "$NETWORK" 2>/dev/null; then
-    log "net-start returned an error - re-checking state (may have lost an autostart race)"
-    sleep 2
-    $VIRSH net-info "$NETWORK" | grep -q 'Active:.*yes' \
-      || die "network '$NETWORK' still inactive after net-start - install dnsmasq-base: sudo apt install -y dnsmasq-base"
+# Network gate: poll instead of trusting a single one-shot probe. Ubuntu's
+# libvirtd is socket-activated with a 120 s idle timeout, so the daemon may be
+# mid-startup when this script is the waking client, and its autostart engine
+# may be bringing the network up asynchronously - both report as "inactive" to
+# a single net-info probe. A helper function with command substitution is used
+# rather than an if-pipeline so `pipefail` + `grep -q` early-exit cannot be
+# misread as probe failure.
+net_active() {
+  local out
+  out="$($VIRSH net-info "$NETWORK" 2>/dev/null)" || return 1
+  [[ $out =~ Active:[[:space:]]*yes ]]
+}
+
+if ! net_active; then
+  log "libvirt network '$NETWORK' not active - attempting start"
+  if ! $VIRSH net-start "$NETWORK"; then
+    log "net-start failed - polling state (autostart race or slow daemon wake)"
   fi
+  started=1
+  for _ in $(seq 1 15); do
+    if net_active; then
+      started=0
+      break
+    fi
+    sleep 2
+  done
+  [[ $started -eq 0 ]] || die "network '$NETWORK' stayed inactive for 30s - check manually: sudo virsh net-start $NETWORK (stale dnsmasq: sudo pkill -f 'dnsmasq.*libvirt/dnsmasq/default.conf')"
 fi
 
 sudo install -d -m 0755 "$IMAGE_DIR"
