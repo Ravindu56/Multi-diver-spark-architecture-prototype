@@ -2,22 +2,17 @@
 #
 # Replaces Phase 4's docker-compose + NFS-client-volume model with Swarm-native
 # equivalents, keeping every rank contract identical:
-#   - service names / DNS aliases:  mpi-root, mpi-worker-1 .. mpi-worker-8
+#   - service names / DNS aliases:  mpi-root, mpi-worker-1, mpi-worker-2
 #   - shared storage mount point:   /data  (NFS bind mount, one export /srv/mpj-share)
 #   - env contract read by entrypoint.sh: MPI_SIZE / MPI_RANK / NFS_* / metrics envs
 #   - rank identity + sshd wiring:    unchanged image entrypoint
 #
-# Co-location policy (as of this commit):
-#   dedicated mode (default):
-#     mpi-root          -> swarm-manager   (exclusive)
-#     mpi-worker-1      -> swarm-worker1   (exclusive)
-#     mpi-worker-2      -> swarm-worker2   (exclusive)
-#   extended 8-worker mode:
-#     mpi-worker-3..6   -> swarm-worker1   (co-located, 4 ranks)
-#     mpi-worker-7..8   -> swarm-worker2   (co-located, 2 ranks)
-#   SPARK_DRIVER_MEMORY caps each co-located Spark driver's JVM heap to fit
-#   4 ranks within a 2560 MB worker VM (4 x 400m ~ 1.6 GB, leaving ~1 GB OS).
-#   MPI_SIZE=9 enables the full 8-worker topology: 1 root + 8 workers.
+# This is the 3-rank DEDICATED mode (1 rank per VM). For co-located scaling
+# studies (Objective 2 evaluation), use the overlay files:
+#   docker stack deploy -c stack-mpj-spark.yml -c stack-mpj-spark.4w.yml mpj   # 5 ranks
+#   docker stack deploy -c stack-mpj-spark.yml -c stack-mpj-spark.8w.yml mpj   # 9 ranks
+#
+# See docs/p5-04-experimental-design.md for the co-location research rationale.
 
 name: mpj
 
@@ -34,9 +29,6 @@ x-common-env: &common-env
   SHARED_STORAGE_PATH: /data/shared_storage
   PYTHONPATH: /app
   PYTHONUNBUFFERED: "1"
-
-x-co-located-heap-env: &co-located-heap-env
-  SPARK_DRIVER_MEMORY: "400m"
 
 x-rank-deploy: &rank-deploy
   endpoint_mode: dnsrr
@@ -104,126 +96,6 @@ services:
     networks:
       mpj-net:
         aliases: [mpi-worker-2]
-    deploy:
-      <<: *rank-deploy
-      placement:
-        constraints:
-          - node.hostname == swarm-worker2
-
-  mpi-worker-3:
-    image: mpj-spark:latest
-    hostname: mpi-worker-3
-    working_dir: /data
-    environment:
-      <<: *common-env
-      <<: *co-located-heap-env
-      MPI_RANK: "3"
-      MPI_SIZE: "${MPI_SIZE:-3}"
-    volumes:
-      - *data-mount
-    networks:
-      mpj-net:
-        aliases: [mpi-worker-3]
-    deploy:
-      <<: *rank-deploy
-      placement:
-        constraints:
-          - node.hostname == swarm-worker1
-
-  mpi-worker-4:
-    image: mpj-spark:latest
-    hostname: mpi-worker-4
-    working_dir: /data
-    environment:
-      <<: *common-env
-      <<: *co-located-heap-env
-      MPI_RANK: "4"
-      MPI_SIZE: "${MPI_SIZE:-3}"
-    volumes:
-      - *data-mount
-    networks:
-      mpj-net:
-        aliases: [mpi-worker-4]
-    deploy:
-      <<: *rank-deploy
-      placement:
-        constraints:
-          - node.hostname == swarm-worker1
-
-  mpi-worker-5:
-    image: mpj-spark:latest
-    hostname: mpi-worker-5
-    working_dir: /data
-    environment:
-      <<: *common-env
-      <<: *co-located-heap-env
-      MPI_RANK: "5"
-      MPI_SIZE: "${MPI_SIZE:-3}"
-    volumes:
-      - *data-mount
-    networks:
-      mpj-net:
-        aliases: [mpi-worker-5]
-    deploy:
-      <<: *rank-deploy
-      placement:
-        constraints:
-          - node.hostname == swarm-worker1
-
-  mpi-worker-6:
-    image: mpj-spark:latest
-    hostname: mpi-worker-6
-    working_dir: /data
-    environment:
-      <<: *common-env
-      <<: *co-located-heap-env
-      MPI_RANK: "6"
-      MPI_SIZE: "${MPI_SIZE:-3}"
-    volumes:
-      - *data-mount
-    networks:
-      mpj-net:
-        aliases: [mpi-worker-6]
-    deploy:
-      <<: *rank-deploy
-      placement:
-        constraints:
-          - node.hostname == swarm-worker1
-
-  mpi-worker-7:
-    image: mpj-spark:latest
-    hostname: mpi-worker-7
-    working_dir: /data
-    environment:
-      <<: *common-env
-      <<: *co-located-heap-env
-      MPI_RANK: "7"
-      MPI_SIZE: "${MPI_SIZE:-3}"
-    volumes:
-      - *data-mount
-    networks:
-      mpj-net:
-        aliases: [mpi-worker-7]
-    deploy:
-      <<: *rank-deploy
-      placement:
-        constraints:
-          - node.hostname == swarm-worker2
-
-  mpi-worker-8:
-    image: mpj-spark:latest
-    hostname: mpi-worker-8
-    working_dir: /data
-    environment:
-      <<: *common-env
-      <<: *co-located-heap-env
-      MPI_RANK: "8"
-      MPI_SIZE: "${MPI_SIZE:-3}"
-    volumes:
-      - *data-mount
-    networks:
-      mpj-net:
-        aliases: [mpi-worker-8]
     deploy:
       <<: *rank-deploy
       placement:

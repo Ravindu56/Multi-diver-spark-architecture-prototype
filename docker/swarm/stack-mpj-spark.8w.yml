@@ -1,0 +1,222 @@
+# Overlay: 9-rank topology (dedicated root + 2 + 6 co-located).
+# Usage: docker stack deploy -c stack-mpj-spark.yml -c stack-mpj-spark.8w.yml mpj
+#
+# Experimental purpose: scaling limit under contention.
+# Total vCPUs held constant (3 VMs × 2 vCPU = 6); ranks split 1-4-4.
+
+services:
+  mpi-root:
+    environment:
+      MPI_SIZE: "9"
+
+  mpi-worker-1:
+    environment:
+      MPI_SIZE: "9"
+
+  mpi-worker-2:
+    environment:
+      MPI_SIZE: "9"
+
+  mpi-worker-3:
+    image: mpj-spark:latest
+    hostname: mpi-worker-3
+    working_dir: /data
+    environment:
+      SPARK_LOCAL_IP: 0.0.0.0
+      NFS_SERVER: "${NFS_SERVER:-192.168.122.224}"
+      NFS_SHARE: "${NFS_SHARE:-/srv/mpj-share}"
+      NFS_CONTAINER_SHARE: "${NFS_CONTAINER_SHARE:-/srv/mpj-share}"
+      MPJ_SHARED_STORAGE: /data/shared_storage
+      SHARED_STORAGE_PATH: /data/shared_storage
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      SPARK_DRIVER_MEMORY: "400m"
+      MPI_RANK: "3"
+      MPI_SIZE: "9"
+    volumes:
+      - type: bind
+        source: /srv/mpj-share
+        target: /data
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-3]
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+
+  mpi-worker-4:
+    image: mpj-spark:latest
+    hostname: mpi-worker-4
+    working_dir: /data
+    environment:
+      SPARK_LOCAL_IP: 0.0.0.0
+      NFS_SERVER: "${NFS_SERVER:-192.168.122.224}"
+      NFS_SHARE: "${NFS_SHARE:-/srv/mpj-share}"
+      NFS_CONTAINER_SHARE: "${NFS_CONTAINER_SHARE:-/srv/mpj-share}"
+      MPJ_SHARED_STORAGE: /data/shared_storage
+      SHARED_STORAGE_PATH: /data/shared_storage
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      SPARK_DRIVER_MEMORY: "400m"
+      MPI_RANK: "4"
+      MPI_SIZE: "9"
+    volumes:
+      - type: bind
+        source: /srv/mpj-share
+        target: /data
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-4]
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+
+  mpi-worker-5:
+    image: mpj-spark:latest
+    hostname: mpi-worker-5
+    working_dir: /data
+    environment:
+      SPARK_LOCAL_IP: 0.0.0.0
+      NFS_SERVER: "${NFS_SERVER:-192.168.122.224}"
+      NFS_SHARE: "${NFS_SHARE:-/srv/mpj-share}"
+      NFS_CONTAINER_SHARE: "${NFS_CONTAINER_SHARE:-/srv/mpj-share}"
+      MPJ_SHARED_STORAGE: /data/shared_storage
+      SHARED_STORAGE_PATH: /data/shared_storage
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      SPARK_DRIVER_MEMORY: "400m"
+      MPI_RANK: "5"
+      MPI_SIZE: "9"
+    volumes:
+      - type: bind
+        source: /srv/mpj-share
+        target: /data
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-5]
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+
+  mpi-worker-6:
+    image: mpj-spark:latest
+    hostname: mpi-worker-6
+    working_dir: /data
+    environment:
+      SPARK_LOCAL_IP: 0.0.0.0
+      NFS_SERVER: "${NFS_SERVER:-192.168.122.224}"
+      NFS_SHARE: "${NFS_SHARE:-/srv/mpj-share}"
+      NFS_CONTAINER_SHARE: "${NFS_CONTAINER_SHARE:-/srv/mpj-share}"
+      MPJ_SHARED_STORAGE: /data/shared_storage
+      SHARED_STORAGE_PATH: /data/shared_storage
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      SPARK_DRIVER_MEMORY: "400m"
+      MPI_RANK: "6"
+      MPI_SIZE: "9"
+    volumes:
+      - type: bind
+        source: /srv/mpj-share
+        target: /data
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-6]
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      placement:
+        constraints:
+          - node.hostname == swarm-worker2
+
+  mpi-worker-7:
+    image: mpj-spark:latest
+    hostname: mpi-worker-7
+    working_dir: /data
+    environment:
+      SPARK_LOCAL_IP: 0.0.0.0
+      NFS_SERVER: "${NFS_SERVER:-192.168.122.224}"
+      NFS_SHARE: "${NFS_SHARE:-/srv/mpj-share}"
+      NFS_CONTAINER_SHARE: "${NFS_CONTAINER_SHARE:-/srv/mpj-share}"
+      MPJ_SHARED_STORAGE: /data/shared_storage
+      SHARED_STORAGE_PATH: /data/shared_storage
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      SPARK_DRIVER_MEMORY: "400m"
+      MPI_RANK: "7"
+      MPI_SIZE: "9"
+    volumes:
+      - type: bind
+        source: /srv/mpj-share
+        target: /data
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-7]
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      placement:
+        constraints:
+          - node.hostname == swarm-worker2
+
+  mpi-worker-8:
+    image: mpj-spark:latest
+    hostname: mpi-worker-8
+    working_dir: /data
+    environment:
+      SPARK_LOCAL_IP: 0.0.0.0
+      NFS_SERVER: "${NFS_SERVER:-192.168.122.224}"
+      NFS_SHARE: "${NFS_SHARE:-/srv/mpj-share}"
+      NFS_CONTAINER_SHARE: "${NFS_CONTAINER_SHARE:-/srv/mpj-share}"
+      MPJ_SHARED_STORAGE: /data/shared_storage
+      SHARED_STORAGE_PATH: /data/shared_storage
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      SPARK_DRIVER_MEMORY: "400m"
+      MPI_RANK: "8"
+      MPI_SIZE: "9"
+    volumes:
+      - type: bind
+        source: /srv/mpj-share
+        target: /data
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-8]
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      placement:
+        constraints:
+          - node.hostname == swarm-worker2
