@@ -9,12 +9,12 @@
 #
 # This is the 3-rank DEDICATED mode (1 rank per VM). For co-located scaling
 # studies (Objective 2 evaluation), use the overlay files:
-#   docker stack deploy -c stack-mpj-spark.yml -c stack-mpj-spark.4w.yml mpj   # 5 ranks
-#   docker stack deploy -c stack-mpj-spark.yml -c stack-mpj-spark.8w.yml mpj   # 9 ranks
+#   docker compose -f stack-mpj-spark.yml -f stack-mpj-spark.4w.yml config | \
+#     docker stack deploy -c - mpj   # 5 ranks
+#   docker compose -f stack-mpj-spark.yml -f stack-mpj-spark.8w.yml config | \
+#     docker stack deploy -c - mpj   # 9 ranks
 #
 # See docs/p5-04-experimental-design.md for the co-location research rationale.
-
-name: mpj
 
 x-common-env: &common-env
   SPARK_LOCAL_IP: 0.0.0.0
