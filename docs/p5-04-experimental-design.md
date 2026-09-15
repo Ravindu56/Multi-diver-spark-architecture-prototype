@@ -8,9 +8,15 @@
 
 | Cell | Ranks | Topology | Total vCPU | Heap/Rank | Purpose |
 |------|-------|----------|------------|-----------|---------|
-| **A** | 3 | 1 root + 2 workers (1/VM) | 3 VMs × 2 vCPU = 6 | default | Reference; comparable to Phase 4 |
-| **B** | 5 | 1 root + 4 workers (1/VM + 2/VM) | 3 VMs × 2 vCPU = 6 | 400m (co-located) | Co-location penalty |
-| **C** | 9 | 1 root + 8 workers (1/VM + 4/VM) | 3 VMs × 2 vCPU = 6 | 400m (co-located) | Scaling limit under contention |
+| **A** | 3 | 1 root + 2 workers (1 rank/VM) | 3 VMs × 2 vCPU = 6 | default | Reference; comparable to Phase 4 |
+| **B** | 5 | 1 root + 4 workers (2 ranks/worker VM) | 3 VMs × 2 vCPU = 6 | 400m (co-located) | Co-location penalty |
+| **C** | 9 | 1 root + 8 workers (4 ranks/worker VM) | 3 VMs × 2 vCPU = 6 | 400m (co-located) | Scaling limit under contention |
+
+Per-VM rank layout (balanced):
+
+- swarm-manager: `mpi-root` (rank 0, exclusive)
+- swarm-worker1: `mpi-worker-1` + (Cell B: `mpi-worker-3`; Cell C: `mpi-worker-3,4,5`)
+- swarm-worker2: `mpi-worker-2` + (Cell B: `mpi-worker-4`; Cell C: `mpi-worker-6,7,8`)
 
 ## Isolating Variables
 
@@ -23,19 +29,18 @@ The critical design constraint: increasing rank count **and** co-location simult
 
 ## Deployment Commands
 
+Canonical path — `bootstrap_stack.sh` accepts the cell as an argument:
+
 ```bash
-# Cell A — dedicated (default)
-unset MPI_SIZE
-docker stack deploy -c docker/swarm/stack-mpj-spark.yml mpj
-
-# Cell B — 5-rank (4 workers)
-export MPI_SIZE=5
-docker stack deploy -c docker/swarm/stack-mpj-spark.yml -c docker/swarm/stack-mpj-spark.4w.yml mpj
-
-# Cell C — 9-rank (8 workers)
-export MPI_SIZE=9
-docker stack deploy -c docker/swarm/stack-mpj-spark.yml -c docker/swarm/stack-mpj-spark.8w.yml mpj
+./scripts/bootstrap_stack.sh        # Cell A — dedicated (default)
+./scripts/bootstrap_stack.sh 4w     # Cell B — 5-rank
+./scripts/bootstrap_stack.sh 8w     # Cell C — 9-rank
 ```
+
+Each invocation renders (base + overlay via `docker compose config`), sanitizes
+(drops the injected `name:` field, unquotes published ports), stages the result
+on the manager, deploys, then validates convergence, per-service placement,
+DNS aliases and the NFS round-trip.
 
 ## Measurement Invocation Matrix
 

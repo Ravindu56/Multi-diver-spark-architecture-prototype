@@ -10,7 +10,7 @@ to Phase 4.
 ssh ubuntu@192.168.122.224 \
   'docker stack services mpj --format "{{.Name}} {{.Replicas}}"'
 ```
-All three (or nine, if extended) services must show `1/1` before proceeding.
+All services for the deployed cell (3, 5 or 9) must show `1/1` before proceeding.
 
 ## Canonical K-Means smoke run (validation, 2026-09-12 evidence)
 
@@ -46,19 +46,31 @@ The runbook canonical command always pins:
 -mca oob_tcp_if_include 10.0.1.0/24 -mca btl_tcp_if_include 10.0.1.0/24
 ```
 
-## Co-located (8-worker) topology — NEW
+## Co-located (8-worker) topology — Cell C
 
-Enable the extended topology by exporting `MPI_SIZE=9` before `bootstrap_stack.sh`:
+Enable the extended topology with the bootstrap overlay argument (preferred),
+or manually with both compose files:
+
+```bash
+./scripts/bootstrap_stack.sh 8w          # canonical path
+# manual equivalent:
+docker compose -f docker/swarm/stack-mpj-spark.yml \
+               -f docker/swarm/stack-mpj-spark.8w.yml config | \
+  sed -E '/^name: /d; s/(published: ?)"([0-9]+)"/\1\2/g' | \
+  ssh ubuntu@192.168.122.224 'docker stack deploy -c - mpj'
+```
+
+Placement (4 ranks per worker VM, 400m heap cap on co-located ranks):
 
 | Service | rank | placement | heap |
 |---------|------|-----------|------|
 | mpi-root | 0 | swarm-manager (exclusive) | default |
-| mpi-worker-1 | 1 | swarm-worker1 (exclusive) | default |
-| mpi-worker-2 | 2 | swarm-worker2 (exclusive) | default |
+| mpi-worker-1 | 1 | swarm-worker1 (dedicated) | default |
+| mpi-worker-2 | 2 | swarm-worker2 (dedicated) | default |
 | mpi-worker-3 | 3 | swarm-worker1 (co-located) | 400m |
 | mpi-worker-4 | 4 | swarm-worker1 (co-located) | 400m |
 | mpi-worker-5 | 5 | swarm-worker1 (co-located) | 400m |
-| mpi-worker-6 | 6 | swarm-worker1 (co-located) | 400m |
+| mpi-worker-6 | 6 | swarm-worker2 (co-located) | 400m |
 | mpi-worker-7 | 7 | swarm-worker2 (co-located) | 400m |
 | mpi-worker-8 | 8 | swarm-worker2 (co-located) | 400m |
 
