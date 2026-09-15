@@ -2,64 +2,41 @@
 #
 # Replaces Phase 4's docker-compose + NFS-client-volume model with Swarm-native
 # equivalents, keeping every rank contract identical:
-#   - service names / DNS aliases:  mpi-root, mpi-worker-1, mpi-worker-2
+#   - service names / DNS aliases:  mpi-root, mpi-worker-1 .. mpi-worker-8
 #   - shared storage mount point:   /data  (NFS bind mount, one export /srv/mpj-share)
-#   - env contract read by entrypoint.sh: MPI_SIZE / MPI_HOSTS / MPI_RANK / NFS_* / metrics envs
+#   - env contract read by entrypoint.sh: MPI_SIZE / MPI_RANK / NFS_* / metrics envs
 #   - rank identity + sshd wiring:    unchanged image entrypoint
 #
-# Swarm-native replacements:
-#   docker-compose up            -> docker stack deploy
-#   compose service containers   -> one replicated service per rank (placement-pinned)
-#   NFS client volume            -> bind mount of /srv/mpj-share (mounted via systemd on every VM)
-#   container_name aliases       -> swarm overlay DNS entries + explicit network aliases
-#
-# MPI-on-Swarm wiring parity fixes (P5 smoke evidence, 2026-09-12):
-#   - working_dir: /data + PYTHONPATH=/app: mpj_spark.config falls back to the
-#     relative path ./shared_storage for shard staging (it does not honor the
-#     legacy MPJ_SHARED_STORAGE host path baked into the image); pinning CWD to
-#     the NFS mount makes shard files visible to every rank while keeping the
-#     app importable. Propagated to remote ranks by `mpirun -x PYTHONPATH` (see
-#     runbook below).
-#   - deploy.endpoint_mode: dnsrr: VIP-mode service DNS gives each rank name a
-#     load-balanced virtual IP; Open MPI's TCP wireup requires each rank name
-#     to resolve to a stable per-container IP. dnsrr restores that identity.
-#     Consequence: Swarm forbids port publishing in dnsrr mode, so the former
-#     4040/4041/4042 host mappings are removed. Access Spark UIs via container
-#     overlay IPs (docker inspect) or re-add ports temporarily if needed.
-#   - PYTHONUNBUFFERED=1 so per-rank logs stream live during hung-run diagnosis.
-#
-# Render + deploy from the repo root on the host (or via scripts/bootstrap_stack.sh):
-#   set -a; . docker/.env; set +a   # supplies MPI_SIZE, NUM_MPI_WORKERS, NFS_SERVER, ...
-#   docker stack deploy -c docker/swarm/stack-mpj-spark.yml mpj
-#
-# Run a workload (rank 0 orchestrates, shards land on the NFS mount):
-#   ROOT=$(docker ps -q -f name=mpj_mpi-root | head -1)
-#   docker exec $ROOT bash -lc 'cd /data && export PYTHONPATH=/app PYTHONUNBUFFERED=1 && \
-#     mpirun -n $MPI_SIZE --hostfile /etc/mpi/hostfile -x PYTHONPATH -x PYTHONUNBUFFERED \
-#       -mca pml ob1 -mca btl tcp,self -mca plm_rsh_args "-p 22" \
-#       python -m mpj_spark.applications.kmeans.allreduce \
-#         --input /data/input/kmeans_data.csv --k 5 --max-iter 20 \
-#         --output /data/results/<run-id>'
+# Co-location policy (as of this commit):
+#   dedicated mode (default):
+#     mpi-root          -> swarm-manager   (exclusive)
+#     mpi-worker-1      -> swarm-worker1   (exclusive)
+#     mpi-worker-2      -> swarm-worker2   (exclusive)
+#   extended 8-worker mode:
+#     mpi-worker-3..6   -> swarm-worker1   (co-located, 4 ranks)
+#     mpi-worker-7..8   -> swarm-worker2   (co-located, 2 ranks)
+#   SPARK_DRIVER_MEMORY caps each co-located Spark driver's JVM heap to fit
+#   4 ranks within a 2560 MB worker VM (4 x 400m ~ 1.6 GB, leaving ~1 GB OS).
+#   MPI_SIZE=9 enables the full 8-worker topology: 1 root + 8 workers.
 
 name: mpj
 
 x-common-env: &common-env
-  # Rank identity wiring consumed by docker/entrypoint.sh
   SPARK_LOCAL_IP: 0.0.0.0
   NFS_SERVER: "${NFS_SERVER:-192.168.122.224}"
   NFS_SHARE: "${NFS_SHARE:-/srv/mpj-share}"
   NFS_CONTAINER_SHARE: "${NFS_CONTAINER_SHARE:-/srv/mpj-share}"
-  # Metrics/validation env contract re-exported for workload+
-  # validation scripts (read by validate_p4_05..p4_13)
   MPJ_KMEANS_DATA: "${MPJ_KMEANS_DATA:-/data/input/kmeans_data.csv}"
   MPJ_LOGREG_DATA: "${MPJ_LOGREG_DATA:-/data/input/logreg_data.csv}"
   KMEANS_DATASET_SIZE_MB: "${KMEANS_DATASET_SIZE_MB:-50}"
   LOGREG_DATASET_SIZE_MB: "${LOGREG_DATASET_SIZE_MB:-50}"
-  # Swarm parity env hints (post-fix): point consumers at the NFS mount
   MPJ_SHARED_STORAGE: /data/shared_storage
   SHARED_STORAGE_PATH: /data/shared_storage
   PYTHONPATH: /app
   PYTHONUNBUFFERED: "1"
+
+x-co-located-heap-env: &co-located-heap-env
+  SPARK_DRIVER_MEMORY: "400m"
 
 x-rank-deploy: &rank-deploy
   endpoint_mode: dnsrr
@@ -84,7 +61,6 @@ services:
       <<: *common-env
       MPI_RANK: "0"
       MPI_SIZE: "${MPI_SIZE:-3}"
-      MPI_HOSTS: "${MPI_HOSTS:-mpi-root,mpi-worker-1,mpi-worker-2}"
     volumes:
       - *data-mount
     networks:
@@ -104,7 +80,6 @@ services:
       <<: *common-env
       MPI_RANK: "1"
       MPI_SIZE: "${MPI_SIZE:-3}"
-      MPI_HOSTS: "${MPI_HOSTS:-mpi-root,mpi-worker-1,mpi-worker-2}"
     volumes:
       - *data-mount
     networks:
@@ -124,12 +99,131 @@ services:
       <<: *common-env
       MPI_RANK: "2"
       MPI_SIZE: "${MPI_SIZE:-3}"
-      MPI_HOSTS: "${MPI_HOSTS:-mpi-root,mpi-worker-1,mpi-worker-2}"
     volumes:
       - *data-mount
     networks:
       mpj-net:
         aliases: [mpi-worker-2]
+    deploy:
+      <<: *rank-deploy
+      placement:
+        constraints:
+          - node.hostname == swarm-worker2
+
+  mpi-worker-3:
+    image: mpj-spark:latest
+    hostname: mpi-worker-3
+    working_dir: /data
+    environment:
+      <<: *common-env
+      <<: *co-located-heap-env
+      MPI_RANK: "3"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+    volumes:
+      - *data-mount
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-3]
+    deploy:
+      <<: *rank-deploy
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+
+  mpi-worker-4:
+    image: mpj-spark:latest
+    hostname: mpi-worker-4
+    working_dir: /data
+    environment:
+      <<: *common-env
+      <<: *co-located-heap-env
+      MPI_RANK: "4"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+    volumes:
+      - *data-mount
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-4]
+    deploy:
+      <<: *rank-deploy
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+
+  mpi-worker-5:
+    image: mpj-spark:latest
+    hostname: mpi-worker-5
+    working_dir: /data
+    environment:
+      <<: *common-env
+      <<: *co-located-heap-env
+      MPI_RANK: "5"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+    volumes:
+      - *data-mount
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-5]
+    deploy:
+      <<: *rank-deploy
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+
+  mpi-worker-6:
+    image: mpj-spark:latest
+    hostname: mpi-worker-6
+    working_dir: /data
+    environment:
+      <<: *common-env
+      <<: *co-located-heap-env
+      MPI_RANK: "6"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+    volumes:
+      - *data-mount
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-6]
+    deploy:
+      <<: *rank-deploy
+      placement:
+        constraints:
+          - node.hostname == swarm-worker1
+
+  mpi-worker-7:
+    image: mpj-spark:latest
+    hostname: mpi-worker-7
+    working_dir: /data
+    environment:
+      <<: *common-env
+      <<: *co-located-heap-env
+      MPI_RANK: "7"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+    volumes:
+      - *data-mount
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-7]
+    deploy:
+      <<: *rank-deploy
+      placement:
+        constraints:
+          - node.hostname == swarm-worker2
+
+  mpi-worker-8:
+    image: mpj-spark:latest
+    hostname: mpi-worker-8
+    working_dir: /data
+    environment:
+      <<: *common-env
+      <<: *co-located-heap-env
+      MPI_RANK: "8"
+      MPI_SIZE: "${MPI_SIZE:-3}"
+    volumes:
+      - *data-mount
+    networks:
+      mpj-net:
+        aliases: [mpi-worker-8]
     deploy:
       <<: *rank-deploy
       placement:
