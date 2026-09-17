@@ -3,9 +3,13 @@
 #
 # SparkSession factory with proportional memory isolation.
 #
-# Memory allocation strategy:
-#   JVM heap per worker = TOTAL_RAM_MB * MEMORY_FRACTION / num_workers
-#   (mirrors HPC node resource partitioning from the reference paper)
+# Memory allocation strategy (precedence, highest first):
+#   1. SPARK_DRIVER_MEMORY env var (e.g. "400m") — set by Swarm
+#      overlays to cap co-located ranks (P5-04 cells B/C).
+#   2. driver_memory_mb argument — explicit caller override.
+#   3. Proportional: TOTAL_RAM_MB * MEMORY_FRACTION / num_workers
+#      (mirrors HPC node resource partitioning from the reference paper).
+#
 # FIXES APPLIED:
 #   FIX 3a — Add JVM extraJavaOptions to load native BLAS (OpenBLAS/MKL).
 #             Eliminates: "Failed to load implementation from VectorBLAS"
@@ -16,9 +20,16 @@
 #             and avoid the GarbageCollectionMetrics WARN in logs.
 #             G1GC is better suited than default GC for large heap workloads.
 #
+#   FIX 5  — Honor SPARK_DRIVER_MEMORY env var. P5-04 (2026-09-16)
+#             showed the Swarm overlay value was silently ignored, so
+#             co-located ranks sized heap from the proportional formula
+#             and could oversubscribe the VM at Cell C density.
+#
 # Pre-requisite (run once on your machine):
 #   sudo apt-get install -y libopenblas-dev
 # ================================================================
+
+import os
 
 # Hoist TOTAL_CORES to module level so tests can patch
 # 'mpj_spark.workers.spark_session.TOTAL_CORES' directly.
@@ -42,6 +53,29 @@ def get_total_ram_mb() -> int:
     return 8192
 
 
+def _parse_memory_mb(value: str) -> int:
+    """Parse a Spark-style memory string ("400m", "1g", "512") to MB.
+
+    Bare numbers are interpreted as megabytes. Raises ValueError on
+    anything unparseable so a misconfigured overlay fails loudly at
+    session build instead of silently falling through to the formula.
+    """
+    v = value.strip().lower()
+    try:
+        if v.endswith("g"):
+            return int(float(v[:-1]) * 1024)
+        if v.endswith("m"):
+            return int(float(v[:-1]))
+        if v.endswith("k"):
+            return max(1, int(float(v[:-1]) / 1024))
+        return int(float(v))
+    except ValueError:
+        raise ValueError(
+            f"Unparseable SPARK_DRIVER_MEMORY value: {value!r} "
+            "(expected forms: '400m', '1g', or bare MB integer)"
+        )
+
+
 def build_spark_session(
     app_name: str,
     cores_override: int = None,
@@ -59,15 +93,22 @@ def build_spark_session(
     cores = cores_override if cores_override else TOTAL_CORES
 
     # ── RAM allocation ────────────────────────────────────────────────
-    if driver_memory_mb is not None:
+    env_mem = os.environ.get("SPARK_DRIVER_MEMORY", "").strip()
+    if env_mem:
+        heap_mb = _parse_memory_mb(env_mem)
+        heap_source = f"env:{env_mem}"
+    elif driver_memory_mb is not None:
         heap_mb = driver_memory_mb
+        heap_source = f"arg:{driver_memory_mb}m"
     elif num_workers is not None and num_workers > 0:
         total_ram_mb = get_total_ram_mb()
         usable_ram_mb = int(total_ram_mb * memory_fraction)
         heap_mb = max(512, usable_ram_mb // num_workers)
+        heap_source = "proportional"
     else:
         total_ram_mb = get_total_ram_mb()
         heap_mb = int(total_ram_mb * memory_fraction)
+        heap_source = "proportional"
 
     heap_str = f"{heap_mb}m"
 
@@ -96,7 +137,7 @@ def build_spark_session(
 
     print(
         f"[SparkSession] {app_name}: local[{cores}]  "
-        f"heap={heap_mb} MB  "
+        f"heap={heap_mb} MB ({heap_source})  "
         f"(system RAM: {get_total_ram_mb()} MB)"
     )
 
