@@ -67,7 +67,7 @@ for line in "${NODES[@]}"; do
     read -r name ip <<< "$line"
     log "==> $name ($ip): resizing to ${MEM_MB} MB"
 
-    cur_mb=$(( $($VIRSH dommaxmem "$name") / 1024 ))
+    cur_mb=$(( $($VIRSH dominfo "$name" | grep "Max memory:"| grep -oE '[0-9]+' ) / 1024 ))
     if [[ $cur_mb -eq $MEM_MB ]]; then
         log "$name already configured for ${MEM_MB} MB - skipping"
         continue
