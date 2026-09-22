@@ -2,7 +2,12 @@
 # Usage: docker stack deploy -c stack-mpj-spark.yml -c stack-mpj-spark.4w.yml mpj
 #
 # Experimental purpose: measure co-location penalty with minimal rank count.
-# Total vCPUs held constant (3 VMs × 2 vCPU = 6); ranks split 1-2-2.
+# Total vCPUs held constant (3 VMs x 2 vCPU = 6); ranks split 1-2-2.
+#
+# Each worker VM now hosts 2 ranks (2 vCPU / 2 ranks = 1 core/rank), so every
+# rank on a co-located VM -- including the base-file dedicated services --
+# gets SLOTS_OVERRIDE=1 to size its Spark core budget deterministically
+# instead of nproc (see mpj_spark/workers/spark_session.py FIX 6).
 
 services:
   mpi-root:
@@ -12,10 +17,12 @@ services:
   mpi-worker-1:
     environment:
       MPI_SIZE: "5"
+      SLOTS_OVERRIDE: "1"
 
   mpi-worker-2:
     environment:
       MPI_SIZE: "5"
+      SLOTS_OVERRIDE: "1"
 
   mpi-worker-3:
     image: mpj-spark:latest
@@ -31,6 +38,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "3"
       MPI_SIZE: "5"
     volumes:
@@ -65,6 +73,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "4"
       MPI_SIZE: "5"
     volumes:
