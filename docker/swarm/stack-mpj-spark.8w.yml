@@ -2,7 +2,16 @@
 # Usage: docker stack deploy -c stack-mpj-spark.yml -c stack-mpj-spark.8w.yml mpj
 #
 # Experimental purpose: scaling limit under contention.
-# Total vCPUs held constant (3 VMs × 2 vCPU = 6); ranks split 1-4-4.
+# Total vCPUs held constant (3 VMs x 2 vCPU = 6); ranks split 1-4-4.
+#
+# Each worker VM now hosts 4 ranks (2 vCPU / 4 ranks floors to 0, clamped to
+# the minimum of 1), so every rank on a co-located VM -- including the
+# base-file dedicated services -- gets SLOTS_OVERRIDE=1 to size its Spark
+# core budget deterministically instead of nproc (see
+# mpj_spark/workers/spark_session.py FIX 6). This cell is intentionally
+# CPU-oversubscribed at the hardware level (4 ranks share 2 vCPU); the fix
+# here makes that oversubscription measurable and reproducible rather than
+# each rank silently requesting the full VM vCPU count.
 
 services:
   mpi-root:
@@ -12,10 +21,12 @@ services:
   mpi-worker-1:
     environment:
       MPI_SIZE: "9"
+      SLOTS_OVERRIDE: "1"
 
   mpi-worker-2:
     environment:
       MPI_SIZE: "9"
+      SLOTS_OVERRIDE: "1"
 
   mpi-worker-3:
     image: mpj-spark:latest
@@ -31,6 +42,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "3"
       MPI_SIZE: "9"
     volumes:
@@ -65,6 +77,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "4"
       MPI_SIZE: "9"
     volumes:
@@ -99,6 +112,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "5"
       MPI_SIZE: "9"
     volumes:
@@ -133,6 +147,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "6"
       MPI_SIZE: "9"
     volumes:
@@ -167,6 +182,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "7"
       MPI_SIZE: "9"
     volumes:
@@ -201,6 +217,7 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
       MPI_RANK: "8"
       MPI_SIZE: "9"
     volumes:
