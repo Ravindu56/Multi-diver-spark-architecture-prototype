@@ -6,26 +6,39 @@
 #
 # Each worker VM now hosts 4 ranks (2 vCPU / 4 ranks floors to 0, clamped to
 # the minimum of 1), so every rank on a co-located VM -- including the
-# base-file dedicated services -- gets SLOTS_OVERRIDE=1 to size its Spark
-# core budget deterministically instead of nproc (see
-# mpj_spark/workers/spark_session.py FIX 6). This cell is intentionally
+# base-file dedicated services -- gets SLOTS_OVERRIDE=1 and
+# SPARK_DRIVER_MEMORY=400m to size its Spark core/heap budget
+# deterministically instead of nproc/proportional (see
+# mpj_spark/workers/spark_session.py FIX 5/6). This cell is intentionally
 # CPU-oversubscribed at the hardware level (4 ranks share 2 vCPU); the fix
 # here makes that oversubscription measurable and reproducible rather than
-# each rank silently requesting the full VM vCPU count.
+# each rank silently requesting the full VM vCPU count / proportional heap.
+#
+# IMPORTANT: mpirun spawns remote ranks over ssh with a bare login env --
+# Docker-level `environment:` values are NOT inherited by that session.
+# The measurement mpirun command MUST forward these with
+# `-x SPARK_DRIVER_MEMORY -x SLOTS_OVERRIDE` (in addition to the existing
+# -x PYTHONPATH -x PYTHONUNBUFFERED), which forwards the value from
+# mpi-root's OWN environment -- hence these vars are set here on mpi-root
+# too, not just on the co-located worker services.
 
 services:
   mpi-root:
     environment:
       MPI_SIZE: "9"
+      SPARK_DRIVER_MEMORY: "400m"
+      SLOTS_OVERRIDE: "1"
 
   mpi-worker-1:
     environment:
       MPI_SIZE: "9"
+      SPARK_DRIVER_MEMORY: "400m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-2:
     environment:
       MPI_SIZE: "9"
+      SPARK_DRIVER_MEMORY: "400m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-3:
