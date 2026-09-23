@@ -29,6 +29,7 @@ SSH_USER="${SSH_USER:-ubuntu}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INVENTORY_FILE="${INVENTORY_FILE:-$SCRIPT_DIR/.swarm-inventory}"
+APP_DIR="${APP_DIR:-/app}"                                    # image source root
 CONTAINER_INPUT_DIR="${CONTAINER_INPUT_DIR:-/data/input}"     # inside mpi-root
 HOST_SHARE_PATH="${HOST_SHARE_PATH:-/srv/mpj-share}"          # NFS export root, every VM
 FORCE="${FORCE:-0}"
@@ -56,13 +57,17 @@ FORCE_FLAG=""
 [[ $FORCE == 1 ]] && FORCE_FLAG="--force"
 
 # ---- 1. generate each requested size on the NFS-shared mount ---------------
+# NOTE: docker exec resolves relative paths against the container's
+# configured working_dir (/data on these services, not /app where the
+# Dockerfile COPYs the project source) -- always use the absolute path
+# to generate_datasets.py, never a path relative to the exec's cwd.
 FILES=()
 for mb in $SIZES_MB; do
     fname="kmeans_data_${mb}mb.csv"
     FILES+=("$fname")
     log "==> ${fname}: generating ${mb} MB via mpi-root -> ${CONTAINER_INPUT_DIR}/${fname}"
     ssh_vm "$MGR_IP" "docker exec -e MPJ_KMEANS_DATA=${CONTAINER_INPUT_DIR}/${fname} \
-        $ROOT_CID python3 scripts/generate_datasets.py --kmeans-only --size-mb ${mb} ${FORCE_FLAG}" \
+        $ROOT_CID python3 ${APP_DIR}/scripts/generate_datasets.py --kmeans-only --size-mb ${mb} ${FORCE_FLAG}" \
         | sed 's/^/[stage]   /'
 done
 
