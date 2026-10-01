@@ -7,9 +7,12 @@
 # Each worker VM now hosts 4 ranks (2 vCPU / 4 ranks floors to 0, clamped to
 # the minimum of 1), so every rank on a co-located VM -- including the
 # base-file dedicated services -- gets SLOTS_OVERRIDE=1 and
-# SPARK_DRIVER_MEMORY=400m to size its Spark core/heap budget
+# SPARK_DRIVER_MEMORY=480m to size its Spark core/heap budget
 # deterministically instead of nproc/proportional (see
-# mpj_spark/workers/spark_session.py FIX 5/6). This cell is intentionally
+# mpj_spark/workers/spark_session.py FIX 5/6). NOTE: 480m is the minimum
+# that still clears Spark's UnifiedMemoryManager floor of 450 MiB
+# (INVALID_DRIVER_MEMORY below it); on the 2560 MB low-RAM VMs this leaves
+# ~1.5 GB per VM outside the co-located heaps. This cell is intentionally
 # CPU-oversubscribed at the hardware level (4 ranks share 2 vCPU); the fix
 # here makes that oversubscription measurable and reproducible rather than
 # each rank silently requesting the full VM vCPU count / proportional heap.
@@ -26,19 +29,19 @@ services:
   mpi-root:
     environment:
       MPI_SIZE: "9"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-1:
     environment:
       MPI_SIZE: "9"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-2:
     environment:
       MPI_SIZE: "9"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-3:
@@ -54,7 +57,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "3"
       MPI_SIZE: "9"
@@ -89,7 +92,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "4"
       MPI_SIZE: "9"
@@ -124,7 +127,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "5"
       MPI_SIZE: "9"
@@ -159,7 +162,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "6"
       MPI_SIZE: "9"
@@ -194,7 +197,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "7"
       MPI_SIZE: "9"
@@ -229,7 +232,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "8"
       MPI_SIZE: "9"
