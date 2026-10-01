@@ -6,9 +6,12 @@
 #
 # Each worker VM now hosts 2 ranks (2 vCPU / 2 ranks = 1 core/rank), so every
 # rank on a co-located VM -- including the base-file dedicated services --
-# gets SLOTS_OVERRIDE=1 and SPARK_DRIVER_MEMORY=400m to size its Spark
+# gets SLOTS_OVERRIDE=1 and SPARK_DRIVER_MEMORY=480m to size its Spark
 # core/heap budget deterministically instead of nproc/proportional (see
-# mpj_spark/workers/spark_session.py FIX 5/6).
+# mpj_spark/workers/spark_session.py FIX 5/6). NOTE: 480m is the minimum
+# that still clears Spark's UnifiedMemoryManager floor of 450 MiB
+# (INVALID_DRIVER_MEMORY below it); on the 2560 MB low-RAM VMs this leaves
+# ~1.5 GB per VM outside the co-located heaps.
 #
 # IMPORTANT: mpirun spawns remote ranks over ssh with a bare login env --
 # Docker-level `environment:` values are NOT inherited by that session.
@@ -22,19 +25,19 @@ services:
   mpi-root:
     environment:
       MPI_SIZE: "5"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-1:
     environment:
       MPI_SIZE: "5"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-2:
     environment:
       MPI_SIZE: "5"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-3:
@@ -50,7 +53,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "3"
       MPI_SIZE: "5"
@@ -85,7 +88,7 @@ services:
       SHARED_STORAGE_PATH: /data/shared_storage
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
-      SPARK_DRIVER_MEMORY: "400m"
+      SPARK_DRIVER_MEMORY: "480m"
       SLOTS_OVERRIDE: "1"
       MPI_RANK: "4"
       MPI_SIZE: "5"
