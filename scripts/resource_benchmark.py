@@ -13,13 +13,19 @@ gateway process, so each rank is monitored as a process SUBTREE -- this is
 important, because the JVM frequently holds more memory than the python
 process itself.
 
+Each run's stdout/stderr streams live to results/logs/<run_id>.log, and a
+console heartbeat is printed every 30 s while a run is in progress (a
+silent capture looked like a hang; see P3-12 lesson in run_sync_benchmark).
+Ctrl+C SIGTERMs the whole mpirun process group so no orphan JVMs survive;
+completed runs stay in the CSV and the next invocation resumes.
+
 Usage (from repo root, venv activated):
     python resource_benchmark.py --out results/resource_runs.csv
     python resource_benchmark.py --np 3 --apps kmeans --reps 1      # quick check
     nohup python resource_benchmark.py --out results/resource_runs.csv \
         > results/benchmark_log.txt 2>&1 &                          # overnight
 """
-import argparse, csv, itertools, os, signal, socket, subprocess, sys, time
+import argparse, csv, itertools, os, signal, socket, subprocess, sys, threading, time
 from datetime import datetime
 
 import psutil
@@ -33,6 +39,7 @@ REPS     = 5
 SAMPLE_INTERVAL_S = 0.5
 RUN_TIMEOUT_S     = 1800                       # hard cap per run; OOM-hung runs get killed
 SETTLE_S          = 10                         # cooldown between runs (GC, JVM teardown)
+HEARTBEAT_S       = 30                         # console liveness print cadence
 # -------------------------------------------------------------
 
 FIELDS = ["run_id", "timestamp", "host", "app", "size", "np", "rep",
@@ -80,15 +87,15 @@ def subtree_stats(root_pid, stop_flag):
         time.sleep(SAMPLE_INTERVAL_S)
     return stats, sys_samples
 
-def run_once(app, size, np_, rep, repo, pybin):
+def run_once(app, size, np_, rep, repo, pybin, log_path):
     basic = ["mpirun", "--oversubscribe", "-np", str(np_), pybin,
              "-m", "mpj_spark.core.main_mpi", "--app", app, "--generate", str(size)]
     t0 = time.perf_counter()
+    logf = open(log_path, "w")
     proc = subprocess.Popen(
-        basic, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        basic, cwd=repo, stdout=logf, stderr=subprocess.STDOUT,
         start_new_session=True, text=True)
     stop = [False]
-    import threading
     holder = {}
     def monitor():
         # let processes start, then prime cpu_percent
@@ -102,16 +109,44 @@ def run_once(app, size, np_, rep, repo, pybin):
         holder["stats"], holder["sys"] = subtree_stats(proc.pid, stop)
     th = threading.Thread(target=monitor, daemon=True)
     th.start()
+
+    exit_code, out = None, ""
     try:
-        out, _ = proc.communicate(timeout=RUN_TIMEOUT_S)
-        exit_code = proc.returncode
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        out, exit_code = "TIMEOUT_KILLED", 124
+        last_hb = t0
+        while proc.poll() is None:
+            time.sleep(1)
+            now = time.perf_counter()
+            if now - last_hb >= HEARTBEAT_S:
+                print(f"    ... run in progress ({now - t0:.0f}s elapsed, "
+                      f"log: {log_path})", flush=True)
+                last_hb = now
+            if now - t0 > RUN_TIMEOUT_S:
+                os.killpg(proc.pid, signal.SIGKILL)
+                exit_code, out = 124, "TIMEOUT_KILLED"
+                break
+        if exit_code is None:
+            exit_code = proc.wait()
+            out = f"(output captured in {log_path})"
+    except KeyboardInterrupt:
+        print("\n[!] Ctrl+C -- SIGTERM to mpirun process group (kills ranks+JVMs)", flush=True)
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+        except Exception:
+            try: os.killpg(proc.pid, signal.SIGKILL)
+            except Exception: pass
+        stop[0] = True
+        th.join(timeout=5)
+        logf.close()
+        print(f"[!] Aborted mid-run {(time.perf_counter() - t0):.0f}s in. "
+              f"Completed runs are saved; re-run to resume.", flush=True)
+        sys.exit(130)
+
     stop[0] = True
     th.join(timeout=5)
+    logf.close()
     wall = time.perf_counter() - t0
-    return wall, exit_code, holder.get("stats", {}), holder.get("sys", []), out or ""
+    return wall, exit_code, holder.get("stats", {}), holder.get("sys", []), out
 
 def main():
     ap = argparse.ArgumentParser()
@@ -140,15 +175,17 @@ def main():
 
     elapsed = []
     for k, (app, size, np_, rep) in enumerate(todo, 1):
-        wall, code, stats, sys_s, out = run_once(app, size, np_, rep, a.repo, a.pybin)
-        open(f"results/logs/{app}_{size}_np{np_}_r{rep}.log", "w").write(out)
+        run_id = f"{app}_{size}_np{np_}_r{rep}"
+        log_path = f"results/logs/{run_id}.log"
+        print(f"[{datetime.now():%H:%M:%S}] START {k}/{len(todo)}  {run_id}", flush=True)
+        wall, code, stats, sys_s, out = run_once(app, size, np_, rep, a.repo, a.pybin, log_path)
         scpu = (sum(s[0] for s in sys_s) / len(sys_s)) if sys_s else ""
         smem = (sum(s[1] for s in sys_s) / len(sys_s)) if sys_s else ""
         rows = stats or {0: {"pid": "", "cpu": [], "rss": []}}
         for drv, rec in sorted(rows.items()):
             n = len(rec["cpu"]) or 1
             w.writerow({
-                "run_id": f"{app}_{size}_np{np_}_r{rep}", "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "run_id": run_id, "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "host": socket.gethostname(), "app": app, "size": size, "np": np_, "rep": rep,
                 "driver_idx": drv, "pid": rec["pid"], "wall_s": f"{wall:.2f}", "exit_code": code,
                 "n_samples": n if rec["cpu"] else 0,
@@ -161,7 +198,7 @@ def main():
         f.flush()
         elapsed.append(wall)
         eta = (sum(elapsed)/len(elapsed)) * (len(todo) - k)
-        print(f"[{datetime.now():%H:%M:%S}] {k}/{len(todo)}  {app} size={size} np={np_} rep={rep}  "
+        print(f"[{datetime.now():%H:%M:%S}] DONE {k}/{len(todo)}  {run_id}  "
               f"wall={wall:.1f}s exit={code}  ETA={eta/3600:.1f}h", flush=True)
         time.sleep(SETTLE_S)
     f.close()
