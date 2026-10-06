@@ -1,8 +1,16 @@
-# mpj_spark/core/__init__.py
-from .file_manager import MPJSparkFileManager
-from .key_value import KeyValueStructure
-from .root_process import run_root
+"""Core coordination package (lazy exports to avoid circular imports).
 
-mpj_root_process = run_root
+root_process imports mpj_spark.workers.worker_process, and worker_process
+imports mpj_spark.core.sync_modes. Importing either package eagerly at
+package-init time creates a cycle; PEP 562 lazy loading breaks it.
+"""
 
-__all__ = ["MPJSparkFileManager", "KeyValueStructure", "run_root", "mpj_root_process"]
+__all__ = ["run_root"]
+
+
+def __getattr__(name):
+    if name == "run_root":
+        from .root_process import run_root
+
+        return run_root
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

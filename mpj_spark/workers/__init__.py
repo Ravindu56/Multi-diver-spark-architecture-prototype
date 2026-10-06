@@ -1,13 +1,11 @@
-# mpj_spark/workers/__init__.py
-from .spark_session import build_spark_session
-from .worker_process import _tag, run_worker_core, worker_process
+"""Worker package (lazy exports to avoid circular imports with core)."""
 
-mpj_worker_process = worker_process
+__all__ = ["_tag", "run_worker_core", "worker_process"]
 
-__all__ = [
-    "worker_process",
-    "run_worker_core",
-    "_tag",
-    "mpj_worker_process",
-    "build_spark_session",
-]
+
+def __getattr__(name):
+    if name in __all__:
+        from . import worker_process as _wp
+
+        return getattr(_wp, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
