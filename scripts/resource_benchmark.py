@@ -3,12 +3,16 @@
 resource_benchmark.py -- workload-characterization run driver (Objective 2a).
 
 Runs the mpj_spark benchmark matrix on the HOST with mpirun, sampling CPU and
-memory of every Spark driver (MPI rank subtree) every 0.5 s, and appends
-results to a CSV. Resumable: re-run the script after an interruption and it
-skips (app, size, np, rep) combos already present in the CSV.
+memory of every MPI rank subtree every 0.5 s, and appends results to a CSV.
+Resumable: re-run after an interruption and it skips (app, size, np, rep)
+combos that already finished with exit_code 0 (failed runs are retried).
 
 MPI layout: rank 0 is the root coordinator, ranks 1..N are the Spark drivers.
-So np=2 -> 1 driver (single-driver baseline), np=3 -> 2 drivers, etc.
+np=2 -> 1 driver (single-driver baseline), np=3 -> 2 drivers, etc.
+CSV rows: driver_idx 0 / role "root" is rank 0 (no Spark); the rest are
+drivers.  (Assumes mpirun's children appear in rank order, which holds for
+local launches.)  cpu_* columns are % of one core, summed over the rank's
+whole process subtree (python + JVM); rss_* are MB over the same subtree.
 
 Inputs: kmeans/logreg read a numeric CSV passed with --input
 (<data-dir>/<app>_<size>mb.csv, default data-dir=shared_storage).  The
@@ -17,21 +21,21 @@ text, so numeric apps must always be given --input explicitly.  wordcount
 keeps --generate <size>.  A preflight check verifies every input exists and
 starts with numeric rows before any run begins.
 
-Each MPI rank spawns a PySpark driver which in turn spawns a Java (JVM)
-gateway process, so each rank is monitored as a process SUBTREE.
+Safety rails: --pybin and mpirun are validated up front; a lock file stops two
+sweeps writing the same CSV; an old-schema CSV is rotated aside instead of
+being appended to; the sweep aborts after 3 consecutive failed runs.
 
-Each run's stdout/stderr streams live to results/logs/<run_id>.log, and a
-console heartbeat is printed every 30 s.  Ctrl+C SIGTERMs the whole mpirun
-process group so no orphan JVMs survive; completed runs stay in the CSV and
-the next invocation resumes.
+Each run's stdout/stderr streams live to results/logs/<run_id>.log (first line
+is the exact mpirun command), and a console heartbeat is printed every 30 s.
+Ctrl+C SIGTERMs the whole mpirun process group so no orphan JVMs survive.
 
 Usage (from repo root, venv activated):
-    python scripts/resource_benchmark.py --out results/resource_runs.csv
-    python scripts/resource_benchmark.py --np 3 --apps kmeans --sizes 50 --reps 1
-    nohup python scripts/resource_benchmark.py --out results/resource_runs.csv \
-        > results/benchmark_log.txt 2>&1 &
+    python scripts/resource_benchmark.py --pybin "$(which python)" --out results/resource_runs.csv
+    python scripts/resource_benchmark.py --pybin "$(which python)" --np 3 --apps kmeans --sizes 50 --reps 1
+    nohup python scripts/resource_benchmark.py --pybin "$(which python)" \
+        --out results/resource_runs.csv > results/benchmark_log.txt 2>&1 &
 """
-import argparse, csv, itertools, os, signal, socket, subprocess, sys, threading, time
+import argparse, csv, fcntl, itertools, os, shutil, signal, socket, subprocess, sys, threading, time
 from datetime import datetime
 
 import psutil
@@ -45,11 +49,12 @@ SAMPLE_INTERVAL_S = 0.5
 RUN_TIMEOUT_S     = 1800                       # hard cap per run
 SETTLE_S          = 10                         # cooldown between runs
 HEARTBEAT_S       = 30                         # console liveness print cadence
+MAX_CONSEC_FAILS  = 3                          # abort sweep after this many failures in a row
 NUMERIC_APPS      = ("kmeans", "logreg")
 # -------------------------------------------------------------
 
 FIELDS = ["run_id", "timestamp", "host", "app", "size", "np", "workers", "rep",
-          "driver_idx", "pid", "wall_s", "exit_code", "n_samples",
+          "driver_idx", "role", "pid", "wall_s", "exit_code", "n_samples",
           "cpu_avg_pct", "cpu_peak_pct", "rss_avg_mb", "rss_peak_mb",
           "sys_cpu_avg_pct", "sys_mem_avg_mb"]
 
@@ -100,36 +105,60 @@ def check_inputs(apps, sizes, data_dir):
               "      done", flush=True)
         sys.exit(2)
 
+def prepare_csv(path):
+    """Rotate an old-schema CSV aside so rows never shift under a stale header."""
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        with open(path) as fh:
+            header = fh.readline().strip()
+        if header != ",".join(FIELDS):
+            bak = f"{path}.old-{datetime.now():%Y%m%d_%H%M%S}"
+            os.rename(path, bak)
+            print(f"[!] {path} has a different schema; moved to {bak}", flush=True)
+
 def done_keys(csv_path):
+    """Only runs that finished with exit_code 0 count as done (failures are retried)."""
     keys = set()
     if os.path.exists(csv_path):
         with open(csv_path, newline="") as f:
             for row in csv.DictReader(f):
-                keys.add((row["app"], row["size"], row["np"], row["rep"]))
+                if row.get("exit_code") == "0":
+                    keys.add((row["app"], row["size"], row["np"], row["rep"]))
     return keys
 
 def subtree_stats(root_pid, stop_flag):
-    """Sample mpirun's child subtrees (top-level child => one MPI rank)."""
+    """Sample mpirun's child subtrees (top-level child => one MPI rank).
+
+    psutil.Process objects are cached across samples: cpu_percent(interval=None)
+    measures the change since that object's previous call, so a fresh object
+    always reports 0.0.
+    """
     try:
         root = psutil.Process(root_pid)
     except psutil.NoSuchProcess:
         return {}, []
     stats, sys_samples = {}, []
+    procs = {}                                   # pid -> Process kept across samples
+    psutil.cpu_percent(interval=None)            # prime system-wide counter
     while not stop_flag[0]:
         try:
-            drivers = root.children(recursive=False)
-            for i, d in enumerate(drivers):
+            ranks = root.children(recursive=False)
+            for i, d in enumerate(ranks):
                 try:
                     members = [d] + d.children(recursive=True)
                 except (psutil.NoSuchProcess, psutil.ZombieProcess):
                     continue
                 cpu = rss = 0.0
                 for p in members:
+                    q = procs.get(p.pid)
                     try:
-                        cpu += p.cpu_percent(interval=None)   # % of one core
-                        rss += p.memory_info().rss
+                        if q is None:
+                            procs[p.pid] = q = p
+                            q.cpu_percent(interval=None)       # prime; first reading is meaningless
+                        else:
+                            cpu += q.cpu_percent(interval=None)   # % of one core since last sample
+                        rss += q.memory_info().rss
                     except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                        pass
+                        procs.pop(p.pid, None)
                 rec = stats.setdefault(i, {"pid": d.pid, "cpu": [], "rss": []})
                 rec["cpu"].append(cpu)
                 rec["rss"].append(rss / 1e6)
@@ -152,13 +181,7 @@ def run_once(app, size, np_, rep, repo, pybin, data_dir, log_path):
     stop = [False]
     holder = {}
     def monitor():
-        time.sleep(2.0)
-        try:
-            for p in psutil.Process(proc.pid).children(recursive=True):
-                try: p.cpu_percent(interval=None)
-                except psutil.NoSuchProcess: pass
-        except psutil.NoSuchProcess:
-            pass
+        time.sleep(1.0)                          # let mpirun spawn its ranks
         holder["stats"], holder["sys"] = subtree_stats(proc.pid, stop)
     th = threading.Thread(target=monitor, daemon=True)
     th.start()
@@ -217,10 +240,24 @@ def main():
     if any(n < 2 for n in a.nps):
         sys.exit("np must be >= 2 (rank 0 is the root coordinator; np=2 is the "
                  "single-driver baseline)")
+    if not a.pybin or not (os.path.isfile(a.pybin) and os.access(a.pybin, os.X_OK)):
+        sys.exit(f"--pybin {a.pybin!r} is not an executable file. Activate the venv "
+                 f"(source .venv/bin/activate) so that $(which python) prints a path.")
+    if shutil.which("mpirun") is None:
+        sys.exit("mpirun not found on PATH")
     check_inputs(a.apps, a.sizes, a.data_dir)
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     os.makedirs("results/logs", exist_ok=True)
+
+    lock_f = open(a.out + ".lock", "w")
+    try:
+        fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(f"another resource_benchmark.py is already writing to {a.out} "
+                 f"(check: pgrep -af resource_benchmark)")
+
+    prepare_csv(a.out)
     new_file = not os.path.exists(a.out)
     done = done_keys(a.out)
 
@@ -233,7 +270,7 @@ def main():
     if new_file:
         w.writeheader()
 
-    elapsed = []
+    elapsed, consec_fail = [], 0
     for k, (app, size, np_, rep) in enumerate(todo, 1):
         run_id = f"{app}_{size}_np{np_}_r{rep}"
         log_path = f"results/logs/{run_id}.log"
@@ -245,11 +282,13 @@ def main():
         rows = stats or {0: {"pid": "", "cpu": [], "rss": []}}
         for drv, rec in sorted(rows.items()):
             n = len(rec["cpu"]) or 1
+            role = ("root" if drv == 0 else "driver") if rec["rss"] else ""
             w.writerow({
                 "run_id": run_id, "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "host": socket.gethostname(), "app": app, "size": size, "np": np_,
                 "workers": np_ - 1, "rep": rep,
-                "driver_idx": drv, "pid": rec["pid"], "wall_s": f"{wall:.2f}", "exit_code": code,
+                "driver_idx": drv, "role": role, "pid": rec["pid"],
+                "wall_s": f"{wall:.2f}", "exit_code": code,
                 "n_samples": n if rec["cpu"] else 0,
                 "cpu_avg_pct": f"{sum(rec['cpu'])/n:.1f}" if rec["cpu"] else "",
                 "cpu_peak_pct": f"{max(rec['cpu']):.1f}" if rec["cpu"] else "",
@@ -262,6 +301,12 @@ def main():
         eta = (sum(elapsed)/len(elapsed)) * (len(todo) - k)
         print(f"[{datetime.now():%H:%M:%S}] DONE {k}/{len(todo)}  {run_id}  "
               f"wall={wall:.1f}s exit={code}  ETA={eta/3600:.1f}h", flush=True)
+        consec_fail = consec_fail + 1 if code != 0 else 0
+        if consec_fail >= MAX_CONSEC_FAILS:
+            print(f"[!] {consec_fail} consecutive failed runs -- aborting sweep. "
+                  f"Check {log_path} (first line is the exact mpirun command).", flush=True)
+            f.close()
+            sys.exit(3)
         time.sleep(SETTLE_S)
     f.close()
     print(f"ALL DONE. rows in {a.out}")
