@@ -2,28 +2,34 @@
 """
 resource_benchmark.py -- workload-characterization run driver (Objective 2a).
 
-Runs the mpj_spark benchmark matrix (~90 runs by default) on the HOST with
-mpirun, sampling CPU and memory of every Spark driver (MPI rank subtree)
-every 0.5 s, and appends results to a CSV. Resumable: re-run the script
-after an interruption and it skips (app, size, np, rep) combos already
-present in the CSV.
+Runs the mpj_spark benchmark matrix on the HOST with mpirun, sampling CPU and
+memory of every Spark driver (MPI rank subtree) every 0.5 s, and appends
+results to a CSV. Resumable: re-run the script after an interruption and it
+skips (app, size, np, rep) combos already present in the CSV.
+
+MPI layout: rank 0 is the root coordinator, ranks 1..N are the Spark drivers.
+So np=2 -> 1 driver (single-driver baseline), np=3 -> 2 drivers, etc.
+
+Inputs: kmeans/logreg read a numeric CSV passed with --input
+(<data-dir>/<app>_<size>mb.csv, default data-dir=shared_storage).  The
+main_mpi default input is ./test_dataset.txt (prose) and --generate produces
+text, so numeric apps must always be given --input explicitly.  wordcount
+keeps --generate <size>.  A preflight check verifies every input exists and
+starts with numeric rows before any run begins.
 
 Each MPI rank spawns a PySpark driver which in turn spawns a Java (JVM)
-gateway process, so each rank is monitored as a process SUBTREE -- this is
-important, because the JVM frequently holds more memory than the python
-process itself.
+gateway process, so each rank is monitored as a process SUBTREE.
 
 Each run's stdout/stderr streams live to results/logs/<run_id>.log, and a
-console heartbeat is printed every 30 s while a run is in progress (a
-silent capture looked like a hang; see P3-12 lesson in run_sync_benchmark).
-Ctrl+C SIGTERMs the whole mpirun process group so no orphan JVMs survive;
-completed runs stay in the CSV and the next invocation resumes.
+console heartbeat is printed every 30 s.  Ctrl+C SIGTERMs the whole mpirun
+process group so no orphan JVMs survive; completed runs stay in the CSV and
+the next invocation resumes.
 
 Usage (from repo root, venv activated):
-    python resource_benchmark.py --out results/resource_runs.csv
-    python resource_benchmark.py --np 3 --apps kmeans --reps 1      # quick check
-    nohup python resource_benchmark.py --out results/resource_runs.csv \
-        > results/benchmark_log.txt 2>&1 &                          # overnight
+    python scripts/resource_benchmark.py --out results/resource_runs.csv
+    python scripts/resource_benchmark.py --np 3 --apps kmeans --sizes 50 --reps 1
+    nohup python scripts/resource_benchmark.py --out results/resource_runs.csv \
+        > results/benchmark_log.txt 2>&1 &
 """
 import argparse, csv, itertools, os, signal, socket, subprocess, sys, threading, time
 from datetime import datetime
@@ -32,20 +38,67 @@ import psutil
 
 # ---------------- configuration (edit freely) ----------------
 APPS     = ["wordcount", "kmeans", "logreg"]   # batch + the two iterative ML apps
-SIZES    = [50, 100, 200]                      # passed to --generate
-NP_LIST  = [1, 3]                              # np=1 -> single-driver baseline (Obj 2d-i)
+SIZES    = [50, 100, 200]                      # dataset size label (MB)
+NP_LIST  = [2, 3]                              # MPI ranks: np=2 -> 1 driver (baseline)
 REPS     = 5
-# 3 apps x 3 sizes x 2 np x 5 reps = 90 runs (+>~10 preflight runs = ~100)
 SAMPLE_INTERVAL_S = 0.5
-RUN_TIMEOUT_S     = 1800                       # hard cap per run; OOM-hung runs get killed
-SETTLE_S          = 10                         # cooldown between runs (GC, JVM teardown)
+RUN_TIMEOUT_S     = 1800                       # hard cap per run
+SETTLE_S          = 10                         # cooldown between runs
 HEARTBEAT_S       = 30                         # console liveness print cadence
+NUMERIC_APPS      = ("kmeans", "logreg")
 # -------------------------------------------------------------
 
-FIELDS = ["run_id", "timestamp", "host", "app", "size", "np", "rep",
+FIELDS = ["run_id", "timestamp", "host", "app", "size", "np", "workers", "rep",
           "driver_idx", "pid", "wall_s", "exit_code", "n_samples",
           "cpu_avg_pct", "cpu_peak_pct", "rss_avg_mb", "rss_peak_mb",
           "sys_cpu_avg_pct", "sys_mem_avg_mb"]
+
+def input_path(app, size, data_dir):
+    return os.path.abspath(os.path.join(data_dir, f"{app}_{size}mb.csv"))
+
+def build_cmd(app, size, np_, pybin, data_dir):
+    base = ["mpirun", "--oversubscribe", "-np", str(np_), pybin,
+            "-m", "mpj_spark.core.main_mpi", "--app", app]
+    if app in NUMERIC_APPS:
+        return base + ["--input", input_path(app, size, data_dir)]
+    return base + ["--generate", str(size)]
+
+def check_inputs(apps, sizes, data_dir):
+    """Fail fast (1 s) instead of after a 3-minute JVM start on a wrong file."""
+    problems = []
+    for app in apps:
+        if app not in NUMERIC_APPS:
+            continue
+        for size in sizes:
+            p = input_path(app, size, data_dir)
+            if not os.path.isfile(p):
+                problems.append(f"missing: {p}")
+                continue
+            try:
+                with open(p) as fh:
+                    lines = [fh.readline() for _ in range(3)]
+                rows = [l for l in lines if l.strip()]
+                try:
+                    [float(x) for x in rows[0].strip().split(",") if x.strip()]
+                    probe = rows[0]
+                except ValueError:
+                    probe = rows[1]          # first line is a header
+                [float(x) for x in probe.strip().split(",") if x.strip()]
+            except (ValueError, IndexError):
+                problems.append(f"not numeric CSV: {p}")
+    if problems:
+        print("[!] input preflight failed:", flush=True)
+        for pr in problems:
+            print("    " + pr, flush=True)
+        print("    Stage one numeric file per size, e.g. (verify flags with "
+              "`python scripts/generate_datasets.py --help`):", flush=True)
+        print("      for s in " + " ".join(str(s) for s in sizes) + "; do\n"
+              "        MPJ_KMEANS_DATA=$PWD/" + data_dir + "/kmeans_${s}mb.csv "
+              "python scripts/generate_datasets.py --kmeans-only --size-mb $s\n"
+              "        MPJ_LOGREG_DATA=$PWD/" + data_dir + "/logreg_${s}mb.csv "
+              "python scripts/generate_datasets.py --logreg-only --size-mb $s\n"
+              "      done", flush=True)
+        sys.exit(2)
 
 def done_keys(csv_path):
     keys = set()
@@ -56,7 +109,7 @@ def done_keys(csv_path):
     return keys
 
 def subtree_stats(root_pid, stop_flag):
-    """Sample mpirun's child subtrees (top-level child => one driver rank)."""
+    """Sample mpirun's child subtrees (top-level child => one MPI rank)."""
     try:
         root = psutil.Process(root_pid)
     except psutil.NoSuchProcess:
@@ -87,18 +140,18 @@ def subtree_stats(root_pid, stop_flag):
         time.sleep(SAMPLE_INTERVAL_S)
     return stats, sys_samples
 
-def run_once(app, size, np_, rep, repo, pybin, log_path):
-    basic = ["mpirun", "--oversubscribe", "-np", str(np_), pybin,
-             "-m", "mpj_spark.core.main_mpi", "--app", app, "--generate", str(size)]
+def run_once(app, size, np_, rep, repo, pybin, data_dir, log_path):
+    basic = build_cmd(app, size, np_, pybin, data_dir)
     t0 = time.perf_counter()
     logf = open(log_path, "w")
+    logf.write("CMD: " + " ".join(basic) + "\n")
+    logf.flush()
     proc = subprocess.Popen(
         basic, cwd=repo, stdout=logf, stderr=subprocess.STDOUT,
         start_new_session=True, text=True)
     stop = [False]
     holder = {}
     def monitor():
-        # let processes start, then prime cpu_percent
         time.sleep(2.0)
         try:
             for p in psutil.Process(proc.pid).children(recursive=True):
@@ -157,7 +210,14 @@ def main():
     ap.add_argument("--np", type=int, nargs="+", default=NP_LIST, dest="nps")
     ap.add_argument("--reps", type=int, default=REPS)
     ap.add_argument("--pybin", default=sys.executable)
+    ap.add_argument("--data-dir", default="shared_storage",
+                    help="dir holding <app>_<size>mb.csv for kmeans/logreg")
     a = ap.parse_args()
+
+    if any(n < 2 for n in a.nps):
+        sys.exit("np must be >= 2 (rank 0 is the root coordinator; np=2 is the "
+                 "single-driver baseline)")
+    check_inputs(a.apps, a.sizes, a.data_dir)
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     os.makedirs("results/logs", exist_ok=True)
@@ -178,7 +238,8 @@ def main():
         run_id = f"{app}_{size}_np{np_}_r{rep}"
         log_path = f"results/logs/{run_id}.log"
         print(f"[{datetime.now():%H:%M:%S}] START {k}/{len(todo)}  {run_id}", flush=True)
-        wall, code, stats, sys_s, out = run_once(app, size, np_, rep, a.repo, a.pybin, log_path)
+        wall, code, stats, sys_s, out = run_once(
+            app, size, np_, rep, a.repo, a.pybin, a.data_dir, log_path)
         scpu = (sum(s[0] for s in sys_s) / len(sys_s)) if sys_s else ""
         smem = (sum(s[1] for s in sys_s) / len(sys_s)) if sys_s else ""
         rows = stats or {0: {"pid": "", "cpu": [], "rss": []}}
@@ -186,7 +247,8 @@ def main():
             n = len(rec["cpu"]) or 1
             w.writerow({
                 "run_id": run_id, "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "host": socket.gethostname(), "app": app, "size": size, "np": np_, "rep": rep,
+                "host": socket.gethostname(), "app": app, "size": size, "np": np_,
+                "workers": np_ - 1, "rep": rep,
                 "driver_idx": drv, "pid": rec["pid"], "wall_s": f"{wall:.2f}", "exit_code": code,
                 "n_samples": n if rec["cpu"] else 0,
                 "cpu_avg_pct": f"{sum(rec['cpu'])/n:.1f}" if rec["cpu"] else "",
