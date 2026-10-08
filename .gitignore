@@ -40,3 +40,4 @@ venv/*
 results/benchmark/throttled/hybrid_ps_allreduce_w2/rankfile
 results/benchmark/*
 scripts/.swarm-inventory
+results/resource_runs.csv.lock
