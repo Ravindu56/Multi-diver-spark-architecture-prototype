@@ -4,38 +4,50 @@ resource_benchmark.py -- workload-characterization run driver (Objective 2a).
 
 Runs the mpj_spark benchmark matrix on the HOST with mpirun, sampling CPU and
 memory of every MPI rank subtree every 0.5 s, and appends results to a CSV.
-Resumable: re-run after an interruption and it skips (app, size, np, rep)
-combos that already finished with exit_code 0 (failed runs are retried).
+Resumable: re-run after an interruption and it skips (app, size, np, cores,
+heap, rep) combos that already finished with exit_code 0 (failed runs retried).
 
 MPI layout: rank 0 is the root coordinator, ranks 1..N are the Spark drivers.
 np=2 -> 1 driver (single-driver baseline), np=3 -> 2 drivers, etc.
-CSV rows: driver_idx 0 / role "root" is rank 0 (no Spark); the rest are
-drivers.  (Assumes mpirun's children appear in rank order, which holds for
-local launches.)  cpu_* columns are % of one core, summed over the rank's
-whole process subtree (python + JVM); rss_* are MB over the same subtree.
+CSV rows: driver_idx 0 / role "root" is rank 0 (no Spark; it busy-polls MPI so it
+shows ~100% CPU); the rest are drivers.  cpu_* are % of one core summed over the
+rank's whole process subtree (python + JVM); rss_* are MB over the same subtree.
+RSS counts shared pages once per process, so it can over-state real use; the
+sys_mem_* columns are system-wide (what htop shows) and --pss adds PSS.
+
+Axes: --cores N [N ...] sets cores per driver (env SLOTS_OVERRIDE) and
+--heap-mb N [N ...] sets the driver heap (env SPARK_DRIVER_MEMORY); the values
+Spark actually used are parsed from the run log into cores_alloc / heap_mb_alloc.
+Leave them out for the default policy (total cores / drivers, auto heap).
+
+Timeouts: --timeout S (default 1800; 0 disables it).  A timeout never aborts the
+sweep.  After --max-cfg-timeouts (default 2) timeouts in one configuration the
+remaining reps of that configuration are skipped, also on later resumes (timeouts
+already in the CSV count).  --skip app:size:np excludes a configuration.
+Only non-timeout failures (e.g. mpirun cannot start) count toward the
+3-consecutive-failures abort.
 
 Inputs: kmeans/logreg read a numeric CSV passed with --input
-(<data-dir>/<app>_<size>mb.csv, default data-dir=shared_storage).  The
-main_mpi default input is ./test_dataset.txt (prose) and --generate produces
-text, so numeric apps must always be given --input explicitly.  wordcount
-keeps --generate <size>.  A preflight check verifies every input exists and
-starts with numeric rows before any run begins.
+(<data-dir>/<app>_<size>mb.csv, default data-dir=shared_storage).  wordcount keeps
+--generate <size> (its size axis is not meaningful: every size ran identically).
+A preflight check verifies every numeric input exists and starts with numbers.
 
 Safety rails: --pybin and mpirun are validated up front; a lock file stops two
-sweeps writing the same CSV; an old-schema CSV is rotated aside instead of
-being appended to; the sweep aborts after 3 consecutive failed runs.
+sweeps writing the same CSV; a CSV from an older schema is upgraded in place when
+the new columns were only appended, otherwise rotated aside.
 
-Each run's stdout/stderr streams live to results/logs/<run_id>.log (first line
-is the exact mpirun command), and a console heartbeat is printed every 30 s.
-Ctrl+C SIGTERMs the whole mpirun process group so no orphan JVMs survive.
+Each run's output streams to results/logs/<run_id>.log (first line is the exact
+mpirun command), with a 30 s console heartbeat.  Ctrl+C SIGTERMs the whole
+mpirun process group so no orphan JVMs survive.
 
 Usage (from repo root, venv activated):
     python scripts/resource_benchmark.py --pybin "$(which python)" --out results/resource_runs.csv
-    python scripts/resource_benchmark.py --pybin "$(which python)" --np 3 --apps kmeans --sizes 50 --reps 1
+    python scripts/resource_benchmark.py --pybin "$(which python)" --apps logreg --sizes 50 \
+        --np 3 --cores 1 2 3 4 8 11 --reps 3 --out results/cores_sweep.csv
     nohup python scripts/resource_benchmark.py --pybin "$(which python)" \
-        --out results/resource_runs.csv > results/benchmark_log.txt 2>&1 &
+        --skip kmeans:200:2 --out results/resource_runs.csv > results/benchmark_log.txt 2>&1 &
 """
-import argparse, csv, fcntl, itertools, os, shutil, signal, socket, subprocess, sys, threading, time
+import argparse, csv, fcntl, itertools, os, re, shutil, signal, socket, subprocess, sys, threading, time
 from datetime import datetime
 
 import psutil
@@ -46,24 +58,47 @@ SIZES    = [50, 100, 200]                      # dataset size label (MB)
 NP_LIST  = [2, 3]                              # MPI ranks: np=2 -> 1 driver (baseline)
 REPS     = 5
 SAMPLE_INTERVAL_S = 0.5
-RUN_TIMEOUT_S     = 1800                       # hard cap per run
+DEFAULT_TIMEOUT_S = 1800                       # per-run cap; 0 disables
 SETTLE_S          = 10                         # cooldown between runs
 HEARTBEAT_S       = 30                         # console liveness print cadence
-MAX_CONSEC_FAILS  = 3                          # abort sweep after this many failures in a row
+MAX_CONSEC_FAILS  = 3                          # non-timeout failures in a row -> abort
+MAX_CFG_TIMEOUTS  = 2                          # timeouts per configuration -> skip the rest
+PSS_EVERY         = 4                          # with --pss, sample PSS every Nth sample
 NUMERIC_APPS      = ("kmeans", "logreg")
 # -------------------------------------------------------------
 
+# New columns are only ever appended so an older CSV can be upgraded in place.
 FIELDS = ["run_id", "timestamp", "host", "app", "size", "np", "workers", "rep",
           "driver_idx", "role", "pid", "wall_s", "exit_code", "n_samples",
           "cpu_avg_pct", "cpu_peak_pct", "rss_avg_mb", "rss_peak_mb",
-          "sys_cpu_avg_pct", "sys_mem_avg_mb"]
+          "sys_cpu_avg_pct", "sys_mem_avg_mb",
+          "cores_req", "heap_req_mb", "cores_alloc", "heap_mb_alloc",
+          "cpu_p95_pct", "rss_p95_mb", "pss_avg_mb", "pss_peak_mb",
+          "sys_mem_peak_mb", "sys_mem_avail_min_mb"]
+
+ALLOC_RE = re.compile(r"\[SparkSession\].*?local\[(\d+)\].*?heap=(\d+) MB")
+
+def mean(vals):
+    return sum(vals) / len(vals) if vals else None
+
+def mx(vals):
+    return max(vals) if vals else None
+
+def pctl(vals, q):
+    if not vals:
+        return None
+    s = sorted(vals)
+    return s[min(len(s) - 1, int(round(q / 100.0 * (len(s) - 1))))]
+
+def fmt(x, nd=0):
+    return "" if x is None else f"{x:.{nd}f}"
 
 def input_path(app, size, data_dir):
     return os.path.abspath(os.path.join(data_dir, f"{app}_{size}mb.csv"))
 
-def build_cmd(app, size, np_, pybin, data_dir):
-    base = ["mpirun", "--oversubscribe", "-np", str(np_), pybin,
-            "-m", "mpj_spark.core.main_mpi", "--app", app]
+def build_cmd(app, size, np_, pybin, data_dir, exports):
+    base = ["mpirun", "--oversubscribe", "-np", str(np_)] + exports + [
+        pybin, "-m", "mpj_spark.core.main_mpi", "--app", app]
     if app in NUMERIC_APPS:
         return base + ["--input", input_path(app, size, data_dir)]
     return base + ["--generate", str(size)]
@@ -106,14 +141,33 @@ def check_inputs(apps, sizes, data_dir):
         sys.exit(2)
 
 def prepare_csv(path):
-    """Rotate an old-schema CSV aside so rows never shift under a stale header."""
-    if os.path.isfile(path) and os.path.getsize(path) > 0:
-        with open(path) as fh:
-            header = fh.readline().strip()
-        if header != ",".join(FIELDS):
-            bak = f"{path}.old-{datetime.now():%Y%m%d_%H%M%S}"
-            os.rename(path, bak)
-            print(f"[!] {path} has a different schema; moved to {bak}", flush=True)
+    """Upgrade an older-schema CSV in place when columns were only appended;
+    rotate it aside if the schemas are incompatible."""
+    if not (os.path.isfile(path) and os.path.getsize(path) > 0):
+        return
+    with open(path, newline="") as fh:
+        rows = list(csv.reader(fh))
+    header = rows[0]
+    if header == FIELDS:
+        return
+    if FIELDS[:len(header)] == header:
+        pad = [""] * (len(FIELDS) - len(header))
+        with open(path, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(FIELDS)
+            for r in rows[1:]:
+                w.writerow(r + pad)
+        print(f"[i] {path}: upgraded to the new schema ({len(FIELDS) - len(header)} "
+              f"new columns, blank for existing rows)", flush=True)
+        return
+    bak = f"{path}.old-{datetime.now():%Y%m%d_%H%M%S}"
+    os.rename(path, bak)
+    print(f"[!] {path} has an incompatible schema; moved to {bak}", flush=True)
+
+def row_key(row):
+    return (row.get("app", ""), row.get("size", ""), row.get("np", ""),
+            row.get("cores_req", "") or "", row.get("heap_req_mb", "") or "",
+            row.get("rep", ""))
 
 def done_keys(csv_path):
     """Only runs that finished with exit_code 0 count as done (failures are retried)."""
@@ -122,10 +176,33 @@ def done_keys(csv_path):
         with open(csv_path, newline="") as f:
             for row in csv.DictReader(f):
                 if row.get("exit_code") == "0":
-                    keys.add((row["app"], row["size"], row["np"], row["rep"]))
+                    keys.add(row_key(row))
     return keys
 
-def subtree_stats(root_pid, stop_flag):
+def prior_timeouts(csv_path):
+    """Per configuration: number of distinct reps already recorded as timed out (124)."""
+    seen = {}
+    if os.path.exists(csv_path):
+        with open(csv_path, newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("exit_code") == "124":
+                    k = row_key(row)
+                    seen.setdefault(k[:5], set()).add(k[5])
+    return {cfg: len(reps) for cfg, reps in seen.items()}
+
+def parse_alloc(log_path):
+    """Cores and heap Spark actually used, from the first [SparkSession] log line."""
+    try:
+        with open(log_path, errors="replace") as fh:
+            for line in fh:
+                m = ALLOC_RE.search(line)
+                if m:
+                    return m.group(1), m.group(2)
+    except OSError:
+        pass
+    return "", ""
+
+def subtree_stats(root_pid, stop_flag, use_pss):
     """Sample mpirun's child subtrees (top-level child => one MPI rank).
 
     psutil.Process objects are cached across samples: cpu_percent(interval=None)
@@ -139,7 +216,10 @@ def subtree_stats(root_pid, stop_flag):
     stats, sys_samples = {}, []
     procs = {}                                   # pid -> Process kept across samples
     psutil.cpu_percent(interval=None)            # prime system-wide counter
+    tick = 0
     while not stop_flag[0]:
+        tick += 1
+        do_pss = use_pss and tick % PSS_EVERY == 1
         try:
             ranks = root.children(recursive=False)
             for i, d in enumerate(ranks):
@@ -147,7 +227,7 @@ def subtree_stats(root_pid, stop_flag):
                     members = [d] + d.children(recursive=True)
                 except (psutil.NoSuchProcess, psutil.ZombieProcess):
                     continue
-                cpu = rss = 0.0
+                cpu = rss = pss = 0.0
                 for p in members:
                     q = procs.get(p.pid)
                     try:
@@ -157,36 +237,52 @@ def subtree_stats(root_pid, stop_flag):
                         else:
                             cpu += q.cpu_percent(interval=None)   # % of one core since last sample
                         rss += q.memory_info().rss
+                        if do_pss:
+                            try:
+                                pss += q.memory_full_info().pss
+                            except (psutil.AccessDenied, AttributeError):
+                                pass
                     except (psutil.NoSuchProcess, psutil.ZombieProcess):
                         procs.pop(p.pid, None)
-                rec = stats.setdefault(i, {"pid": d.pid, "cpu": [], "rss": []})
+                rec = stats.setdefault(i, {"pid": d.pid, "cpu": [], "rss": [], "pss": []})
                 rec["cpu"].append(cpu)
                 rec["rss"].append(rss / 1e6)
+                if do_pss:
+                    rec["pss"].append(pss / 1e6)
         except psutil.NoSuchProcess:
             break
-        sys_samples.append((psutil.cpu_percent(interval=None),
-                            psutil.virtual_memory().used / 1e6))
+        vm = psutil.virtual_memory()
+        sys_samples.append((psutil.cpu_percent(interval=None), vm.used / 1e6, vm.available / 1e6))
         time.sleep(SAMPLE_INTERVAL_S)
     return stats, sys_samples
 
-def run_once(app, size, np_, rep, repo, pybin, data_dir, log_path):
-    basic = build_cmd(app, size, np_, pybin, data_dir)
+def run_once(app, size, np_, cores, heap, repo, pybin, data_dir, log_path, timeout_s, use_pss):
+    env = os.environ.copy()
+    if cores is not None:
+        env["SLOTS_OVERRIDE"] = str(cores)
+    if heap is not None:
+        env["SPARK_DRIVER_MEMORY"] = f"{heap}m"
+    exports = []
+    for var in ("SLOTS_OVERRIDE", "SPARK_DRIVER_MEMORY"):
+        if var in env:
+            exports += ["-x", var]
+    basic = build_cmd(app, size, np_, pybin, data_dir, exports)
     t0 = time.perf_counter()
     logf = open(log_path, "w")
     logf.write("CMD: " + " ".join(basic) + "\n")
     logf.flush()
     proc = subprocess.Popen(
-        basic, cwd=repo, stdout=logf, stderr=subprocess.STDOUT,
+        basic, cwd=repo, env=env, stdout=logf, stderr=subprocess.STDOUT,
         start_new_session=True, text=True)
     stop = [False]
     holder = {}
     def monitor():
         time.sleep(1.0)                          # let mpirun spawn its ranks
-        holder["stats"], holder["sys"] = subtree_stats(proc.pid, stop)
+        holder["stats"], holder["sys"] = subtree_stats(proc.pid, stop, use_pss)
     th = threading.Thread(target=monitor, daemon=True)
     th.start()
 
-    exit_code, out = None, ""
+    exit_code = None
     try:
         last_hb = t0
         while proc.poll() is None:
@@ -196,13 +292,12 @@ def run_once(app, size, np_, rep, repo, pybin, data_dir, log_path):
                 print(f"    ... run in progress ({now - t0:.0f}s elapsed, "
                       f"log: {log_path})", flush=True)
                 last_hb = now
-            if now - t0 > RUN_TIMEOUT_S:
+            if timeout_s and now - t0 > timeout_s:
                 os.killpg(proc.pid, signal.SIGKILL)
-                exit_code, out = 124, "TIMEOUT_KILLED"
+                exit_code = 124
                 break
         if exit_code is None:
             exit_code = proc.wait()
-            out = f"(output captured in {log_path})"
     except KeyboardInterrupt:
         print("\n[!] Ctrl+C -- SIGTERM to mpirun process group (kills ranks+JVMs)", flush=True)
         try:
@@ -222,7 +317,7 @@ def run_once(app, size, np_, rep, repo, pybin, data_dir, log_path):
     th.join(timeout=5)
     logf.close()
     wall = time.perf_counter() - t0
-    return wall, exit_code, holder.get("stats", {}), holder.get("sys", []), out
+    return wall, exit_code, holder.get("stats", {}), holder.get("sys", [])
 
 def main():
     ap = argparse.ArgumentParser()
@@ -232,6 +327,19 @@ def main():
     ap.add_argument("--sizes", type=int, nargs="+", default=SIZES)
     ap.add_argument("--np", type=int, nargs="+", default=NP_LIST, dest="nps")
     ap.add_argument("--reps", type=int, default=REPS)
+    ap.add_argument("--cores", type=int, nargs="+", default=[],
+                    help="cores per driver (SLOTS_OVERRIDE); default = automatic")
+    ap.add_argument("--heap-mb", type=int, nargs="+", default=[], dest="heap_mb",
+                    help="driver heap in MB (SPARK_DRIVER_MEMORY); default = automatic")
+    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
+                    help="per-run timeout in seconds; 0 disables it")
+    ap.add_argument("--max-cfg-timeouts", type=int, default=MAX_CFG_TIMEOUTS,
+                    dest="max_cfg_timeouts",
+                    help="skip a configuration's remaining reps after this many timeouts")
+    ap.add_argument("--skip", nargs="+", default=[], metavar="APP:SIZE:NP",
+                    help="configurations to exclude, e.g. kmeans:200:2")
+    ap.add_argument("--pss", action="store_true",
+                    help="also sample PSS (shared pages counted once; slightly slower)")
     ap.add_argument("--pybin", default=sys.executable)
     ap.add_argument("--data-dir", default="shared_storage",
                     help="dir holding <app>_<size>mb.csv for kmeans/logreg")
@@ -245,6 +353,13 @@ def main():
                  f"(source .venv/bin/activate) so that $(which python) prints a path.")
     if shutil.which("mpirun") is None:
         sys.exit("mpirun not found on PATH")
+    skip_cfg = set()
+    for s in a.skip:
+        try:
+            sa, ss, sn = s.split(":")
+            skip_cfg.add((sa, str(int(ss)), str(int(sn))))
+        except ValueError:
+            sys.exit(f"--skip expects app:size:np, got {s!r}")
     check_inputs(a.apps, a.sizes, a.data_dir)
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
@@ -260,28 +375,54 @@ def main():
     prepare_csv(a.out)
     new_file = not os.path.exists(a.out)
     done = done_keys(a.out)
+    timeouts = prior_timeouts(a.out)
 
-    grid = list(itertools.product(a.apps, a.sizes, a.nps, range(1, a.reps + 1)))
-    todo = [g for g in grid if (g[0], str(g[1]), str(g[2]), str(g[3])) not in done]
-    print(f"[{datetime.now():%H:%M:%S}] total={len(grid)}  done={len(grid)-len(todo)}  todo={len(todo)}", flush=True)
+    cores_list = a.cores or [None]
+    heap_list = a.heap_mb or [None]
+    grid = list(itertools.product(a.apps, a.sizes, a.nps, cores_list, heap_list,
+                                  range(1, a.reps + 1)))
+    def key_of(g):
+        app, size, np_, cores, heap, rep = g
+        return (app, str(size), str(np_), "" if cores is None else str(cores),
+                "" if heap is None else str(heap), str(rep))
+    todo = [g for g in grid if key_of(g) not in done]
+    print(f"[{datetime.now():%H:%M:%S}] total={len(grid)}  done={len(grid)-len(todo)}  "
+          f"todo={len(todo)}  timeout={'off' if not a.timeout else str(a.timeout) + 's'}", flush=True)
 
     f = open(a.out, "a", newline="")
     w = csv.DictWriter(f, fieldnames=FIELDS)
     if new_file:
         w.writeheader()
 
-    elapsed, consec_fail = [], 0
-    for k, (app, size, np_, rep) in enumerate(todo, 1):
-        run_id = f"{app}_{size}_np{np_}_r{rep}"
+    elapsed, consec_fail, announced = [], 0, set()
+    for k, g in enumerate(todo, 1):
+        app, size, np_, cores, heap, rep = g
+        cfg = key_of(g)[:5]
+        if (app, str(size), str(np_)) in skip_cfg:
+            if cfg not in announced:
+                print(f"[i] skipping {app} size={size} np={np_} (--skip)", flush=True)
+                announced.add(cfg)
+            continue
+        if timeouts.get(cfg, 0) >= a.max_cfg_timeouts:
+            if cfg not in announced:
+                print(f"[i] skipping remaining reps of {app} size={size} np={np_}: "
+                      f"{timeouts[cfg]} timeouts already recorded", flush=True)
+                announced.add(cfg)
+            continue
+        tag = (f"_c{cores}" if cores is not None else "") + (f"_h{heap}" if heap is not None else "")
+        run_id = f"{app}_{size}_np{np_}{tag}_r{rep}"
         log_path = f"results/logs/{run_id}.log"
         print(f"[{datetime.now():%H:%M:%S}] START {k}/{len(todo)}  {run_id}", flush=True)
-        wall, code, stats, sys_s, out = run_once(
-            app, size, np_, rep, a.repo, a.pybin, a.data_dir, log_path)
-        scpu = (sum(s[0] for s in sys_s) / len(sys_s)) if sys_s else ""
-        smem = (sum(s[1] for s in sys_s) / len(sys_s)) if sys_s else ""
-        rows = stats or {0: {"pid": "", "cpu": [], "rss": []}}
+        wall, code, stats, sys_s = run_once(
+            app, size, np_, cores, heap, a.repo, a.pybin, a.data_dir, log_path,
+            a.timeout, a.pss)
+        cores_alloc, heap_alloc = parse_alloc(log_path)
+        scpu = mean([s[0] for s in sys_s])
+        smem = mean([s[1] for s in sys_s])
+        smem_peak = mx([s[1] for s in sys_s])
+        savail_min = min([s[2] for s in sys_s]) if sys_s else None
+        rows = stats or {0: {"pid": "", "cpu": [], "rss": [], "pss": []}}
         for drv, rec in sorted(rows.items()):
-            n = len(rec["cpu"]) or 1
             role = ("root" if drv == 0 else "driver") if rec["rss"] else ""
             w.writerow({
                 "run_id": run_id, "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -289,22 +430,33 @@ def main():
                 "workers": np_ - 1, "rep": rep,
                 "driver_idx": drv, "role": role, "pid": rec["pid"],
                 "wall_s": f"{wall:.2f}", "exit_code": code,
-                "n_samples": n if rec["cpu"] else 0,
-                "cpu_avg_pct": f"{sum(rec['cpu'])/n:.1f}" if rec["cpu"] else "",
-                "cpu_peak_pct": f"{max(rec['cpu']):.1f}" if rec["cpu"] else "",
-                "rss_avg_mb": f"{sum(rec['rss'])/n:.0f}" if rec["rss"] else "",
-                "rss_peak_mb": f"{max(rec['rss']):.0f}" if rec["rss"] else "",
-                "sys_cpu_avg_pct": f"{scpu:.1f}" if scpu != "" else "",
-                "sys_mem_avg_mb": f"{smem:.0f}" if smem != "" else ""})
+                "n_samples": len(rec["cpu"]),
+                "cpu_avg_pct": fmt(mean(rec["cpu"]), 1),
+                "cpu_peak_pct": fmt(mx(rec["cpu"]), 1),
+                "rss_avg_mb": fmt(mean(rec["rss"])),
+                "rss_peak_mb": fmt(mx(rec["rss"])),
+                "sys_cpu_avg_pct": fmt(scpu, 1),
+                "sys_mem_avg_mb": fmt(smem),
+                "cores_req": "" if cores is None else cores,
+                "heap_req_mb": "" if heap is None else heap,
+                "cores_alloc": cores_alloc, "heap_mb_alloc": heap_alloc,
+                "cpu_p95_pct": fmt(pctl(rec["cpu"], 95), 1),
+                "rss_p95_mb": fmt(pctl(rec["rss"], 95)),
+                "pss_avg_mb": fmt(mean(rec.get("pss", []))),
+                "pss_peak_mb": fmt(mx(rec.get("pss", []))),
+                "sys_mem_peak_mb": fmt(smem_peak),
+                "sys_mem_avail_min_mb": fmt(savail_min)})
         f.flush()
         elapsed.append(wall)
         eta = (sum(elapsed)/len(elapsed)) * (len(todo) - k)
         print(f"[{datetime.now():%H:%M:%S}] DONE {k}/{len(todo)}  {run_id}  "
-              f"wall={wall:.1f}s exit={code}  ETA={eta/3600:.1f}h", flush=True)
-        consec_fail = consec_fail + 1 if code != 0 else 0
+              f"wall={wall:.1f}s exit={code}  ETA<={eta/3600:.1f}h", flush=True)
+        if code == 124:
+            timeouts[cfg] = timeouts.get(cfg, 0) + 1
+        consec_fail = 0 if code in (0, 124) else consec_fail + 1
         if consec_fail >= MAX_CONSEC_FAILS:
-            print(f"[!] {consec_fail} consecutive failed runs -- aborting sweep. "
-                  f"Check {log_path} (first line is the exact mpirun command).", flush=True)
+            print(f"[!] {consec_fail} consecutive failed runs (not timeouts) -- aborting "
+                  f"sweep. Check {log_path} (first line is the exact mpirun command).", flush=True)
             f.close()
             sys.exit(3)
         time.sleep(SETTLE_S)
