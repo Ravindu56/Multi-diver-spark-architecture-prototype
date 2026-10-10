@@ -51,6 +51,27 @@ def _new_run(app, size, cores, heap, rep, cpu_p95=250.0):
     ]
 
 
+_DOE_COLS = (
+    "design_id,run_id,timestamp,host,app,size_mb,np,workers,k,iters,features,cores,heap_mb,"
+    "cap_threads,rep,driver_idx,role,pid,wall_s,exit_code,n_samples,cpu_avg_pct,cpu_peak_pct,"
+    "cpu_p95_pct,rss_avg_mb,rss_peak_mb,rss_p95_mb,pss_avg_mb,pss_peak_mb,sys_cpu_avg_pct,"
+    "sys_mem_avg_mb,sys_mem_peak_mb,sys_mem_avail_min_mb,cores_alloc,heap_mb_alloc"
+)
+
+
+def _doe_run(app, size, k, iters, feats, rep, exit_code=0):
+    """One DOE run (root + one driver); logreg rows have an empty k."""
+    rid = f"{app}_s{size}_k{k}_i{iters}_f{feats}_r{rep}"
+    ts = f"2026-10-09T1{rep}:{iters:02d}:{feats:02d}"
+    kk = "" if app == "logreg" else k
+    head = f"d,{rid},{ts},h,{app},{size},2,1,{kk},{iters},{feats},4,3072,4,{rep}"
+    tail = "1000,1100,1090,,,15,6000,6400,9000,4,3072"
+    return [
+        f"{head},0,root,1,90,{exit_code},100,99,102,101,{tail}",
+        f"{head},1,driver,2,90,{exit_code},100,380,420,400,{tail}",
+    ]
+
+
 def _write(path, header, rows):
     path.write_text(header + "\n" + "\n".join(rows) + "\n")
 
@@ -231,3 +252,66 @@ def test_default_split_file_is_version_controlled_path():
     assert build_local_dataset.DEFAULT_SPLITS_FILE.endswith(
         os.path.join("config", "phase6_splits.json")
     )
+
+
+# ── DOE (thread-capped) files ─────────────────────────────────
+
+
+@pytest.fixture
+def doe_dir(raw_dir):
+    rows = []
+    for k, iters, feats in ((3, 10, 8), (5, 20, 16), (10, 40, 32)):
+        for rep in (1, 2):
+            rows += _doe_run("kmeans", 100, k, iters, feats, rep)
+    rows += _doe_run("kmeans", 200, 5, 20, 16, 1, exit_code=124)
+    _write(raw_dir / "doe_kmeans.csv", _DOE_COLS, rows)
+    logreg = []
+    for iters, feats in ((10, 10), (30, 20), (60, 40)):
+        for rep in (1, 2):
+            logreg += _doe_run("logreg", 200, 0, iters, feats, rep)
+    _write(raw_dir / "doe_logreg.csv", _DOE_COLS, logreg)
+    return raw_dir
+
+
+def test_doe_columns_are_mapped(doe_dir):
+    drivers, _, report = ld.build_tables(str(doe_dir))
+    doe = drivers[drivers["experiment"] == "doe"]
+    assert len(doe) == 13 and report["files"]["doe_kmeans.csv"]["experiment"] == "doe"
+    assert (doe["dataset_mb"].isin([100, 200])).all()
+    assert (doe["cores_per_driver"] == 4).all() and (doe["heap_mb_per_driver"] == 3072).all()
+    assert (doe["thread_cap"] == 4).all() and doe["design_known"].all()
+    km = doe[doe["workload_type"] == "kmeans"]
+    assert set(km["num_clusters"]) == {3, 5, 10} and set(km["iterations"]) == {10, 20, 40}
+    lr = doe[doe["workload_type"] == "logreg"]
+    assert (lr["num_clusters"] == 0).all() and set(lr["num_features"]) == {10, 20, 40}
+    assert doe["cpu_cores_mean"].tolist() == pytest.approx([3.8] * len(doe))
+
+
+def test_thread_cap_marks_environment(doe_dir):
+    drivers, _, _ = ld.build_tables(str(doe_dir))
+    cap = drivers.groupby("experiment")["thread_cap"].first()
+    assert cap["blas_test"] == 2 and cap["doe"] == 4
+    assert drivers.loc[drivers["experiment"] == "grid", "thread_cap"].isna().all()
+    assert not drivers.loc[drivers["experiment"] != "doe", "design_known"].any()
+
+
+def test_doe_groups_carry_design_and_old_keys_are_unchanged(doe_dir):
+    drivers, _, report = ld.build_tables(str(doe_dir))
+    doe = drivers[drivers["experiment"] == "doe"]
+    assert "main|kmeans|100|1|4|3072|cap4|i20|f16|k5" in set(doe["config_group"])
+    assert "main|logreg|200|1|4|3072|cap4|i10|f10|k0" in set(doe["config_group"])
+    assert doe.groupby("config_group")["split"].nunique().max() == 1
+    assert "main|kmeans|100|2|1|1536" in set(drivers["config_group"])
+
+
+def test_doe_groups_join_frozen_splits_without_moving_old_ones(raw_dir, tmp_path):
+    _, _, first = ld.build_tables(str(raw_dir))
+    frozen = first["split_map"]
+    rows = []
+    for k, iters, feats in ((3, 10, 8), (5, 20, 16), (10, 40, 32), (3, 40, 8)):
+        rows += _doe_run("kmeans", 100, k, iters, feats, 1)
+    _write(raw_dir / "doe_kmeans.csv", _DOE_COLS, rows)
+    _, _, second = ld.build_tables(str(raw_dir), frozen)
+    assert all(second["split_map"][g] == s for g, s in frozen.items())
+    new = {g: s for g, s in second["split_map"].items() if g not in frozen}
+    assert len(new) == 4 and "test" in new.values()

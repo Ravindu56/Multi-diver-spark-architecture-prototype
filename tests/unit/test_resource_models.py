@@ -138,11 +138,13 @@ def test_training_script_end_to_end(tmp_path, monkeypatch):
     pd.concat([df, extra]).to_csv(path, index=False)
 
     out = tmp_path / "models"
-    metrics = trp.main(["--drivers", str(path), "--out-dir", str(out)])
+    metrics = trp.main(
+        ["--drivers", str(path), "--out-dir", str(out), "--training-set", "uncapped"]
+    )
     assert set(metrics["model"]) == {"lookup", "ridge", "ridge_wl", "rf"}
     assert set(metrics["target"]) == set(m.TARGETS)
     card = json.loads((out / "model_card.json").read_text())
-    assert card["rows"]["rows_dropped_unknown_alloc"] == 2
+    assert card["rows"]["rows_dropped_unknown_inputs"] == 2
     assert card["rows"]["workloads_dropped_entirely"] == ["wordcount"]
     assert (out / "mem_mb_peak__rf.joblib").exists()
     cv = pd.read_csv(out / "cv_metrics.csv")
@@ -153,6 +155,58 @@ def test_training_script_end_to_end(tmp_path, monkeypatch):
     preds = pd.read_csv(out / "predictions_test.csv")
     test_keys = set(df.loc[df["split"] == "test", "run_key"])
     assert set(preds["run_key"].astype(str)) == test_keys  # only TEST rows scored
+
+
+# ── training sets: capped vs uncapped ─────────────────────────
+
+
+def _env_frame():
+    """Uncapped rows without design + capped rows with design inputs."""
+    old = _frame().assign(thread_cap=np.nan, design_known=False)
+    old[m.DESIGN_FEATURES] = np.nan
+    new = _frame(seed=1).assign(
+        thread_cap=4.0, design_known=True, iterations=20.0, num_features=10.0
+    )
+    new["num_clusters"] = np.where(new["workload_type"] == "kmeans", 5.0, 0.0)
+    df = pd.concat([old, new], ignore_index=True)
+    df["in_main_set"], df["status"], df["alloc_known"] = True, "ok", True
+    return df
+
+
+def test_training_sets_never_mix_environments():
+    df = _env_frame()
+    capped, info = m.select_training_rows(df, "capped")
+    uncapped, _ = m.select_training_rows(df, "uncapped")
+    assert capped["thread_cap"].notna().all() and uncapped["thread_cap"].isna().all()
+    assert len(capped) + len(uncapped) == len(df)
+    assert m.features_for("capped")[-3:] == m.DESIGN_FEATURES
+    assert m.features_for("uncapped") == m.FEATURES
+
+
+def test_capped_set_drops_rows_without_design():
+    df = _env_frame()
+    df.loc[df["thread_cap"].notna() & (df["workload_type"] == "logreg"), "design_known"] = False
+    capped, info = m.select_training_rows(df, "capped")
+    assert set(capped["workload_type"]) == {"kmeans"}
+    assert info["workloads_dropped_entirely"] == ["logreg"]
+
+
+def test_design_features_reach_every_model():
+    rng = np.random.default_rng(0)
+    df = _env_frame()
+    df = df[df["thread_cap"].notna()].copy()
+    df["iterations"] = rng.choice([10.0, 20.0, 40.0], len(df))
+    df["cpu_cores_mean"] = np.log2(df["iterations"]) + (df["workload_type"] == "logreg")
+    feats = m.features_for("capped")
+    num = m.TRAINING_SETS["capped"]["numeric"]
+    for model in (
+        m.make_ridge(0.01, num),
+        m.make_ridge_wl(0.01, num),
+        m.make_rf(5, 1, n_estimators=10),
+        m.LookupModel(feats),
+    ):
+        pred = model.fit(df[feats], df["cpu_cores_mean"]).predict(df[feats])
+        assert m.regression_metrics(df["cpu_cores_mean"], pred)["mae"] < 0.1
 
 
 # ── group cross-validation ────────────────────────────────────

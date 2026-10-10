@@ -12,7 +12,16 @@
 #   local_runs.csv      one row per run (driver aggregates + run outcome)
 #
 # Input files share one column layout (older files lack the allocation and
-# p95 columns; those values become missing, never invented).
+# p95 columns; those values become missing, never invented).  Design-of-
+# experiments files (doe_*.csv) add the workload design (iterations, feature
+# count, k) and the BLAS thread cap; older files lack those columns.
+#
+# THREAD CAP
+# ----------
+# Runs with a BLAS / OpenMP thread cap (OMP/OPENBLAS/MKL_NUM_THREADS) use
+# roughly the cores they are given; uncapped LogReg runs used far more.  The
+# two environments are NOT mixed for training: `thread_cap` is recorded per
+# row (missing = uncapped) and the training scripts pick one environment.
 #
 # MEASUREMENT SCOPE
 # -----------------
@@ -53,7 +62,12 @@ EXPERIMENT_BY_PREFIX: list[tuple[str, str]] = [
     ("grid_", "grid"),
     ("floor_", "memory_floor"),
     ("blas_test", "blas_test"),
+    ("doe_", "doe"),
 ]
+
+# Thread cap of experiments whose files have no cap_threads column (as reported
+# by the experimenter).  Files with a cap_threads column use that value.
+THREAD_CAP_BY_EXPERIMENT: dict[str, int] = {"blas_test": 2}
 
 # Experiments that changed the runtime environment; kept in the tables but
 # flagged out of the main training set (in_main_set = False).
@@ -94,7 +108,12 @@ INPUT_COLUMNS = [
     "num_workers",
     "cores_per_driver",
     "heap_mb_per_driver",
+    "iterations",
+    "num_features",
+    "num_clusters",
+    "thread_cap",
     "alloc_known",
+    "design_known",
 ]
 DRIVER_LABEL_COLUMNS = [
     "cpu_cores_mean",
@@ -112,6 +131,9 @@ DIAGNOSTIC_COLUMNS = [
     "host_mem_peak_mb",
     "host_mem_avail_min_mb",
 ]
+
+# DOE files name the same inputs differently; mapped onto the older names first.
+_DOE_RENAME = {"size_mb": "size", "iters": "iterations", "features": "num_features"}
 
 _RAW_RENAME = {
     "app": "workload_type",
@@ -144,33 +166,56 @@ def load_file(path: str) -> pd.DataFrame:
     """Read one raw CSV and bring it to the common column set."""
     df = pd.read_csv(path)
     name = os.path.basename(path)
+    df = df.rename(columns={k: v for k, v in _DOE_RENAME.items() if v not in df})
+    if "cores_alloc" not in df and "cores" in df:
+        df["cores_alloc"] = df["cores"]
+    if "heap_mb_alloc" not in df and "heap_mb" in df:
+        df["heap_mb_alloc"] = df["heap_mb"]
     if "role" not in df:  # older layout: rank 0 is the MPI root
         df["role"] = np.where(df["driver_idx"] == 0, "root", "driver")
-    for col in ("cores_alloc", "heap_mb_alloc", "cpu_p95_pct", "rss_p95_mb"):
+    for col in (
+        "cores_alloc",
+        "heap_mb_alloc",
+        "cpu_p95_pct",
+        "rss_p95_mb",
+        "cap_threads",
+        "iterations",
+        "num_features",
+        "k",
+    ):
         if col not in df:
             df[col] = np.nan
     df = df.rename(columns=_RAW_RENAME)
     df["file"] = name
     df["experiment"] = experiment_for(name)
+    df["thread_cap"] = df["cap_threads"].fillna(
+        THREAD_CAP_BY_EXPERIMENT.get(df["experiment"].iloc[0] if len(df) else "", np.nan)
+    )
+    # k only exists for K-Means; other workloads have no clusters (0, not missing)
+    df["num_clusters"] = np.where(df["workload_type"] == "kmeans", df["k"], 0.0)
     return df
 
 
 def config_group(row) -> str:
-    """Repetitions of one configuration share this key (and therefore a split)."""
+    """
+    Repetitions of one configuration share this key (and therefore a split).
+    Rows from files that record cap_threads (DOE) also carry the cap and the
+    workload design; older keys are unchanged so frozen splits stay valid.
+    """
     cores = "auto" if pd.isna(row["cores_per_driver"]) else int(row["cores_per_driver"])
     heap = "auto" if pd.isna(row["heap_mb_per_driver"]) else int(row["heap_mb_per_driver"])
     variant = row["experiment"] if row["experiment"] in SEPARATE_EXPERIMENTS else "main"
-    return "|".join(
-        str(v)
-        for v in (
-            variant,
-            row["workload_type"],
-            int(row["dataset_mb"]),
-            int(row["num_workers"]),
-            cores,
-            heap,
-        )
-    )
+    parts = [variant, row["workload_type"], int(row["dataset_mb"]), int(row["num_workers"])]
+    parts += [cores, heap]
+    if pd.notna(row["cap_threads"]):
+        design = (("cap", "cap_threads"), ("i", "iterations"), ("f", "num_features"))
+        parts += [f"{tag}{_int_or_na(row[col])}" for tag, col in design]
+        parts.append(f"k{_int_or_na(row['num_clusters'])}")
+    return "|".join(str(v) for v in parts)
+
+
+def _int_or_na(v) -> str:
+    return "na" if pd.isna(v) else str(int(v))
 
 
 def _hash_split(key: str, fractions: dict[str, float] = SPLIT_FRACTIONS) -> str:
@@ -274,6 +319,7 @@ def build_tables(
     raw["source"] = "local"
     raw["workload_class"] = raw["workload_type"].map(WORKLOAD_CLASS)
     raw["alloc_known"] = raw["cores_per_driver"].notna() & raw["heap_mb_per_driver"].notna()
+    raw["design_known"] = raw[["iterations", "num_features", "num_clusters"]].notna().all(axis=1)
     raw["config_group"] = raw.apply(config_group, axis=1)
     raw["in_main_set"] = ~raw["experiment"].isin(SEPARATE_EXPERIMENTS)
     raw["stratum"] = raw["workload_type"] + "|" + raw["in_main_set"].astype(str)
@@ -327,6 +373,13 @@ def summarise(drivers: pd.DataFrame, runs: pd.DataFrame, report: dict) -> dict:
             "runs_by_experiment": runs["experiment"].value_counts().to_dict(),
             "runs_by_workload": runs["workload_type"].value_counts().to_dict(),
             "runs_by_split": runs["split"].value_counts().to_dict(),
+            "runs_by_thread_cap": runs["thread_cap"]
+            .fillna(-1)
+            .astype(int)
+            .astype(str)
+            .replace("-1", "uncapped")
+            .value_counts()
+            .to_dict(),
             "config_groups": int(len(groups)),
             "config_groups_spanning_splits": int((groups > 1).sum()),
             "main_set_ok_driver_rows": int(ok["in_main_set"].sum()),

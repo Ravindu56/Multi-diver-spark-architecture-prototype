@@ -15,8 +15,12 @@
 #   4. calibrates the empirical upper margin from out-of-fold residuals,
 #   5. refits the chosen models on TRAIN+VAL and evaluates ONCE on TEST.
 #
+# TRAINING SETS (never mixed; see models.TRAINING_SETS)
+#   capped    thread-capped runs + workload design inputs   (default)
+#   uncapped  earlier runs without a thread cap (comparison; earlier results)
+#
 # Input:  data/local/local_drivers.csv  (scripts/build_local_dataset.py)
-# Output: data/models/local/  (git-ignored)
+# Output: data/models/local_<training-set>/  (git-ignored)
 #   metrics.csv          test metrics per target × model × workload
 #   cv_metrics.csv       out-of-fold CV metrics per target × model × workload
 #   predictions_test.csv per-row test predictions and upper bounds
@@ -27,9 +31,11 @@
 #
 # CLI FLAGS
 #   --drivers PATH         local_drivers.csv     (default: data/local/local_drivers.csv)
-#   --out-dir PATH         output directory      (default: data/models/local)
+#   --training-set NAME    capped (default) | uncapped
+#   --out-dir PATH         output directory      (default: data/models/local_<set>)
 #   --unknown-alloc MODE   drop (default) — rows without recorded cores/heap
-#                          are excluded until their allocation is confirmed
+#                          (or, for capped, without the workload design)
+#                          are excluded until those inputs are confirmed
 #   --upper-quantile Q     residual quantile for the upper bound (default 0.9)
 # =============================================================================
 
@@ -60,30 +66,20 @@ def _parse_args(argv=None):
     p.add_argument(
         "--drivers", default=os.path.join(_PROJECT_ROOT, "data", "local", "local_drivers.csv")
     )
-    p.add_argument("--out-dir", default=os.path.join(_PROJECT_ROOT, "data", "models", "local"))
+    p.add_argument("--training-set", choices=sorted(m.TRAINING_SETS), default="capped")
+    p.add_argument("--out-dir", default=None)
     p.add_argument("--unknown-alloc", choices=["drop"], default="drop")
     p.add_argument("--upper-quantile", type=float, default=0.9)
     return p.parse_args(argv)
 
 
-def load_training_rows(path: str) -> tuple[pd.DataFrame, dict]:
-    df = pd.read_csv(path)
-    info = {"rows_in_file": len(df)}
-    df = df[df["in_main_set"] & (df["status"] == "ok")]
-    info["rows_main_ok"] = len(df)
-    unknown = ~df["alloc_known"]
-    info["rows_dropped_unknown_alloc"] = int(unknown.sum())
-    info["workloads_dropped_entirely"] = sorted(
-        set(df.loc[unknown, "workload_type"]) - set(df.loc[~unknown, "workload_type"])
-    )
-    df = df[~unknown].copy()
-    m.check_features(df)
-    return df, info
+def load_training_rows(path: str, training_set: str) -> tuple[pd.DataFrame, dict]:
+    return m.select_training_rows(pd.read_csv(path), training_set)
 
 
-def _fit_predict(model, train, test, target):
-    model.fit(train[m.FEATURES], train[target])
-    return model, model.predict(test[m.FEATURES])
+def _fit_predict(model, train, test, target, features):
+    model.fit(train[features], train[target])
+    return model, model.predict(test[features])
 
 
 def _cv_rows(oof: pd.DataFrame, target: str) -> list[dict]:
@@ -105,22 +101,24 @@ def _cv_rows(oof: pd.DataFrame, target: str) -> list[dict]:
 
 
 def select_and_train(
-    df: pd.DataFrame, target: str, q: float
+    df: pd.DataFrame, target: str, q: float, training_set: str = "uncapped"
 ) -> tuple[list[dict], list[dict], list, dict]:
     """Return (test metric rows, CV metric rows, test prediction frames, choices)."""
+    features = m.features_for(training_set)
+    num = m.TRAINING_SETS[training_set]["numeric"]
     d = df[df[target].notna()]
     trval = d[d["split"].isin(["train", "val"])]
     test = d[d["split"] == "test"]
 
     # ── selection by leave-one-configuration-out CV on TRAIN+VAL ──────────
-    candidates = {"lookup": m.LookupModel}
-    candidates |= {f"ridge|{a}": (lambda a=a: m.make_ridge(a)) for a in m.RIDGE_ALPHAS}
-    candidates |= {f"ridge_wl|{a}": (lambda a=a: m.make_ridge_wl(a)) for a in m.RIDGE_ALPHAS}
+    candidates = {"lookup": lambda: m.LookupModel(features)}
+    candidates |= {f"ridge|{a}": (lambda a=a: m.make_ridge(a, num)) for a in m.RIDGE_ALPHAS}
+    candidates |= {f"ridge_wl|{a}": (lambda a=a: m.make_ridge_wl(a, num)) for a in m.RIDGE_ALPHAS}
     candidates |= {
         f"rf|{p['max_depth']}|{p['min_samples_leaf']}": (lambda p=p: m.make_rf(**p))
         for p in m.RF_GRID
     }
-    oof_all = m.group_cv_predictions(trval, target, candidates)
+    oof_all = m.group_cv_predictions(trval, target, candidates, features=features)
     cand_mae = (
         oof_all.assign(ae=(oof_all["predicted"] - oof_all["actual"]).abs())
         .groupby("model")["ae"]
@@ -148,7 +146,7 @@ def select_and_train(
         sel = oof[oof["model"] == name]
         margin = m.upper_margin(sel["actual"], sel["predicted"], q)
         # final model on TRAIN+VAL, evaluated once on TEST
-        model, test_pred = _fit_predict(factory(), trval, test, target)
+        model, test_pred = _fit_predict(factory(), trval, test, target, features)
         upper = test_pred + margin
         fitted[name] = model
         for wl, idx in [("all", test.index)] + [
@@ -165,7 +163,7 @@ def select_and_train(
                     **m.regression_metrics(test[target][mask], test_pred[mask], upper[mask]),
                 }
             )
-        p = test[["run_key", "driver_idx", "workload_type", *m.NUMERIC_FEATURES]].copy()
+        p = test[["run_key", "driver_idx", *features]].copy()
         p["target"], p["model"] = target, name
         p["actual"], p["predicted"], p["upper"] = test[target].values, test_pred, upper
         if name == "lookup":
@@ -187,12 +185,17 @@ def select_and_train(
 
 def main(argv=None):
     args = _parse_args(argv)
-    df, info = load_training_rows(args.drivers)
+    if args.out_dir is None:
+        args.out_dir = os.path.join(_PROJECT_ROOT, "data", "models", f"local_{args.training_set}")
+    df, info = load_training_rows(args.drivers, args.training_set)
+    features = m.features_for(args.training_set)
     os.makedirs(args.out_dir, exist_ok=True)
 
     all_rows, all_cv, all_preds, card_targets = [], [], [], {}
     for target in m.TARGETS:
-        rows, cv_rows, preds, choices = select_and_train(df, target, args.upper_quantile)
+        rows, cv_rows, preds, choices = select_and_train(
+            df, target, args.upper_quantile, args.training_set
+        )
         all_rows += rows
         all_cv += cv_rows
         all_preds += preds
@@ -210,12 +213,17 @@ def main(argv=None):
         data_sha = hashlib.sha256(fh.read()).hexdigest()
     card = {
         "stage": "local_only_baselines",
+        "training_set": args.training_set,
+        "training_set_description": m.TRAINING_SETS[args.training_set]["description"],
         "protocol": "leave-one-configuration-out CV on train+val for selection, upper-margin calibration and uncertainty; single final evaluation on test",
         "data": {"drivers_csv": os.path.relpath(args.drivers, _PROJECT_ROOT), "sha256": data_sha},
         "rows": info,
-        "features": m.FEATURES,
+        "features": features,
         "targets": m.TARGETS,
-        "valid_ranges": {c: [float(df[c].min()), float(df[c].max())] for c in m.NUMERIC_FEATURES}
+        "thread_caps_seen": sorted(df["thread_cap"].dropna().unique().tolist())
+        if "thread_cap" in df
+        else [],
+        "valid_ranges": {c: [float(df[c].min()), float(df[c].max())] for c in features[1:]}
         | {"workload_type": sorted(df["workload_type"].unique())},
         "rows_by_split": df["split"].value_counts().to_dict(),
         "upper_quantile": args.upper_quantile,

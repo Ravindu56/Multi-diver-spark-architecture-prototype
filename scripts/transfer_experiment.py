@@ -17,7 +17,7 @@
 #
 # Inputs:  data/scout/scout_hosts.csv     (scripts/build_scout_dataset.py)
 #          data/local/local_drivers.csv   (scripts/build_local_dataset.py)
-# Output:  data/models/transfer/  (git-ignored)
+# Output:  data/models/transfer_<training-set>/  (git-ignored)
 #   cv_metrics.csv, test_metrics.csv, learning_curve.csv,
 #   learning_curve_summary.csv, report.json
 #
@@ -25,6 +25,7 @@
 #
 # CLI FLAGS
 #   --scout-hosts PATH   --drivers PATH   --out-dir PATH
+#   --training-set NAME  capped (default) | uncapped  (see models.TRAINING_SETS)
 #   --ks 2,4,8,16,32     training-set sizes (configuration groups) for the curve
 #   --reps 20            repetitions per size
 #   --rf-trees 200       trees in the local random forest
@@ -68,7 +69,8 @@ def _parse_args(argv=None):
     p.add_argument(
         "--drivers", default=os.path.join(_PROJECT_ROOT, "data", "local", "local_drivers.csv")
     )
-    p.add_argument("--out-dir", default=os.path.join(_PROJECT_ROOT, "data", "models", "transfer"))
+    p.add_argument("--training-set", choices=sorted(m.TRAINING_SETS), default="capped")
+    p.add_argument("--out-dir", default=None)
     p.add_argument("--ks", default="2,4,8,16,32")
     p.add_argument("--reps", type=int, default=20)
     p.add_argument("--rf-trees", type=int, default=200)
@@ -80,11 +82,8 @@ def _sha(path: str) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def load_local(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df = df[df["in_main_set"] & (df["status"] == "ok") & df["alloc_known"]].copy()
-    m.check_features(df)
-    return df
+def load_local(path: str, training_set: str) -> pd.DataFrame:
+    return m.select_training_rows(pd.read_csv(path), training_set)[0]
 
 
 def _metric_rows(frame: pd.DataFrame, target: str, protocol: str) -> list[dict]:
@@ -110,16 +109,17 @@ def run_target(local: pd.DataFrame, source: pd.DataFrame, target: str, args) -> 
     d["source_pred"] = lines.predict(d)
     trval = d[d["split"].isin(["train", "val"])]
     test = d[d["split"] == "test"]
-    factories = t.method_factories(args.rf_trees)
+    factories = t.method_factories(args.rf_trees, args.training_set)
+    features = m.features_for(args.training_set)
 
     # 1. leave-one-configuration-out CV on train+val
-    oof = t.group_cv(trval, target, factories)
+    oof = t.group_cv(trval, target, factories, features)
     cv_rows = _metric_rows(oof, target, "cv_train_val")
     paired = {f"{a}_vs_{b}": m.group_bootstrap(oof, a, baseline=b) for a, b in COMPARISONS}
 
     # 2. learning curve on train+val (identical adaptation groups per method)
     ks = [int(k) for k in args.ks.split(",")]
-    curve = t.learning_curve(trval, target, factories, ks, reps=args.reps)
+    curve = t.learning_curve(trval, target, factories, ks, reps=args.reps, features=features)
 
     # 3. single final evaluation on the frozen test split
     test_frames = []
@@ -130,7 +130,7 @@ def run_target(local: pd.DataFrame, source: pd.DataFrame, target: str, args) -> 
                     "model": name,
                     "workload_type": test["workload_type"].values,
                     "actual": test[target].values,
-                    "predicted": t._fit_predict(factory, trval, test, target),
+                    "predicted": t._fit_predict(factory, trval, test, target, features),
                 }
             )
         )
@@ -177,7 +177,11 @@ def summarise_curve(curve: pd.DataFrame) -> pd.DataFrame:
 
 def main(argv=None):
     args = _parse_args(argv)
-    local = load_local(args.drivers)
+    if args.out_dir is None:
+        args.out_dir = os.path.join(
+            _PROJECT_ROOT, "data", "models", f"transfer_{args.training_set}"
+        )
+    local = load_local(args.drivers, args.training_set)
     source = t.scout_source_frame(pd.read_csv(args.scout_hosts))
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -215,6 +219,7 @@ def main(argv=None):
             "file": os.path.relpath(args.drivers, _PROJECT_ROOT),
             "sha256": _sha(args.drivers),
             "rows": len(local),
+            "training_set": args.training_set,
         },
         "protocols": {
             "cv_train_val": "leave-one-configuration-out on train+val",

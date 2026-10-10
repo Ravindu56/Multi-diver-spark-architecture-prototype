@@ -154,37 +154,47 @@ class ScoutOffset:
 class ScoutResidual:
     """Source prediction + per-workload Ridge on the local residual (all local inputs)."""
 
-    def __init__(self, alpha: float = 1.0):
+    def __init__(self, alpha: float = 1.0, numeric: list[str] = m.NUMERIC_FEATURES):
         self.alpha = alpha
+        self.features = [*m.CATEGORICAL_FEATURES, *numeric]
+        self.numeric = numeric
 
     def fit(self, X: pd.DataFrame, y) -> ScoutResidual:
         resid = np.asarray(y, float) - X["source_pred"].to_numpy(float)
-        self.model_ = m.make_ridge_wl(self.alpha).fit(X[m.FEATURES], resid)
+        self.model_ = m.make_ridge_wl(self.alpha, self.numeric).fit(X[self.features], resid)
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return X["source_pred"].to_numpy(float) + self.model_.predict(X[m.FEATURES])
+        return X["source_pred"].to_numpy(float) + self.model_.predict(X[self.features])
 
 
-def method_factories(rf_trees: int = 200) -> dict:
+def method_factories(rf_trees: int = 200, training_set: str = "uncapped") -> dict:
     """All compared methods; every factory returns an object with fit/predict on X."""
+    num = m.TRAINING_SETS[training_set]["numeric"]
+    feats = m.features_for(training_set)
     return {
-        "local_lookup": m.LookupModel,
-        "local_ridge_wl": lambda: m.make_ridge_wl(1.0),
+        "local_lookup": lambda: m.LookupModel(feats),
+        "local_ridge_wl": lambda: m.make_ridge_wl(1.0, num),
         "local_rf": lambda: m.make_rf(5, 2, n_estimators=rf_trees),
         "scout_only": ScoutOnly,
         "scout_offset": ScoutOffset,
-        "scout_residual": lambda: ScoutResidual(1.0),
+        "scout_residual": lambda: ScoutResidual(1.0, num),
     }
 
 
-def _fit_predict(factory, train: pd.DataFrame, test: pd.DataFrame, target: str) -> np.ndarray:
-    cols = [*m.FEATURES, "source_pred"]
+def _fit_predict(
+    factory,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    target: str,
+    features: list[str] = m.FEATURES,
+) -> np.ndarray:
+    cols = [*features, "source_pred"]
     model = factory()
     # local-only pipelines must not see the source prediction
-    if isinstance(model, (ScoutOnly, ScoutOffset, ScoutResidual)):
+    if isinstance(model, ScoutOnly | ScoutOffset | ScoutResidual):
         return model.fit(train[cols], train[target]).predict(test[cols])
-    return model.fit(train[m.FEATURES], train[target]).predict(test[m.FEATURES])
+    return model.fit(train[features], train[target]).predict(test[features])
 
 
 # =============================================================================
@@ -192,7 +202,9 @@ def _fit_predict(factory, train: pd.DataFrame, test: pd.DataFrame, target: str) 
 # =============================================================================
 
 
-def group_cv(df: pd.DataFrame, target: str, factories: dict) -> pd.DataFrame:
+def group_cv(
+    df: pd.DataFrame, target: str, factories: dict, features: list[str] = m.FEATURES
+) -> pd.DataFrame:
     """Leave-one-configuration-out predictions for every method."""
     frames = []
     for group in df["config_group"].unique():
@@ -205,7 +217,7 @@ def group_cv(df: pd.DataFrame, target: str, factories: dict) -> pd.DataFrame:
                         "workload_type": held["workload_type"].values,
                         "model": name,
                         "actual": held[target].values,
-                        "predicted": _fit_predict(factory, rest, held, target),
+                        "predicted": _fit_predict(factory, rest, held, target, features),
                     }
                 )
             )
@@ -231,6 +243,7 @@ def learning_curve(
     ks: list[int],
     reps: int = 20,
     seed: int = 0,
+    features: list[str] = m.FEATURES,
 ) -> pd.DataFrame:
     """
     For each k, repeatedly train on k random configuration groups (the
@@ -248,7 +261,7 @@ def learning_curve(
             train = df[df["config_group"].isin(picked)]
             evals = df[~df["config_group"].isin(picked)]
             for name, factory in factories.items():
-                pred = _fit_predict(factory, train, evals, target)
+                pred = _fit_predict(factory, train, evals, target, features)
                 err = pred - evals[target].to_numpy(float)
                 rows.append(
                     {

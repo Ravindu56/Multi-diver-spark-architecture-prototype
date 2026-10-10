@@ -8,6 +8,13 @@
 # from PRE-RUN inputs only (what is known before the job is launched):
 #
 #   workload_type, dataset_mb, num_workers, cores_per_driver, heap_mb_per_driver
+#   (+ iterations, num_features, num_clusters in the "capped" feature set)
+#
+# Two TRAINING SETS (thread-capped and uncapped runs are never mixed):
+#   capped    runs with a BLAS/OpenMP thread cap and a recorded workload
+#             design — the environment the allocator deploys
+#   uncapped  the earlier grid / floor runs without a cap — kept as the
+#             comparison ("uncapped demand") and to reproduce earlier results
 #
 # Models (one per target; CPU and memory are trained separately):
 #   lookup  median of the most specific matching configuration seen in
@@ -42,6 +49,47 @@ from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardSc
 CATEGORICAL_FEATURES = ["workload_type"]
 NUMERIC_FEATURES = ["dataset_mb", "num_workers", "cores_per_driver", "heap_mb_per_driver"]
 FEATURES = CATEGORICAL_FEATURES + NUMERIC_FEATURES
+DESIGN_FEATURES = ["iterations", "num_features", "num_clusters"]
+
+# numeric inputs used in log2 form by the linear models (all strictly positive)
+LOG_FEATURES = ("dataset_mb", "heap_mb_per_driver", "iterations", "num_features")
+
+TRAINING_SETS: dict[str, dict] = {
+    "capped": {
+        "numeric": NUMERIC_FEATURES + DESIGN_FEATURES,
+        "description": "thread-capped runs with recorded workload design",
+    },
+    "uncapped": {
+        "numeric": NUMERIC_FEATURES,
+        "description": "earlier runs without a thread cap (comparison only)",
+    },
+}
+
+
+def features_for(training_set: str) -> list[str]:
+    return CATEGORICAL_FEATURES + TRAINING_SETS[training_set]["numeric"]
+
+
+def select_training_rows(df: pd.DataFrame, training_set: str) -> tuple[pd.DataFrame, dict]:
+    """
+    Rows of one environment that may train a model: main set, finished OK,
+    known allocation and — for the capped set — a recorded design.
+    """
+    info = {"training_set": training_set, "rows_in_file": len(df)}
+    capped = df["thread_cap"].notna() if "thread_cap" in df else pd.Series(False, df.index)
+    env = capped if training_set == "capped" else ~capped
+    d = df[df["in_main_set"] & (df["status"] == "ok") & env]
+    info["rows_env_main_ok"] = len(d)
+    required = ["alloc_known"] + (["design_known"] if training_set == "capped" else [])
+    unknown = ~d[required].all(axis=1)
+    info["rows_dropped_unknown_inputs"] = int(unknown.sum())
+    info["workloads_dropped_entirely"] = sorted(
+        set(d.loc[unknown, "workload_type"]) - set(d.loc[~unknown, "workload_type"])
+    )
+    d = d[~unknown].copy()
+    check_features(d, features_for(training_set))
+    return d, info
+
 
 # Most specific → least specific key for the lookup baseline.
 LOOKUP_LEVELS: list[list[str]] = [
@@ -62,12 +110,12 @@ RIDGE_ALPHAS = [0.1, 1.0, 10.0, 100.0]
 RF_GRID = [{"max_depth": d, "min_samples_leaf": leaf} for d in (3, 5, 8) for leaf in (2, 5)]
 
 
-def check_features(df: pd.DataFrame) -> None:
+def check_features(df: pd.DataFrame, features: list[str] = FEATURES) -> None:
     """Reject rows that miss a mandatory pre-run input."""
-    missing = [c for c in FEATURES if c not in df]
+    missing = [c for c in features if c not in df]
     if missing:
         raise ValueError(f"missing feature columns: {missing}")
-    bad = df[FEATURES].isna().any(axis=1)
+    bad = df[features].isna().any(axis=1)
     if bad.any():
         raise ValueError(f"{int(bad.sum())} rows have missing pre-run inputs")
 
@@ -81,17 +129,17 @@ def _log2(x):
     return np.log2(np.asarray(x, dtype=float))
 
 
-def make_ridge(alpha: float = 1.0) -> Pipeline:
-    """Ridge on one-hot workload + standardised log2(size, heap) and counts."""
+def make_ridge(alpha: float = 1.0, numeric: list[str] = NUMERIC_FEATURES) -> Pipeline:
+    """Ridge on one-hot workload + standardised log2(size, heap, ...) and counts."""
     pre = ColumnTransformer(
         [
             ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
             (
                 "log",
                 Pipeline([("log2", FunctionTransformer(_log2)), ("scale", StandardScaler())]),
-                ["dataset_mb", "heap_mb_per_driver"],
+                [c for c in numeric if c in LOG_FEATURES],
             ),
-            ("lin", StandardScaler(), ["num_workers", "cores_per_driver"]),
+            ("lin", StandardScaler(), [c for c in numeric if c not in LOG_FEATURES]),
         ]
     )
     return Pipeline([("pre", pre), ("model", Ridge(alpha=alpha))])
@@ -119,19 +167,20 @@ class WorkloadInteractions(BaseEstimator, TransformerMixin):
     """
     Features for a per-workload linear model:
         [ one-hot workload | z(numeric) | one-hot workload × z(numeric) ]
-    where z() standardises log2(dataset_mb), log2(heap) and the raw counts with
+    where z() standardises the LOG_FEATURES in log2 form and the counts with
     the TRAINING mean/std.  The interaction block gives every workload its own
     slope for each input, so Ridge is no longer forced to share one slope
     across K-Means and LogReg.  An unseen workload gets an all-zero one-hot
     (shared slopes only).
     """
 
-    _LOG = ("dataset_mb", "heap_mb_per_driver")
+    def __init__(self, numeric: list[str] = NUMERIC_FEATURES):
+        self.numeric = numeric
 
     def _numeric(self, X: pd.DataFrame) -> np.ndarray:
         cols = [
-            np.log2(X[c].to_numpy(float)) if c in self._LOG else X[c].to_numpy(float)
-            for c in NUMERIC_FEATURES
+            np.log2(X[c].to_numpy(float)) if c in LOG_FEATURES else X[c].to_numpy(float)
+            for c in self.numeric
         ]
         return np.column_stack(cols)
 
@@ -152,22 +201,27 @@ class WorkloadInteractions(BaseEstimator, TransformerMixin):
         return np.hstack([onehot, z, inter])
 
 
-def make_ridge_wl(alpha: float = 1.0) -> Pipeline:
+def make_ridge_wl(alpha: float = 1.0, numeric: list[str] = NUMERIC_FEATURES) -> Pipeline:
     """Ridge with per-workload slopes (see WorkloadInteractions)."""
-    return Pipeline([("pre", WorkloadInteractions()), ("model", Ridge(alpha=alpha))])
+    return Pipeline([("pre", WorkloadInteractions(numeric)), ("model", Ridge(alpha=alpha))])
 
 
 class LookupModel:
     """
     Median of the training rows that share the most specific configuration
-    key available (see LOOKUP_LEVELS).  `level_used_` records which level
+    key available (see LOOKUP_LEVELS; with extra `features` the full
+    feature key is tried first).  `level_used_` records which level
     answered each prediction, so fallbacks are visible in the report.
     """
+
+    def __init__(self, features: list[str] = FEATURES):
+        self.features = features
+        self.levels = LOOKUP_LEVELS if features == FEATURES else [features, *LOOKUP_LEVELS]
 
     def fit(self, X: pd.DataFrame, y) -> LookupModel:
         y = pd.Series(np.asarray(y, dtype=float), index=X.index)
         self.tables_ = []
-        for keys in LOOKUP_LEVELS:
+        for keys in self.levels:
             if keys:
                 self.tables_.append(y.groupby([X[k] for k in keys]).median().to_dict())
             else:
@@ -177,7 +231,7 @@ class LookupModel:
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         preds, levels = [], []
         for _, row in X.iterrows():
-            for level, (keys, table) in enumerate(zip(LOOKUP_LEVELS, self.tables_, strict=True)):
+            for level, (keys, table) in enumerate(zip(self.levels, self.tables_, strict=True)):
                 key = (
                     tuple(row[k] for k in keys) if len(keys) > 1 else (row[keys[0]] if keys else ())
                 )
@@ -234,8 +288,23 @@ CV_FACTORIES = {
 }
 
 
+def cv_factories(training_set: str = "uncapped") -> dict:
+    """CV_FACTORIES for the inputs of one training set."""
+    num = TRAINING_SETS[training_set]["numeric"]
+    return {
+        "lookup": lambda: LookupModel(features_for(training_set)),
+        "ridge": lambda: make_ridge(1.0, num),
+        "ridge_wl": lambda: make_ridge_wl(1.0, num),
+        "rf": lambda: make_rf(5, 2),
+    }
+
+
 def group_cv_predictions(
-    df: pd.DataFrame, target: str, factories: dict | None = None, group_col: str = "config_group"
+    df: pd.DataFrame,
+    target: str,
+    factories: dict | None = None,
+    group_col: str = "config_group",
+    features: list[str] = FEATURES,
 ) -> pd.DataFrame:
     """
     Out-of-fold predictions: each configuration group is predicted by a model
@@ -249,7 +318,7 @@ def group_cv_predictions(
         held = d[d[group_col] == group]
         rest = d[d[group_col] != group]
         for name, factory in factories.items():
-            model = factory().fit(rest[FEATURES], rest[target])
+            model = factory().fit(rest[features], rest[target])
             frames.append(
                 pd.DataFrame(
                     {
@@ -258,7 +327,7 @@ def group_cv_predictions(
                         "workload_type": held["workload_type"].values,
                         "model": name,
                         "actual": held[target].values,
-                        "predicted": model.predict(held[FEATURES]),
+                        "predicted": model.predict(held[features]),
                     }
                 )
             )

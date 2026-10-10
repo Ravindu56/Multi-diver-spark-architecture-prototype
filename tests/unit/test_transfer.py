@@ -213,6 +213,8 @@ def test_transfer_script_end_to_end(tmp_path):
             "2",
             "--rf-trees",
             "5",
+            "--training-set",
+            "uncapped",
         ]
     )
     assert set(report["targets"]) == set(m.TARGETS)
