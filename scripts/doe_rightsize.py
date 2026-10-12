@@ -23,13 +23,23 @@ Reuses the sampler/watchdog/data generators of doe_logreg.py and doe_kmeans.py: 
 whose drivers sit idle for --stall-s is killed (exit 125) and retried once; a timed-out
 cell is not repeated.  The first line of each run log is the exact mpirun command.
 """
-import argparse, csv, fcntl, math, os, random, shutil, socket, sys, time
+
+import argparse
+import csv
+import fcntl
+import math
+import os
+import random
+import shutil
+import socket
+import sys
+import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import resource_benchmark as rb  # noqa: E402
 import doe_kmeans as dk  # noqa: E402
 import doe_logreg as dl  # noqa: E402
+import resource_benchmark as rb  # noqa: E402
 
 WORKLOADS = [
     dict(id="L1", app="logreg", size_mb=25, np=3, iters=30, features=20, k=0),
@@ -47,13 +57,45 @@ WORKLOADS = [
 ]
 MAX_CONSEC_FAILS = 3
 
-FIELDS = ["workload_id", "app", "run_id", "attempt", "timestamp", "host", "size_mb", "np",
-          "workers", "iters", "features", "k", "cores", "heap_mb", "cap_threads", "rep",
-          "driver_idx", "role", "pid", "wall_s", "exit_code", "n_samples",
-          "cpu_avg_pct", "cpu_peak_pct", "cpu_p95_pct",
-          "rss_avg_mb", "rss_peak_mb", "rss_p95_mb",
-          "sys_cpu_avg_pct", "sys_mem_avg_mb", "sys_mem_peak_mb", "sys_mem_avail_min_mb",
-          "cores_alloc", "heap_mb_alloc", "iters_logged", "data_file", "trace_file"]
+FIELDS = [
+    "workload_id",
+    "app",
+    "run_id",
+    "attempt",
+    "timestamp",
+    "host",
+    "size_mb",
+    "np",
+    "workers",
+    "iters",
+    "features",
+    "k",
+    "cores",
+    "heap_mb",
+    "cap_threads",
+    "rep",
+    "driver_idx",
+    "role",
+    "pid",
+    "wall_s",
+    "exit_code",
+    "n_samples",
+    "cpu_avg_pct",
+    "cpu_peak_pct",
+    "cpu_p95_pct",
+    "rss_avg_mb",
+    "rss_peak_mb",
+    "rss_p95_mb",
+    "sys_cpu_avg_pct",
+    "sys_mem_avg_mb",
+    "sys_mem_peak_mb",
+    "sys_mem_avail_min_mb",
+    "cores_alloc",
+    "heap_mb_alloc",
+    "iters_logged",
+    "data_file",
+    "trace_file",
+]
 
 
 def est_total_gb(wl, cores):
@@ -67,21 +109,49 @@ def est_total_gb(wl, cores):
 
 def compute_labels(path, tols, ref_cores, out_path):
     import pandas as pd
+
     df = pd.read_csv(path)
     df = df[df.exit_code == 0]
     drv = df[df.role == "driver"]
-    run = drv.groupby("run_id").agg(
-        workload_id=("workload_id", "first"), app=("app", "first"), cores=("cores", "first"),
-        rep=("rep", "first"), size_mb=("size_mb", "first"), np=("np", "first"),
-        iters=("iters", "first"), features=("features", "first"), k=("k", "first"),
-        wall=("wall_s", "first"), cpu_avg=("cpu_avg_pct", "mean"), cpu_p95=("cpu_p95_pct", "mean"),
-        rss_p95=("rss_p95_mb", "max"), rss_peak=("rss_peak_mb", "max")).reset_index()
-    cell = run.groupby(["workload_id", "cores"]).agg(
-        app=("app", "first"), size_mb=("size_mb", "first"), np=("np", "first"),
-        iters=("iters", "first"), features=("features", "first"), k=("k", "first"),
-        n=("wall", "size"), wall=("wall", "mean"), wall_sd=("wall", "std"),
-        cpu_avg=("cpu_avg", "mean"), cpu_p95=("cpu_p95", "mean"),
-        rss_p95=("rss_p95", "mean"), rss_peak=("rss_peak", "max")).reset_index()
+    run = (
+        drv.groupby("run_id")
+        .agg(
+            workload_id=("workload_id", "first"),
+            app=("app", "first"),
+            cores=("cores", "first"),
+            rep=("rep", "first"),
+            size_mb=("size_mb", "first"),
+            np=("np", "first"),
+            iters=("iters", "first"),
+            features=("features", "first"),
+            k=("k", "first"),
+            wall=("wall_s", "first"),
+            cpu_avg=("cpu_avg_pct", "mean"),
+            cpu_p95=("cpu_p95_pct", "mean"),
+            rss_p95=("rss_p95_mb", "max"),
+            rss_peak=("rss_peak_mb", "max"),
+        )
+        .reset_index()
+    )
+    cell = (
+        run.groupby(["workload_id", "cores"])
+        .agg(
+            app=("app", "first"),
+            size_mb=("size_mb", "first"),
+            np=("np", "first"),
+            iters=("iters", "first"),
+            features=("features", "first"),
+            k=("k", "first"),
+            n=("wall", "size"),
+            wall=("wall", "mean"),
+            wall_sd=("wall", "std"),
+            cpu_avg=("cpu_avg", "mean"),
+            cpu_p95=("cpu_p95", "mean"),
+            rss_p95=("rss_p95", "mean"),
+            rss_peak=("rss_peak", "max"),
+        )
+        .reset_index()
+    )
     print("\nwall time (s) by cores:")
     print(cell.pivot(index="workload_id", columns="cores", values="wall").round(1).to_string())
     rows = []
@@ -92,23 +162,51 @@ def compute_labels(path, tols, ref_cores, out_path):
             ok = g[g.wall <= best * (1.0 + tol)]
             r = ok.iloc[0]
             mem = max(1.25 * r.rss_p95, 1.10 * r.rss_peak)
-            rows.append({
-                "workload_id": wid, "app": r.app, "size_mb": r.size_mb, "np": r.np,
-                "iters": r.iters, "features": r.features, "k": r.k, "tol": tol,
-                "knee_cores": int(r.cores), "wall_best_s": round(best, 1),
-                "wall_at_knee_s": round(r.wall, 1),
-                "slowdown_pct": round((r.wall / best - 1.0) * 100.0, 1),
-                "cpu_avg_cores_at_knee": round(r.cpu_avg / 100.0, 2),
-                "cpu_p95_cores_at_knee": round(r.cpu_p95 / 100.0, 2),
-                "rss_p95_mb_at_knee": round(r.rss_p95), "rss_peak_mb_at_knee": round(r.rss_peak),
-                "rec_cpus": int(r.cores), "rec_mem_mb": int(math.ceil(mem / 64.0) * 64),
-                "cores_freed_vs_ref": ref_cores - int(r.cores), "cells_tested": len(g),
-                "reps_per_cell": int(g.n.min())})
+            rows.append(
+                {
+                    "workload_id": wid,
+                    "app": r.app,
+                    "size_mb": r.size_mb,
+                    "np": r.np,
+                    "iters": r.iters,
+                    "features": r.features,
+                    "k": r.k,
+                    "tol": tol,
+                    "knee_cores": int(r.cores),
+                    "wall_best_s": round(best, 1),
+                    "wall_at_knee_s": round(r.wall, 1),
+                    "slowdown_pct": round((r.wall / best - 1.0) * 100.0, 1),
+                    "cpu_avg_cores_at_knee": round(r.cpu_avg / 100.0, 2),
+                    "cpu_p95_cores_at_knee": round(r.cpu_p95 / 100.0, 2),
+                    "rss_p95_mb_at_knee": round(r.rss_p95),
+                    "rss_peak_mb_at_knee": round(r.rss_peak),
+                    "rec_cpus": int(r.cores),
+                    "rec_mem_mb": int(math.ceil(mem / 64.0) * 64),
+                    "cores_freed_vs_ref": ref_cores - int(r.cores),
+                    "cells_tested": len(g),
+                    "reps_per_cell": int(g.n.min()),
+                }
+            )
     out = pd.DataFrame(rows)
     out.to_csv(out_path, index=False)
     print("\nlabels written to " + out_path)
-    print(out[["workload_id", "app", "size_mb", "np", "tol", "knee_cores", "slowdown_pct",
-               "cpu_avg_cores_at_knee", "rss_p95_mb_at_knee", "rec_cpus", "rec_mem_mb"]].to_string(index=False))
+    print(
+        out[
+            [
+                "workload_id",
+                "app",
+                "size_mb",
+                "np",
+                "tol",
+                "knee_cores",
+                "slowdown_pct",
+                "cpu_avg_cores_at_knee",
+                "rss_p95_mb_at_knee",
+                "rec_cpus",
+                "rec_mem_mb",
+            ]
+        ].to_string(index=False)
+    )
 
 
 def main():
@@ -116,8 +214,12 @@ def main():
     ap.add_argument("--repo", default=os.getcwd())
     ap.add_argument("--out", default="results/doe_rightsize.csv")
     ap.add_argument("--apps", nargs="+", default=["logreg", "kmeans"])
-    ap.add_argument("--workloads", nargs="+", default=None, help="subset of workload ids, e.g. L1 K2")
-    ap.add_argument("--cores-logreg", type=int, nargs="+", default=[1, 2, 3, 4, 6, 8], dest="cores_lr")
+    ap.add_argument(
+        "--workloads", nargs="+", default=None, help="subset of workload ids, e.g. L1 K2"
+    )
+    ap.add_argument(
+        "--cores-logreg", type=int, nargs="+", default=[1, 2, 3, 4, 6, 8], dest="cores_lr"
+    )
     ap.add_argument("--cores-kmeans", type=int, nargs="+", default=[1, 2, 3, 4], dest="cores_km")
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--seed", type=int, default=44)
@@ -145,18 +247,28 @@ def main():
         compute_labels(a.labels, a.tol, a.ref_cores, a.labels_out)
         return
 
-    wls = [w for w in WORKLOADS if w["app"] in a.apps and (a.workloads is None or w["id"] in a.workloads)]
+    wls = [
+        w
+        for w in WORKLOADS
+        if w["app"] in a.apps and (a.workloads is None or w["id"] in a.workloads)
+    ]
     cells, skipped = [], []
     for w in wls:
-        for c in (a.cores_lr if w["app"] == "logreg" else a.cores_km):
+        for c in a.cores_lr if w["app"] == "logreg" else a.cores_km:
             (cells if est_total_gb(w, c) <= a.budget else skipped).append((w, c))
-    print(f"design: {len(wls)} workloads, {len(cells)} (workload, cores) cells x {a.reps} reps = "
-          f"{len(cells) * a.reps} runs; {len(skipped)} cells skipped by the {a.budget} GB memory guard", flush=True)
+    print(
+        f"design: {len(wls)} workloads, {len(cells)} (workload, cores) cells x {a.reps} reps = "
+        f"{len(cells) * a.reps} runs; {len(skipped)} cells skipped by the {a.budget} GB memory guard",
+        flush=True,
+    )
     for w in wls:
         cs = [c for (x, c) in cells if x["id"] == w["id"]]
         sk = [c for (x, c) in skipped if x["id"] == w["id"]]
-        print(f"  {w['id']} {w['app']:6s} size={w['size_mb']:3d} np={w['np']} iters={w['iters']} "
-              f"feat={w['features']} k={w['k']}  cores={cs}" + (f"  skipped={sk}" if sk else ""), flush=True)
+        print(
+            f"  {w['id']} {w['app']:6s} size={w['size_mb']:3d} np={w['np']} iters={w['iters']} "
+            f"feat={w['features']} k={w['k']}  cores={cs}" + (f"  skipped={sk}" if sk else ""),
+            flush=True,
+        )
     if a.design_only:
         return
 
@@ -211,11 +323,14 @@ def main():
     rng = random.Random(a.seed)
     todo = []
     for rep in range(1, a.reps + 1):
-        for (w, c) in rng.sample(cells, len(cells)):
+        for w, c in rng.sample(cells, len(cells)):
             if (w["id"], str(c), str(rep)) not in done:
                 todo.append((w, c, rep))
-    print(f"[{datetime.now():%H:%M:%S}] todo={len(todo)} of {len(cells) * a.reps}  "
-          f"heap logreg={a.heap_lr}MB kmeans={a.heap_km}MB  stall={a.stall_s}s", flush=True)
+    print(
+        f"[{datetime.now():%H:%M:%S}] todo={len(todo)} of {len(cells) * a.reps}  "
+        f"heap logreg={a.heap_lr}MB kmeans={a.heap_km}MB  stall={a.stall_s}s",
+        flush=True,
+    )
 
     elapsed, consec = [], 0
     for k_, (w, cores, rep) in enumerate(todo, 1):
@@ -224,7 +339,13 @@ def main():
         env = os.environ.copy()
         env["SLOTS_OVERRIDE"] = str(cores)
         env["SPARK_DRIVER_MEMORY"] = f"{a.heap_lr if w['app'] == 'logreg' else a.heap_km}m"
-        names = ["SLOTS_OVERRIDE", "SPARK_DRIVER_MEMORY", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"]
+        names = [
+            "SLOTS_OVERRIDE",
+            "SPARK_DRIVER_MEMORY",
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+        ]
         for v in names[2:]:
             env[v] = str(cores)
         exports = []
@@ -234,8 +355,19 @@ def main():
             run_id = f"D_{w['id']}_c{cores}_r{rep}" + ("" if attempt == 1 else "_retry")
             log_path = f"results/logs/{run_id}.log"
             trace_path = f"results/traces/{run_id}.csv"
-            cmd = (["mpirun", "--oversubscribe", "-np", str(w["np"])] + exports +
-                   [a.pybin, "-m", "mpj_spark.core.main_mpi", "--app", w["app"], "--input", w["data"]])
+            cmd = (
+                ["mpirun", "--oversubscribe", "-np", str(w["np"])]
+                + exports
+                + [
+                    a.pybin,
+                    "-m",
+                    "mpj_spark.core.main_mpi",
+                    "--app",
+                    w["app"],
+                    "--input",
+                    w["data"],
+                ]
+            )
             if w["app"] == "logreg":
                 cmd += [a.lr_iter, str(w["iters"])]
                 if a.lr_feat != "none":
@@ -254,33 +386,55 @@ def main():
             savail = min([s[2] for s in sys_s]) if sys_s else None
             rows = stats or {0: {"pid": "", "cpu": [], "rss": [], "pss": []}}
             for drv, rec in sorted(rows.items()):
-                w_csv.writerow({
-                    "workload_id": w["id"], "app": w["app"], "run_id": run_id, "attempt": attempt,
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "host": socket.gethostname(), "size_mb": w["size_mb"], "np": w["np"],
-                    "workers": w["np"] - 1, "iters": w["iters"], "features": w["features"],
-                    "k": w["k"], "cores": cores,
-                    "heap_mb": a.heap_lr if w["app"] == "logreg" else a.heap_km,
-                    "cap_threads": cores, "rep": rep, "driver_idx": drv,
-                    "role": ("root" if drv == 0 else "driver") if rec["rss"] else "",
-                    "pid": rec["pid"], "wall_s": f"{wall:.2f}", "exit_code": code,
-                    "n_samples": len(rec["cpu"]),
-                    "cpu_avg_pct": rb.fmt(rb.mean(rec["cpu"]), 1),
-                    "cpu_peak_pct": rb.fmt(rb.mx(rec["cpu"]), 1),
-                    "cpu_p95_pct": rb.fmt(rb.pctl(rec["cpu"], 95), 1),
-                    "rss_avg_mb": rb.fmt(rb.mean(rec["rss"])),
-                    "rss_peak_mb": rb.fmt(rb.mx(rec["rss"])),
-                    "rss_p95_mb": rb.fmt(rb.pctl(rec["rss"], 95)),
-                    "sys_cpu_avg_pct": rb.fmt(scpu, 1), "sys_mem_avg_mb": rb.fmt(smem),
-                    "sys_mem_peak_mb": rb.fmt(smem_peak), "sys_mem_avail_min_mb": rb.fmt(savail),
-                    "cores_alloc": cores_alloc, "heap_mb_alloc": heap_alloc,
-                    "iters_logged": iters_logged, "data_file": os.path.relpath(w["data"]),
-                    "trace_file": trace_path if stats else ""})
+                w_csv.writerow(
+                    {
+                        "workload_id": w["id"],
+                        "app": w["app"],
+                        "run_id": run_id,
+                        "attempt": attempt,
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "host": socket.gethostname(),
+                        "size_mb": w["size_mb"],
+                        "np": w["np"],
+                        "workers": w["np"] - 1,
+                        "iters": w["iters"],
+                        "features": w["features"],
+                        "k": w["k"],
+                        "cores": cores,
+                        "heap_mb": a.heap_lr if w["app"] == "logreg" else a.heap_km,
+                        "cap_threads": cores,
+                        "rep": rep,
+                        "driver_idx": drv,
+                        "role": ("root" if drv == 0 else "driver") if rec["rss"] else "",
+                        "pid": rec["pid"],
+                        "wall_s": f"{wall:.2f}",
+                        "exit_code": code,
+                        "n_samples": len(rec["cpu"]),
+                        "cpu_avg_pct": rb.fmt(rb.mean(rec["cpu"]), 1),
+                        "cpu_peak_pct": rb.fmt(rb.mx(rec["cpu"]), 1),
+                        "cpu_p95_pct": rb.fmt(rb.pctl(rec["cpu"], 95), 1),
+                        "rss_avg_mb": rb.fmt(rb.mean(rec["rss"])),
+                        "rss_peak_mb": rb.fmt(rb.mx(rec["rss"])),
+                        "rss_p95_mb": rb.fmt(rb.pctl(rec["rss"], 95)),
+                        "sys_cpu_avg_pct": rb.fmt(scpu, 1),
+                        "sys_mem_avg_mb": rb.fmt(smem),
+                        "sys_mem_peak_mb": rb.fmt(smem_peak),
+                        "sys_mem_avail_min_mb": rb.fmt(savail),
+                        "cores_alloc": cores_alloc,
+                        "heap_mb_alloc": heap_alloc,
+                        "iters_logged": iters_logged,
+                        "data_file": os.path.relpath(w["data"]),
+                        "trace_file": trace_path if stats else "",
+                    }
+                )
             f.flush()
             elapsed.append(wall)
             eta = (sum(elapsed) / len(elapsed)) * (len(todo) - k_)
-            print(f"[{datetime.now():%H:%M:%S}] DONE {k_}/{len(todo)}  {run_id}  wall={wall:.1f}s "
-                  f"exit={code}  ETA<={eta / 3600:.1f}h", flush=True)
+            print(
+                f"[{datetime.now():%H:%M:%S}] DONE {k_}/{len(todo)}  {run_id}  wall={wall:.1f}s "
+                f"exit={code}  ETA<={eta / 3600:.1f}h",
+                flush=True,
+            )
             if code == 125 and attempt == 1:
                 print("    retrying once after a stall", flush=True)
                 time.sleep(rb.SETTLE_S)
