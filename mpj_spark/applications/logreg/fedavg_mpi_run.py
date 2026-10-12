@@ -19,6 +19,12 @@ fix(warm-start): the local step used pyspark.ml LogisticRegression and called
   New per-round metrics: global_loss (objective of the model ENTERING the round,
   exact, from the loss each worker already computes), loss_start/loss_end of the
   local step, n_eval, solver.
+feat(early-stop): stop when the global loss changes by <= loss_tol (relative)
+  between consecutive rounds.  FedAvg keeps a small weight oscillation (~1e-3)
+  after the loss has converged, so a weight-delta rule never fires; the loss
+  does.  ``global_loss`` is broadcast, so every rank takes the same decision in
+  the same round (no rank can be left waiting in comm.gather).  loss_tol <= 0
+  disables early stopping (run all max_iter rounds).
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from mpj_spark.core.sync_modes import MODE_PS_SYNC_FEDAVG_MPI
 from mpj_spark.core.warm_start_lr import spark_loss_grad, warm_lbfgs
 
 SOLVER = "warm_lbfgs"
+DEFAULT_LOSS_TOL = 1e-4
 
 
 def _build_schema(num_features: int) -> StructType:
@@ -48,6 +55,13 @@ def _build_schema(num_features: int) -> StructType:
 
 def _weight_norm(weights: list[float] | np.ndarray) -> float:
     return float(math.sqrt(sum(w * w for w in weights)))
+
+
+def _loss_converged(prev_loss: float | None, loss: float, tol: float) -> bool:
+    """True when the global loss changed by <= tol (relative) since the previous round."""
+    if tol <= 0.0 or prev_loss is None:
+        return False
+    return abs(loss - prev_loss) <= tol * max(abs(prev_loss), 1e-12)
 
 
 def _correct_count(rdd, weights: list[float], intercept: float) -> int:
@@ -111,6 +125,7 @@ def run(
     seed: int = 42,
     results_dir: str = "results",
     local_epochs: int = 5,
+    loss_tol: float = DEFAULT_LOSS_TOL,
 ) -> dict[str, Any]:
     """Execute LogReg training with periodic FedAvg over MPI collectives.
 
@@ -125,7 +140,7 @@ def run(
     num_workers : int
         Number of active worker ranks.
     max_iter : int
-        Number of global synchronization rounds.
+        Maximum number of global synchronization rounds.
     reg_param : float
         L2 regularization parameter.
     num_features : int
@@ -136,6 +151,9 @@ def run(
         Directory to store worker CSV metrics.
     local_epochs : int
         Max warm-started L-BFGS-B iterations per round on the local partition.
+    loss_tol : float
+        Stop when the relative change of the global loss between consecutive
+        rounds is <= loss_tol.  0 (or negative) disables early stopping.
 
     Returns
     -------
@@ -174,6 +192,8 @@ def run(
     current_weights: list[float] | None = None
     current_intercept = 0.0
     prev_weights_vec = np.zeros(num_features)
+    prev_global_loss: float | None = None
+    converged = False
     iter_metrics: list[dict[str, Any]] = []
     iterations_done = 0
 
@@ -221,6 +241,7 @@ def run(
         global_model = comm.bcast(global_payload, root=0)
         current_weights = global_model["weights"]
         current_intercept = global_model["intercept"]
+        round_loss = float(global_model["global_loss"])
 
         iterations_done += 1
         iter_time = time.perf_counter() - t_iter
@@ -241,7 +262,7 @@ def run(
                 "local_weight_norm": round(local_norm, 8),
                 "intercept": round(current_intercept, 8),
                 "row_count": row_count,
-                "global_loss": round(float(global_model["global_loss"]), 8),
+                "global_loss": round(round_loss, 8),
                 "loss_start": round(info["loss_start"], 8),
                 "loss_end": round(info["loss_end"], 8),
                 "n_eval": info["n_eval"],
@@ -251,8 +272,19 @@ def run(
         print(
             f"[FedAvg MPI Worker {rank}] round {iteration + 1}/{max_iter}  "
             f"({iter_time:.3f}s)  |w|={global_norm:.4f}  delta={weight_delta:.6f}  "
-            f"global_loss={global_model['global_loss']:.6f}"
+            f"global_loss={round_loss:.6f}"
         )
+
+        # Early stop on the broadcast global loss: identical on every rank, so
+        # all ranks leave the loop in the same round.
+        if _loss_converged(prev_global_loss, round_loss, loss_tol):
+            converged = True
+            print(
+                f"[FedAvg MPI Worker {rank}] converged at round {iteration + 1}: "
+                f"global loss changed <= {loss_tol:g} (relative)"
+            )
+            break
+        prev_global_loss = round_loss
 
     # Final accuracy on the local partition
     w_list = current_weights or [0.0] * num_features
@@ -270,6 +302,9 @@ def run(
         "train_accuracy": train_accuracy,
         "row_count": row_count,
         "iterations_done": iterations_done,
+        "converged": converged,
+        "stopped_early": converged and iterations_done < max_iter,
+        "loss_tol": loss_tol,
         "partition_path": partition_path,
         "iter_metrics": iter_metrics,
         "sync_mode": MODE_PS_SYNC_FEDAVG_MPI,
