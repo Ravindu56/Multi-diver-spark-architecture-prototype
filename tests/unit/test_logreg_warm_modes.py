@@ -37,8 +37,12 @@ def _rows(Xp, yp):
 @pytest.fixture
 def quarters(monkeypatch):
     X, y = _make_data(4000)
-    parts = {f"p{i}": (X[i * 1000 : (i + 1) * 1000], y[i * 1000 : (i + 1) * 1000]) for i in range(4)}
-    fake_spark = SimpleNamespace(read=SimpleNamespace(csv=lambda path, **_: FakeDF(_rows(*parts[path]))))
+    parts = {
+        f"p{i}": (X[i * 1000 : (i + 1) * 1000], y[i * 1000 : (i + 1) * 1000]) for i in range(4)
+    }
+    fake_spark = SimpleNamespace(
+        read=SimpleNamespace(csv=lambda path, **_: FakeDF(_rows(*parts[path])))
+    )
     monkeypatch.setattr(SparkSession, "getActiveSession", staticmethod(lambda: fake_spark))
     monkeypatch.setattr(wc, "F", SimpleNamespace(col=lambda _n: FakeCol()))
     monkeypatch.setattr(wc, "IntegerType", lambda: None)
@@ -101,8 +105,15 @@ def test_gossip_warm_start_reaches_consensus_near_optimum(quarters, tmp_path):
     res = _run_threads(
         [
             lambda r=r: gossip_run.run(
-                names[r], _RingComm(boxes, r), r, n, max_iter=ROUNDS, local_epochs=EPOCHS,
-                num_features=NF, reg_param=REG, results_dir=str(tmp_path),
+                names[r],
+                _RingComm(boxes, r),
+                r,
+                n,
+                max_iter=ROUNDS,
+                local_epochs=EPOCHS,
+                num_features=NF,
+                reg_param=REG,
+                results_dir=str(tmp_path),
             )
             for r in range(n)
         ]
@@ -153,13 +164,24 @@ def test_async_ps_warm_start_improves_loss(quarters, tmp_path):
     names = ["p0", "p1"]
     targets = [
         lambda: async_serve(
-            _AsyncRoot(net), num_workers=n, num_features=NF, num_iterations=ROUNDS,
-            any_source="ANY", poll_interval_s=0.0005,
+            _AsyncRoot(net),
+            num_workers=n,
+            num_features=NF,
+            num_iterations=ROUNDS,
+            any_source="ANY",
+            poll_interval_s=0.0005,
         )
     ] + [
         lambda r=r: async_ps_run.run(
-            names[r - 1], _AsyncWorker(net, r), r, n, max_iter=ROUNDS, local_epochs=EPOCHS,
-            num_features=NF, reg_param=REG, results_dir=str(tmp_path),
+            names[r - 1],
+            _AsyncWorker(net, r),
+            r,
+            n,
+            max_iter=ROUNDS,
+            local_epochs=EPOCHS,
+            num_features=NF,
+            reg_param=REG,
+            results_dir=str(tmp_path),
         )
         for r in range(1, n + 1)
     ]
@@ -233,8 +255,15 @@ def test_hybrid_warm_start_workers_agree_and_improve(quarters, tmp_path, monkeyp
     names = ["p0", "p1"]
     targets = [lambda: _scalar_ps(net, n, ROUNDS)] + [
         lambda r=r: hybrid_run.run(
-            names[r], _HybridWorkerComm(coll, r), r, n, root_comm=_HybridRootComm(net, r + 1),
-            max_iter=ROUNDS, local_epochs=EPOCHS, num_features=NF, reg_param=REG,
+            names[r],
+            _HybridWorkerComm(coll, r),
+            r,
+            n,
+            root_comm=_HybridRootComm(net, r + 1),
+            max_iter=ROUNDS,
+            local_epochs=EPOCHS,
+            num_features=NF,
+            reg_param=REG,
             results_dir=str(tmp_path),
         )
         for r in range(n)
