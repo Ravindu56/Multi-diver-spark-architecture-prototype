@@ -165,7 +165,7 @@ def check_inputs(apps, sizes, data_dir):
             try:
                 with open(p) as fh:
                     lines = [fh.readline() for _ in range(3)]
-                rows = [l for l in lines if l.strip()]
+                rows = [ln for ln in lines if ln.strip()]
                 try:
                     [float(x) for x in rows[0].strip().split(",") if x.strip()]
                     probe = rows[0]
