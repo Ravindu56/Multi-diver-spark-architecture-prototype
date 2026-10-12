@@ -4,6 +4,7 @@ Spark is replaced by in-memory fakes (FakeRDD / FakeDF) and MPI by a threaded
 2-rank bus, so these run in CI without a JVM or libmpi.  They exercise the real
 ``run()`` loop: warm start, FedAvg averaging, metrics, accuracy.
 """
+
 from __future__ import annotations
 
 import csv
@@ -135,7 +136,9 @@ def patched(monkeypatch):
 
     def read_csv(path, **_):
         Xp, yp = halves[path]
-        return FakeDF([tuple(list(map(float, r)) + [float(l)]) for r, l in zip(Xp, yp, strict=True)])
+        return FakeDF(
+            [tuple(list(map(float, r)) + [float(lab)]) for r, lab in zip(Xp, yp, strict=True)]
+        )
 
     fake_spark = SimpleNamespace(read=SimpleNamespace(csv=read_csv))
     monkeypatch.setattr(fm.SparkSession, "getActiveSession", staticmethod(lambda: fake_spark))
@@ -152,8 +155,13 @@ def _run_workers(paths, tmp_path, **kw):
     def work(r):
         try:
             results[r] = fm.run(
-                partition_path=paths[r], comm=FakeComm(bus, r), rank=r, num_workers=n,
-                num_features=NF, results_dir=str(tmp_path), **kw,
+                partition_path=paths[r],
+                comm=FakeComm(bus, r),
+                rank=r,
+                num_workers=n,
+                num_features=NF,
+                results_dir=str(tmp_path),
+                **kw,
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
@@ -172,7 +180,7 @@ def test_weights_keep_moving_after_round_one_and_loss_falls(patched, tmp_path):
     X, y = patched
     res = _run_workers(["p0", "p1"], tmp_path, max_iter=8, local_epochs=3, reg_param=0.01)
     m = res[0]["iter_metrics"]
-    assert m[1]["weight_delta"] > 1e-6                                   # the old bug: exactly 0
+    assert m[1]["weight_delta"] > 1e-6  # the old bug: exactly 0
     gl = [r["global_loss"] for r in m]
     # FedAvg is not a descent method: allow tiny upticks from averaging, require real progress
     assert all(b <= a + 1e-4 for a, b in zip(gl, gl[1:], strict=False))
@@ -181,7 +189,7 @@ def test_weights_keep_moving_after_round_one_and_loss_falls(patched, tmp_path):
     final = numpy_loss_grad(X, y, 0.01)(
         np.concatenate([res[0]["weight_vector"], [res[0]["intercept"]]])
     )[0]
-    assert final - ref < 5e-3                                            # near centralised optimum
+    assert final - ref < 5e-3  # near centralised optimum
 
 
 def test_all_ranks_agree_on_global_model(patched, tmp_path):

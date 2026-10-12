@@ -20,6 +20,7 @@ Objective (identical for every mode, so models are comparable):
 The intercept is not regularised.  No feature standardisation (state this when
 comparing with MLlib models, which standardise by default).
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -39,7 +40,9 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return out
 
 
-def partition_stats(X: np.ndarray, y: np.ndarray, theta: np.ndarray) -> tuple[float, np.ndarray, int]:
+def partition_stats(
+    X: np.ndarray, y: np.ndarray, theta: np.ndarray
+) -> tuple[float, np.ndarray, int]:
     """Summed (not averaged) log-loss, gradient and row count for one block.
 
     theta = [w_0..w_{d-1}, b].  Pure NumPy so it can run inside a Spark
@@ -110,10 +113,16 @@ def warm_lbfgs(
         raise ValueError(f"warm-start weights have shape {w0.shape}, expected ({num_features},)")
     theta0 = np.concatenate([w0, [float(intercept)]])
     loss_start, _ = loss_grad(theta0)
-    res = minimize(loss_grad, theta0, jac=True, method="L-BFGS-B", options={"maxiter": int(max_iter)})
+    res = minimize(
+        loss_grad, theta0, jac=True, method="L-BFGS-B", options={"maxiter": int(max_iter)}
+    )
     theta = res.x
-    return theta[:-1].copy(), float(theta[-1]), {
-        "loss_start": float(loss_start),
-        "loss_end": float(res.fun),
-        "n_eval": int(res.nfev),
-    }
+    return (
+        theta[:-1].copy(),
+        float(theta[-1]),
+        {
+            "loss_start": float(loss_start),
+            "loss_end": float(res.fun),
+            "n_eval": int(res.nfev),
+        },
+    )

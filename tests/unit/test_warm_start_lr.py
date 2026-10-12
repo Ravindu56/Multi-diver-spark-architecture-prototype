@@ -1,4 +1,5 @@
 """Tests for the warm-start solver (pure NumPy; no Spark/MPI needed)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -45,10 +46,10 @@ def test_warm_start_keeps_improving_then_converges():
         if prev is not None:
             deltas.append(float(np.linalg.norm(w - prev)))
     assert all(l2 <= l1 + 1e-12 for l1, l2 in zip(losses, losses[1:], strict=False))  # monotone
-    assert deltas[0] > 1e-6                    # still moving after round 1 (cold refit: 0)
-    assert deltas[-1] < deltas[0]              # and settling
+    assert deltas[0] > 1e-6  # still moving after round 1 (cold refit: 0)
+    assert deltas[-1] < deltas[0]  # and settling
     ref_w, ref_b, ref = warm_lbfgs(fg, None, 0.0, 6, max_iter=500)
-    assert losses[-1] - ref["loss_end"] < 1e-3 # approaches the converged optimum
+    assert losses[-1] - ref["loss_end"] < 1e-3  # approaches the converged optimum
 
 
 def test_fedavg_with_warm_start_approaches_centralised_optimum():
