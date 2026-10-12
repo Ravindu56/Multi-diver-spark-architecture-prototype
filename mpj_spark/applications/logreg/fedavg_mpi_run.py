@@ -4,6 +4,21 @@ Phase 3 - LogReg Periodic FedAvg over Native MPI Collectives.
 Implements P3-08 (Issue #65):
 Runs periodic FedAvg parameter synchronization over native mpi4py
 collectives (comm.gather / comm.bcast), replacing multiprocessing.Queue.
+
+CHANGE LOG
+----------
+fix(warm-start): the local step used pyspark.ml LogisticRegression and called
+  ``setInitialWeights`` inside ``try/except Exception: pass``.  PySpark's
+  LogisticRegression has no such setter (PySpark 4.2.0), so the AttributeError
+  was swallowed and EVERY round refit from zero: identical local models, zero
+  weight change after round 1.  The local step now runs warm-started L-BFGS-B
+  (mpj_spark.core.warm_start_lr) from the current global model, and nothing is
+  swallowed.  The objective is mean log-loss + 0.5*reg*||w||^2 with NO feature
+  standardisation, so weights/norms are not comparable with the earlier MLlib
+  (standardised) runs - compare modes by loss.
+  New per-round metrics: global_loss (objective of the model ENTERING the round,
+  exact, from the loss each worker already computes), loss_start/loss_end of the
+  local step, n_eval, solver.
 """
 
 from __future__ import annotations
@@ -15,14 +30,14 @@ import time
 from typing import Any
 
 import numpy as np
-from pyspark.ml.classification import LogisticRegression
-from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
 
 from mpj_spark.core.sync_modes import MODE_PS_SYNC_FEDAVG_MPI
+from mpj_spark.core.warm_start_lr import spark_loss_grad, warm_lbfgs
+
+SOLVER = "warm_lbfgs"
 
 
 def _build_schema(num_features: int) -> StructType:
@@ -33,6 +48,30 @@ def _build_schema(num_features: int) -> StructType:
 
 def _weight_norm(weights: list[float] | np.ndarray) -> float:
     return float(math.sqrt(sum(w * w for w in weights)))
+
+
+def _correct_count(rdd, weights: list[float], intercept: float) -> int:
+    """Number of rows classified correctly by (weights, intercept); partition-vectorised."""
+    w_arr = np.asarray(weights, dtype=np.float64)
+    b = float(intercept)
+
+    def per_partition(it):
+        rows = list(it)
+        if not rows:
+            yield 0
+            return
+        X = np.asarray([r[0] for r in rows], dtype=np.float64)
+        y = np.asarray([r[1] for r in rows], dtype=np.float64)
+        yield int(np.sum((X @ w_arr + b >= 0.0) == (y >= 0.5)))
+
+    return int(rdd.mapPartitions(per_partition).sum())
+
+
+def _weighted_mean(values: list[float], rows: list[int]) -> float:
+    total = sum(rows)
+    if total <= 0:
+        return float(sum(values) / len(values))
+    return float(sum(v * r for v, r in zip(values, rows, strict=True)) / total)
 
 
 def _write_worker_metrics(worker_id: int, records: list[dict[str, Any]], results_dir: str) -> str:
@@ -48,6 +87,11 @@ def _write_worker_metrics(worker_id: int, records: list[dict[str, Any]], results
         "local_weight_norm",
         "intercept",
         "row_count",
+        "global_loss",
+        "loss_start",
+        "loss_end",
+        "n_eval",
+        "solver",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -75,9 +119,9 @@ def run(
     partition_path : str
         Path to local worker CSV partition.
     comm : MPI communicator
-        Active MPI communicator across workers and root.
+        Worker sub-communicator (rank 0 aggregates).
     rank : int
-        Current MPI rank (0 is root, 1..N are workers).
+        This worker's rank within ``comm``.
     num_workers : int
         Number of active worker ranks.
     max_iter : int
@@ -87,11 +131,11 @@ def run(
     num_features : int
         Feature count.
     seed : int
-        Random seed.
+        Unused (kept for interface compatibility; the solver is deterministic).
     results_dir : str
         Directory to store worker CSV metrics.
     local_epochs : int
-        Number of local L-BFGS gradient steps before synchronization.
+        Max warm-started L-BFGS-B iterations per round on the local partition.
 
     Returns
     -------
@@ -118,9 +162,14 @@ def run(
             f"[FedAvg MPI Worker {rank}] Partition is empty after cleaning: {partition_path}"
         )
 
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
-    df_vec = assembler.transform(df_base).select("features", "label").cache()
-    df_vec.count()
+    nf = num_features
+    points = (
+        df_base.select(*feature_cols, "label")
+        .rdd.map(lambda row: (np.asarray(row[:nf], dtype=np.float64), float(row[nf])))
+        .cache()
+    )
+    points.count()
+    loss_grad = spark_loss_grad(points, num_features, reg_param, row_count)
 
     current_weights: list[float] | None = None
     current_intercept = 0.0
@@ -131,38 +180,21 @@ def run(
     for iteration in range(max_iter):
         t_iter = time.perf_counter()
 
-        lr = LogisticRegression(
-            featuresCol="features",
-            labelCol="label",
-            maxIter=local_epochs,
-            regParam=reg_param,
-            elasticNetParam=0.0,
-            family="binomial",
-            fitIntercept=True,
-            standardization=True,
+        # Local step: warm-started from the global model (cold only in round 1).
+        w_local, b_local, info = warm_lbfgs(
+            loss_grad, current_weights, current_intercept, num_features, local_epochs
         )
-
-        if current_weights is not None:
-            try:
-                lr = lr.setInitialWeights(Vectors.dense(current_weights))
-                lr = lr.setInitialIntercept(float(current_intercept))
-            except Exception:
-                pass
-
-        model = lr.fit(df_vec)
-        local_weights_arr = model.coefficients.toArray()
-        local_weights = local_weights_arr.tolist()
-        local_intercept = float(model.intercept)
-        local_norm = float(np.linalg.norm(local_weights_arr))
+        local_norm = float(np.linalg.norm(w_local))
 
         local_payload = {
-            "weights": local_weights,
-            "intercept": local_intercept,
+            "weights": w_local.tolist(),
+            "intercept": b_local,
             "row_count": row_count,
             "rank": rank,
+            "loss_start": info["loss_start"],
         }
 
-        # Step 2: MPI Collective Sync (Gather -> FedAvg -> Broadcast)
+        # MPI collective sync (Gather -> FedAvg -> Broadcast)
         gathered = comm.gather(local_payload, root=0)
 
         global_payload: dict[str, Any] | None = None
@@ -179,6 +211,11 @@ def run(
                 "weights": avg_w.tolist(),
                 "intercept": float(avg_b),
                 "iteration": iteration,
+                # objective of the model that ENTERED this round (row-weighted
+                # mean of each worker's loss at that model = exact global loss)
+                "global_loss": _weighted_mean(
+                    [m["loss_start"] for m in gathered], [m["row_count"] for m in gathered]
+                ),
             }
 
         global_model = comm.bcast(global_payload, root=0)
@@ -204,27 +241,25 @@ def run(
                 "local_weight_norm": round(local_norm, 8),
                 "intercept": round(current_intercept, 8),
                 "row_count": row_count,
+                "global_loss": round(float(global_model["global_loss"]), 8),
+                "loss_start": round(info["loss_start"], 8),
+                "loss_end": round(info["loss_end"], 8),
+                "n_eval": info["n_eval"],
+                "solver": SOLVER,
             }
         )
+        print(
+            f"[FedAvg MPI Worker {rank}] round {iteration + 1}/{max_iter}  "
+            f"({iter_time:.3f}s)  |w|={global_norm:.4f}  delta={weight_delta:.6f}  "
+            f"global_loss={global_model['global_loss']:.6f}"
+        )
 
-    # Compute final accuracy
+    # Final accuracy on the local partition
     w_list = current_weights or [0.0] * num_features
-    b_val = current_intercept
-
-    @F.udf(returnType=IntegerType())
-    def predict(features):
-        arr = features.toArray()
-        logit = sum(w_list[i] * arr[i] for i in range(len(w_list))) + b_val
-        return int(1.0 / (1.0 + math.exp(-logit)) >= 0.5)
-
-    correct = (
-        df_vec.withColumn("pred", predict(F.col("features")))
-        .filter(F.col("pred") == F.col("label"))
-        .count()
-    )
+    correct = _correct_count(points, w_list, current_intercept)
     train_accuracy = correct / row_count if row_count > 0 else 0.0
 
-    df_vec.unpersist()
+    points.unpersist()
     df_base.unpersist()
 
     _write_worker_metrics(rank, iter_metrics, results_dir)
