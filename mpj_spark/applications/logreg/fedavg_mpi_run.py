@@ -25,6 +25,11 @@ feat(early-stop): stop when the global loss changes by <= loss_tol (relative)
   does.  ``global_loss`` is broadcast, so every rank takes the same decision in
   the same round (no rank can be left waiting in comm.gather).  loss_tol <= 0
   disables early stopping (run all max_iter rounds).
+feat(final_loss): the result dict now carries ``final_loss`` - the objective of
+  the returned model on this worker's partition (one extra Spark pass) - the
+  same field gossip / async-PS / hybrid return, so all four LogReg modes can be
+  compared on one number.  After FedAvg every rank holds the same model, so the
+  row-weighted mean of the workers' final_loss is the exact global loss.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
 
+from mpj_spark.applications.logreg.warm_common import model_loss
 from mpj_spark.core.sync_modes import MODE_PS_SYNC_FEDAVG_MPI
 from mpj_spark.core.warm_start_lr import spark_loss_grad, warm_lbfgs
 
@@ -286,8 +292,9 @@ def run(
             break
         prev_global_loss = round_loss
 
-    # Final accuracy on the local partition
+    # Final loss and accuracy of the returned model on this worker's partition
     w_list = current_weights or [0.0] * num_features
+    final_loss = model_loss(loss_grad, w_list, current_intercept)
     correct = _correct_count(points, w_list, current_intercept)
     train_accuracy = correct / row_count if row_count > 0 else 0.0
 
@@ -300,6 +307,7 @@ def run(
         "weight_vector": current_weights or [0.0] * num_features,
         "intercept": current_intercept,
         "train_accuracy": train_accuracy,
+        "final_loss": final_loss,
         "row_count": row_count,
         "iterations_done": iterations_done,
         "converged": converged,
