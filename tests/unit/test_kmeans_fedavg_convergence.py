@@ -4,6 +4,7 @@ every multi-driver run at max_iter with flat WCSS).
 
 Run: pytest tests/unit/test_kmeans_fedavg_convergence.py -q
 """
+
 from __future__ import annotations
 
 import sys
