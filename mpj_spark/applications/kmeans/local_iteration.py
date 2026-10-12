@@ -66,14 +66,11 @@
 
 from __future__ import annotations
 
-
 import logging
-
 
 import numpy as np
 from pyspark import RDD
 from pyspark.sql import SparkSession
-
 
 logger = logging.getLogger(__name__)
 
