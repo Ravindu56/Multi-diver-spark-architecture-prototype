@@ -83,11 +83,11 @@ def _parse_memory_mb(value: str) -> int:
         if v.endswith("k"):
             return max(1, int(float(v[:-1]) / 1024))
         return int(float(v))
-    except ValueError:
+    except ValueError as err:
         raise ValueError(
             f"Unparseable SPARK_DRIVER_MEMORY value: {value!r} "
             "(expected forms: '400m', '1g', or bare MB integer)"
-        )
+        ) from err
 
 
 def _resolve_cores(cores_override: int = None) -> tuple:
@@ -101,11 +101,11 @@ def _resolve_cores(cores_override: int = None) -> tuple:
     if env_slots:
         try:
             return max(1, int(env_slots)), f"env:{env_slots}"
-        except ValueError:
+        except ValueError as err:
             raise ValueError(
                 f"Unparseable SLOTS_OVERRIDE value: {env_slots!r} "
                 "(expected an integer core count)"
-            )
+            ) from err
     if cores_override:
         return max(1, cores_override), f"arg:{cores_override}"
     return TOTAL_CORES, "nproc(TOTAL_CORES)"
