@@ -37,7 +37,20 @@ Usage (repo root, venv active):
     nohup python scripts/doe_logreg.py --pybin "$(which python)" \
         > results/doe_logreg_log.txt 2>&1 &
 """
-import argparse, csv, fcntl, itertools, os, re, shutil, signal, socket, subprocess, sys, threading, time
+
+import argparse
+import csv
+import fcntl
+import itertools
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
 from datetime import datetime
 
 import numpy as np
@@ -47,7 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import resource_benchmark as rb  # noqa: E402  (helpers: mean, pctl, fmt, parse_alloc)
 
 SIZES = [25, 50, 100, 150, 200]
-NPS   = [2, 3, 4]
+NPS = [2, 3, 4]
 ITERS = [10, 30, 60]
 FEATS = [10, 20, 40]
 FACTORS = [("size_mb", SIZES), ("np", NPS), ("iters", ITERS), ("features", FEATS)]
@@ -56,14 +69,47 @@ STALL_CPU_PCT = 10.0
 STALL_GRACE_S = 60
 ITER_RE = re.compile(r"(?i)\b(?:iter(?:ation)?s?|epoch|round)\D{0,3}(\d+)")
 
-FIELDS = ["design_id", "run_id", "attempt", "timestamp", "host", "app", "size_mb", "np",
-          "workers", "iters", "features", "cores", "heap_mb", "cap_threads", "rep",
-          "driver_idx", "role", "pid", "wall_s", "exit_code", "n_samples",
-          "cpu_avg_pct", "cpu_peak_pct", "cpu_p95_pct",
-          "rss_avg_mb", "rss_peak_mb", "rss_p95_mb", "pss_avg_mb", "pss_peak_mb",
-          "sys_cpu_avg_pct", "sys_mem_avg_mb", "sys_mem_peak_mb", "sys_mem_avail_min_mb",
-          "cores_alloc", "heap_mb_alloc", "iters_logged", "data_mb_actual",
-          "data_file", "trace_file"]
+FIELDS = [
+    "design_id",
+    "run_id",
+    "attempt",
+    "timestamp",
+    "host",
+    "app",
+    "size_mb",
+    "np",
+    "workers",
+    "iters",
+    "features",
+    "cores",
+    "heap_mb",
+    "cap_threads",
+    "rep",
+    "driver_idx",
+    "role",
+    "pid",
+    "wall_s",
+    "exit_code",
+    "n_samples",
+    "cpu_avg_pct",
+    "cpu_peak_pct",
+    "cpu_p95_pct",
+    "rss_avg_mb",
+    "rss_peak_mb",
+    "rss_p95_mb",
+    "pss_avg_mb",
+    "pss_peak_mb",
+    "sys_cpu_avg_pct",
+    "sys_mem_avg_mb",
+    "sys_mem_peak_mb",
+    "sys_mem_avail_min_mb",
+    "cores_alloc",
+    "heap_mb_alloc",
+    "iters_logged",
+    "data_mb_actual",
+    "data_file",
+    "trace_file",
+]
 
 
 def est_total_gb(size_mb, np_):
@@ -107,7 +153,7 @@ def make_design(n, seed, budget_gb):
         order = np.argsort(-dist, kind="stable")
         nxt = next((int(i) for i in order if i not in chosen and allowed(int(i))), None)
         if nxt is None:
-            caps = {name: v + 1 for name, v in caps.items()}   # relax the caps and retry
+            caps = {name: v + 1 for name, v in caps.items()}  # relax the caps and retry
             continue
         chosen.append(nxt)
         add(nxt)
@@ -168,8 +214,12 @@ def ensure_data(path, size_mb, d, info, seed=11):
 
 def check_flags(pybin, need):
     try:
-        res = subprocess.run([pybin, "-m", "mpj_spark.core.main_mpi", "--help"],
-                             capture_output=True, text=True, timeout=180)
+        res = subprocess.run(
+            [pybin, "-m", "mpj_spark.core.main_mpi", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
     except (OSError, subprocess.TimeoutExpired) as e:
         sys.exit(f"could not run main_mpi --help: {e}")
     text = res.stdout + res.stderr
@@ -239,8 +289,9 @@ def run_cmd(cmd, env, log_path, timeout_s, use_pss, stall_s):
     logf = open(log_path, "w")
     logf.write("CMD: " + " ".join(cmd) + "\n")
     logf.flush()
-    proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT,
-                            start_new_session=True, text=True)
+    proc = subprocess.Popen(
+        cmd, env=env, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True, text=True
+    )
     stop, holder, live = [False], {}, {}
 
     def monitor():
@@ -345,8 +396,13 @@ def main():
     ap.add_argument("--no-cap-threads", action="store_true", dest="no_cap")
     ap.add_argument("--mem-budget-gb", type=float, default=12.0, dest="budget")
     ap.add_argument("--timeout", type=int, default=3600)
-    ap.add_argument("--stall-s", type=int, default=300, dest="stall_s",
-                    help="kill a run whose drivers stay idle this long (0 disables)")
+    ap.add_argument(
+        "--stall-s",
+        type=int,
+        default=300,
+        dest="stall_s",
+        help="kill a run whose drivers stay idle this long (0 disables)",
+    )
     ap.add_argument("--pss", action="store_true")
     ap.add_argument("--iter-flag", default="--logreg-iter", dest="iter_flag")
     ap.add_argument("--features-flag", default="--logreg-features", dest="features_flag")
@@ -359,9 +415,12 @@ def main():
 
     design = make_design(a.n_configs, a.seed, a.budget)
     files = sorted({(c["size_mb"], c["features"]) for c in design})
-    print(f"design: {len(design)} configs x {a.reps} reps = {len(design) * a.reps} runs; "
-          f"{len(files)} data files ({sum(s for s, _ in files)} MB); "
-          f"memory budget {a.budget} GB", flush=True)
+    print(
+        f"design: {len(design)} configs x {a.reps} reps = {len(design) * a.reps} runs; "
+        f"{len(files)} data files ({sum(s for s, _ in files)} MB); "
+        f"memory budget {a.budget} GB",
+        flush=True,
+    )
     os.makedirs("results", exist_ok=True)
     with open("results/doe_logreg_design.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=["design_id", "size_mb", "np", "iters", "features"])
@@ -374,13 +433,19 @@ def main():
         return
 
     info = template_info(a.template)
-    print(f"data format from {a.template}: header={info['header']} label={info['label_name']} "
-          f"label_float={info['label_float']}", flush=True)
+    print(
+        f"data format from {a.template}: header={info['header']} label={info['label_name']} "
+        f"label_float={info['label_float']}",
+        flush=True,
+    )
     for size, d in files:
         p = data_path(a.data_dir, size, d)
         t0 = time.perf_counter()
         made = ensure_data(p, size, d, info)
-        print(f"data {'generated' if made else 'ok       '} {p} ({time.perf_counter() - t0:.0f}s)", flush=True)
+        print(
+            f"data {'generated' if made else 'ok       '} {p} ({time.perf_counter() - t0:.0f}s)",
+            flush=True,
+        )
     if a.prepare_only:
         return
 
@@ -388,7 +453,9 @@ def main():
         sys.exit(f"--pybin {a.pybin!r} is not an executable file (activate the venv)")
     if shutil.which("mpirun") is None:
         sys.exit("mpirun not found on PATH")
-    need = ["--app", "--input", a.iter_flag] + ([] if a.features_flag == "none" else [a.features_flag])
+    need = ["--app", "--input", a.iter_flag] + (
+        [] if a.features_flag == "none" else [a.features_flag]
+    )
     check_flags(a.pybin, need)
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
@@ -407,11 +474,18 @@ def main():
     if new_file:
         w.writeheader()
 
-    todo = [(c, rep) for rep in range(1, a.reps + 1) for c in design
-            if (c["design_id"], str(rep)) not in done]
-    print(f"[{datetime.now():%H:%M:%S}] todo={len(todo)} of {len(design) * a.reps}  "
-          f"reference allocation: cores={a.cores} heap={a.heap_mb}MB "
-          f"thread-cap={'off' if a.no_cap else a.cores}  stall={a.stall_s}s", flush=True)
+    todo = [
+        (c, rep)
+        for rep in range(1, a.reps + 1)
+        for c in design
+        if (c["design_id"], str(rep)) not in done
+    ]
+    print(
+        f"[{datetime.now():%H:%M:%S}] todo={len(todo)} of {len(design) * a.reps}  "
+        f"reference allocation: cores={a.cores} heap={a.heap_mb}MB "
+        f"thread-cap={'off' if a.no_cap else a.cores}  stall={a.stall_s}s",
+        flush=True,
+    )
 
     env = os.environ.copy()
     env["SLOTS_OVERRIDE"] = str(a.cores)
@@ -420,8 +494,13 @@ def main():
         for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
             env[v] = str(a.cores)
     exports = []
-    for v in ("SLOTS_OVERRIDE", "SPARK_DRIVER_MEMORY", "OMP_NUM_THREADS",
-              "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    for v in (
+        "SLOTS_OVERRIDE",
+        "SPARK_DRIVER_MEMORY",
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ):
         if v in env:
             exports += ["-x", v]
 
@@ -432,13 +511,27 @@ def main():
             continue
         dfile = data_path(a.data_dir, c["size_mb"], c["features"])
         for attempt in (1, 2):
-            run_id = (f"B_{did}_s{c['size_mb']}_np{c['np']}_i{c['iters']}"
-                      f"_f{c['features']}_r{rep}" + ("" if attempt == 1 else "_retry"))
+            run_id = (
+                f"B_{did}_s{c['size_mb']}_np{c['np']}_i{c['iters']}"
+                f"_f{c['features']}_r{rep}" + ("" if attempt == 1 else "_retry")
+            )
             log_path = f"results/logs/{run_id}.log"
             trace_path = f"results/traces/{run_id}.csv"
-            cmd = (["mpirun", "--oversubscribe", "-np", str(c["np"])] + exports +
-                   [a.pybin, "-m", "mpj_spark.core.main_mpi", "--app", "logreg",
-                    "--input", dfile, a.iter_flag, str(c["iters"])])
+            cmd = (
+                ["mpirun", "--oversubscribe", "-np", str(c["np"])]
+                + exports
+                + [
+                    a.pybin,
+                    "-m",
+                    "mpj_spark.core.main_mpi",
+                    "--app",
+                    "logreg",
+                    "--input",
+                    dfile,
+                    a.iter_flag,
+                    str(c["iters"]),
+                ]
+            )
             if a.features_flag != "none":
                 cmd += [a.features_flag, str(c["features"])]
             print(f"[{datetime.now():%H:%M:%S}] START {k_}/{len(todo)}  {run_id}", flush=True)
@@ -453,37 +546,57 @@ def main():
             savail = min([s[2] for s in sys_s]) if sys_s else None
             rows = stats or {0: {"pid": "", "cpu": [], "rss": [], "pss": []}}
             for drv, rec in sorted(rows.items()):
-                w.writerow({
-                    "design_id": did, "run_id": run_id, "attempt": attempt,
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "host": socket.gethostname(), "app": "logreg", "size_mb": c["size_mb"],
-                    "np": c["np"], "workers": c["np"] - 1, "iters": c["iters"],
-                    "features": c["features"], "cores": a.cores, "heap_mb": a.heap_mb,
-                    "cap_threads": "" if a.no_cap else a.cores, "rep": rep,
-                    "driver_idx": drv,
-                    "role": ("root" if drv == 0 else "driver") if rec["rss"] else "",
-                    "pid": rec["pid"], "wall_s": f"{wall:.2f}", "exit_code": code,
-                    "n_samples": len(rec["cpu"]),
-                    "cpu_avg_pct": rb.fmt(rb.mean(rec["cpu"]), 1),
-                    "cpu_peak_pct": rb.fmt(rb.mx(rec["cpu"]), 1),
-                    "cpu_p95_pct": rb.fmt(rb.pctl(rec["cpu"], 95), 1),
-                    "rss_avg_mb": rb.fmt(rb.mean(rec["rss"])),
-                    "rss_peak_mb": rb.fmt(rb.mx(rec["rss"])),
-                    "rss_p95_mb": rb.fmt(rb.pctl(rec["rss"], 95)),
-                    "pss_avg_mb": rb.fmt(rb.mean(rec.get("pss", []))),
-                    "pss_peak_mb": rb.fmt(rb.mx(rec.get("pss", []))),
-                    "sys_cpu_avg_pct": rb.fmt(scpu, 1), "sys_mem_avg_mb": rb.fmt(smem),
-                    "sys_mem_peak_mb": rb.fmt(smem_peak), "sys_mem_avail_min_mb": rb.fmt(savail),
-                    "cores_alloc": cores_alloc, "heap_mb_alloc": heap_alloc,
-                    "iters_logged": iters_logged,
-                    "data_mb_actual": f"{os.path.getsize(dfile) / 1e6:.1f}",
-                    "data_file": os.path.relpath(dfile),
-                    "trace_file": trace_path if stats else ""})
+                w.writerow(
+                    {
+                        "design_id": did,
+                        "run_id": run_id,
+                        "attempt": attempt,
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "host": socket.gethostname(),
+                        "app": "logreg",
+                        "size_mb": c["size_mb"],
+                        "np": c["np"],
+                        "workers": c["np"] - 1,
+                        "iters": c["iters"],
+                        "features": c["features"],
+                        "cores": a.cores,
+                        "heap_mb": a.heap_mb,
+                        "cap_threads": "" if a.no_cap else a.cores,
+                        "rep": rep,
+                        "driver_idx": drv,
+                        "role": ("root" if drv == 0 else "driver") if rec["rss"] else "",
+                        "pid": rec["pid"],
+                        "wall_s": f"{wall:.2f}",
+                        "exit_code": code,
+                        "n_samples": len(rec["cpu"]),
+                        "cpu_avg_pct": rb.fmt(rb.mean(rec["cpu"]), 1),
+                        "cpu_peak_pct": rb.fmt(rb.mx(rec["cpu"]), 1),
+                        "cpu_p95_pct": rb.fmt(rb.pctl(rec["cpu"], 95), 1),
+                        "rss_avg_mb": rb.fmt(rb.mean(rec["rss"])),
+                        "rss_peak_mb": rb.fmt(rb.mx(rec["rss"])),
+                        "rss_p95_mb": rb.fmt(rb.pctl(rec["rss"], 95)),
+                        "pss_avg_mb": rb.fmt(rb.mean(rec.get("pss", []))),
+                        "pss_peak_mb": rb.fmt(rb.mx(rec.get("pss", []))),
+                        "sys_cpu_avg_pct": rb.fmt(scpu, 1),
+                        "sys_mem_avg_mb": rb.fmt(smem),
+                        "sys_mem_peak_mb": rb.fmt(smem_peak),
+                        "sys_mem_avail_min_mb": rb.fmt(savail),
+                        "cores_alloc": cores_alloc,
+                        "heap_mb_alloc": heap_alloc,
+                        "iters_logged": iters_logged,
+                        "data_mb_actual": f"{os.path.getsize(dfile) / 1e6:.1f}",
+                        "data_file": os.path.relpath(dfile),
+                        "trace_file": trace_path if stats else "",
+                    }
+                )
             f.flush()
             elapsed.append(wall)
             eta = (sum(elapsed) / len(elapsed)) * (len(todo) - k_)
-            print(f"[{datetime.now():%H:%M:%S}] DONE {k_}/{len(todo)}  {run_id}  wall={wall:.1f}s "
-                  f"exit={code}  iters_logged={iters_logged}  ETA<={eta / 3600:.1f}h", flush=True)
+            print(
+                f"[{datetime.now():%H:%M:%S}] DONE {k_}/{len(todo)}  {run_id}  wall={wall:.1f}s "
+                f"exit={code}  iters_logged={iters_logged}  ETA<={eta / 3600:.1f}h",
+                flush=True,
+            )
             if code == 125 and attempt == 1:
                 print("    retrying once after a stall", flush=True)
                 time.sleep(rb.SETTLE_S)
@@ -493,8 +606,11 @@ def main():
             timed_out.add(did)
         consec = 0 if code in (0, 124, 125) else consec + 1
         if consec >= MAX_CONSEC_FAILS:
-            print(f"[!] {consec} consecutive failed runs (not timeouts/stalls) -- aborting. "
-                  f"Check {log_path}", flush=True)
+            print(
+                f"[!] {consec} consecutive failed runs (not timeouts/stalls) -- aborting. "
+                f"Check {log_path}",
+                flush=True,
+            )
             f.close()
             sys.exit(3)
         time.sleep(rb.SETTLE_S)
