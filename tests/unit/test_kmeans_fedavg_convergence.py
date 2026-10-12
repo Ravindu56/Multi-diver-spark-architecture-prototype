@@ -121,7 +121,8 @@ def test_post_sync_shift_semantics():
     local_shift = float(np.linalg.norm(worker_a - start))      # pre-sync (old test)
     assert local_shift > 0.1                                   # old test: would NOT stop
     assert _post_sync_shift(start, avg) == 0.0                 # new test: stops
-    assert _post_sync_shift(start, avg + 0.02) == pytest.approx(0.02, rel=1e-6)
+    # avg + 0.02 offsets BOTH entries of the 1x2 array, so the Frobenius norm is 0.02*sqrt(2)
+    assert _post_sync_shift(start, avg + 0.02) == pytest.approx(0.02 * np.sqrt(2), rel=1e-6)
 
 
 def test_identical_across_ranks_implies_no_deadlock():
