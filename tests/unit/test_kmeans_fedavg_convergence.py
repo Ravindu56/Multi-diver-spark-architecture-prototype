@@ -6,11 +6,25 @@ Run: pytest tests/unit/test_kmeans_fedavg_convergence.py -q
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import numpy as np
 import pytest
 
 from mpj_spark.applications.kmeans import fedavg_mpi_run as fm
 from mpj_spark.applications.kmeans.fedavg_mpi_run import _post_sync_shift
+
+
+@pytest.fixture
+def fake_mpi(monkeypatch):
+    """Stand-in mpi4py so the lazy `from mpi4py import MPI` works without libmpi."""
+    mpi = types.ModuleType("mpi4py.MPI")
+    mpi.DOUBLE = object()
+    pkg = types.ModuleType("mpi4py")
+    pkg.MPI = mpi
+    monkeypatch.setitem(sys.modules, "mpi4py", pkg)
+    monkeypatch.setitem(sys.modules, "mpi4py.MPI", mpi)
 
 
 class FakeComm:
@@ -83,7 +97,7 @@ def _patch_common(monkeypatch, centroids, sums, counts):
     )
 
 
-def test_fixed_point_stops_after_two_rounds(monkeypatch):
+def test_fixed_point_stops_after_two_rounds(monkeypatch, fake_mpi):
     """Constant local stats reach the fixed point; post-sync shift -> 0
     and the loop must stop in round 2 (not burn max_iter)."""
     FakeCollector.captured.clear()
@@ -118,9 +132,9 @@ def test_post_sync_shift_semantics():
     worker_b = start - delta
     avg = (worker_a + worker_b) / 2.0
 
-    local_shift = float(np.linalg.norm(worker_a - start))      # pre-sync (old test)
-    assert local_shift > 0.1                                   # old test: would NOT stop
-    assert _post_sync_shift(start, avg) == 0.0                 # new test: stops
+    local_shift = float(np.linalg.norm(worker_a - start))  # pre-sync (old test)
+    assert local_shift > 0.1  # old test: would NOT stop
+    assert _post_sync_shift(start, avg) == 0.0  # new test: stops
     # avg + 0.02 offsets BOTH entries of the 1x2 array, so the Frobenius norm is 0.02*sqrt(2)
     assert _post_sync_shift(start, avg + 0.02) == pytest.approx(0.02 * np.sqrt(2), rel=1e-6)
 
