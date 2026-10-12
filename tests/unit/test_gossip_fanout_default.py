@@ -24,7 +24,9 @@ class _ScriptedComm:
 
 
 def _states(n):
-    return {r: {"weights": [float(r)], "intercept": 0.0, "row_count": 100, "rank": r} for r in range(n)}
+    return {
+        r: {"weights": [float(r)], "intercept": 0.0, "row_count": 100, "rank": r} for r in range(n)
+    }
 
 
 @pytest.mark.parametrize("size", [2, 3, 4, 5, 8])
@@ -53,4 +55,6 @@ def test_explicit_fanout_is_still_respected():
 
 def test_single_worker_has_no_neighbours_for_none():
     assert ring_neighbors(0, 1, None) == []
-    assert gossip_exchange(_ScriptedComm(_states(1)), {"rank": 0}, rank=0, size=1, fanout=None) == []
+    assert (
+        gossip_exchange(_ScriptedComm(_states(1)), {"rank": 0}, rank=0, size=1, fanout=None) == []
+    )
