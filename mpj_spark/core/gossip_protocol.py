@@ -12,6 +12,15 @@ applications/logreg/gossip_run.py on the worker-only sub-communicator.
 Decentralized by design: no root coordinator, no collectives, no global
 barrier - each worker syncs only with its ring neighbours per round
 (D-PSGD-style diffusion).
+
+CHANGE LOG
+----------
+fix(fanout): ``main_mpi --gossip-fanout`` defaults to None and the value is
+  forwarded to the workers unchanged, so ``min(fanout, size // 2)`` raised
+  ``TypeError: '<' not supported between instances of 'int' and 'NoneType'``
+  whenever gossip was launched without an explicit fanout.  ring_neighbors()
+  and gossip_exchange() now treat ``fanout=None`` as DEFAULT_FANOUT (1, the
+  same default as their signatures and as gossip_run.run()).
 """
 
 from __future__ import annotations
@@ -21,19 +30,26 @@ from typing import Any
 import numpy as np
 
 TAG_GOSSIP_EXCHANGE = 35
+DEFAULT_FANOUT = 1
 
 
-def ring_neighbors(rank: int, size: int, fanout: int = 1) -> list[int]:
+def _resolve_fanout(fanout: int | None) -> int:
+    """``None`` (CLI flag not given) means the default ring distance."""
+    return DEFAULT_FANOUT if fanout is None else int(fanout)
+
+
+def ring_neighbors(rank: int, size: int, fanout: int | None = DEFAULT_FANOUT) -> list[int]:
     """Distinct ring neighbours contacted per round.
 
     fanout is the ring distance: fanout=1 contacts the immediate
     neighbours (rank±1), fanout=2 also contacts rank±2, and so on.
+    ``fanout=None`` means DEFAULT_FANOUT.
     Degenerate rings collapse gracefully: size<=1 -> no neighbours,
     size=2 -> the single peer (the ±1 offsets coincide).
     """
     if size <= 1:
         return []
-    max_dist = max(1, min(fanout, size // 2))
+    max_dist = max(1, min(_resolve_fanout(fanout), size // 2))
     peers: list[int] = []
     for d in range(1, max_dist + 1):
         for off in (d, -d):
@@ -71,7 +87,7 @@ def gossip_exchange(
     payload: dict[str, Any],
     rank: int,
     size: int,
-    fanout: int = 1,
+    fanout: int | None = DEFAULT_FANOUT,
     tag: int = TAG_GOSSIP_EXCHANGE,
 ) -> list[dict[str, Any]]:
     """One round of paired ring exchanges (deadlock-free sendrecv).
@@ -83,10 +99,11 @@ def gossip_exchange(
     is matched by its counterpart's recv.  Returns the distinct received
     neighbour states, deduplicated by sender sub-comm rank (matters on
     rings of size 2 or 4 where the ±d offsets coincide).
+    ``fanout=None`` means DEFAULT_FANOUT.
     """
     if size <= 1:
         return []
-    max_dist = max(1, min(fanout, size // 2))
+    max_dist = max(1, min(_resolve_fanout(fanout), size // 2))
     received: list[dict[str, Any]] = []
     seen: set[int] = set()
     for d in range(1, max_dist + 1):
