@@ -22,7 +22,7 @@ comparing with MLlib models, which standardise by default).
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 from scipy.optimize import minimize

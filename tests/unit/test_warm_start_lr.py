@@ -44,7 +44,7 @@ def test_warm_start_keeps_improving_then_converges():
         losses.append(info["loss_end"])
         if prev is not None:
             deltas.append(float(np.linalg.norm(w - prev)))
-    assert all(l2 <= l1 + 1e-12 for l1, l2 in zip(losses, losses[1:]))  # monotone
+    assert all(l2 <= l1 + 1e-12 for l1, l2 in zip(losses, losses[1:], strict=False))  # monotone
     assert deltas[0] > 1e-6                    # still moving after round 1 (cold refit: 0)
     assert deltas[-1] < deltas[0]              # and settling
     ref_w, ref_b, ref = warm_lbfgs(fg, None, 0.0, 6, max_iter=500)
