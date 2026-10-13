@@ -61,12 +61,16 @@ def test_exact_global_loss_and_cumulative_time_for_fedavg(tmp_path):
 
 def test_row_weighted_loss_for_local_views(tmp_path):
     d = tmp_path
-    pd.DataFrame([
-        {"worker_id": 0, "iteration": 1, "iter_time_s": 1, "row_count": 100, "loss_start": 1.0},
-        {"worker_id": 1, "iteration": 1, "iter_time_s": 1, "row_count": 300, "loss_start": 3.0},
-        {"worker_id": 0, "iteration": 2, "iter_time_s": 1, "row_count": 100, "loss_start": 1.0},
-        {"worker_id": 1, "iteration": 2, "iter_time_s": 1, "row_count": 300, "loss_start": 3.0},
-    ]).assign(worker_id=lambda x: x["worker_id"]).to_csv(d / "worker_0_async_ps_metrics.csv", index=False)
+    pd.DataFrame(
+        [
+            {"worker_id": 0, "iteration": 1, "iter_time_s": 1, "row_count": 100, "loss_start": 1.0},
+            {"worker_id": 1, "iteration": 1, "iter_time_s": 1, "row_count": 300, "loss_start": 3.0},
+            {"worker_id": 0, "iteration": 2, "iter_time_s": 1, "row_count": 100, "loss_start": 1.0},
+            {"worker_id": 1, "iteration": 2, "iter_time_s": 1, "row_count": 300, "loss_start": 3.0},
+        ]
+    ).assign(worker_id=lambda x: x["worker_id"]).to_csv(
+        d / "worker_0_async_ps_metrics.csv", index=False
+    )
     after, _ = se.summarise_run(se.load_rounds(str(d), "ps_async"))
     assert after["loss_after"].iloc[0] == pytest.approx((1 * 100 + 3 * 300) / 400)
 
@@ -81,8 +85,9 @@ def test_sync_time_split_into_transfer_and_wait(tmp_path):
 
 
 def test_time_to_target_hit_and_miss():
-    after = pd.DataFrame({"round": [1, 2, 3], "elapsed_s": [8.0, 16.0, 21.0],
-                          "loss_after": [0.5, 0.0229, 0.0229]})
+    after = pd.DataFrame(
+        {"round": [1, 2, 3], "elapsed_s": [8.0, 16.0, 21.0], "loss_after": [0.5, 0.0229, 0.0229]}
+    )
     assert se.time_to_target(after, 0.023) == 16.0
     assert np.isnan(se.time_to_target(after, 0.01))
 
@@ -123,8 +128,21 @@ def test_end_to_end_selection_resume_and_gates(tmp_path, monkeypatch, capsys):
     mpirun = tmp_path / "fakempirun"
     _fake_mpirun(mpirun)
     out = tmp_path / "out"
-    args = ["run", "--mpirun", str(mpirun), "--input", str(inp), "--reps", "3",
-            "--workers", "2", "--settle", "0", "--out-dir", str(out)]
+    args = [
+        "run",
+        "--mpirun",
+        str(mpirun),
+        "--input",
+        str(inp),
+        "--reps",
+        "3",
+        "--workers",
+        "2",
+        "--settle",
+        "0",
+        "--out-dir",
+        str(out),
+    ]
     _run_cli(args, monkeypatch)
     runs = pd.read_csv(out / "runs.csv")
     assert len(runs) == 12 and (runs["exit_code"] == 0).all()
