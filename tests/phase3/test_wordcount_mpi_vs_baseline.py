@@ -1,65 +1,57 @@
 """
 tests/phase3/test_wordcount_mpi_vs_baseline.py
 
-Issue #14 — P3-08: WordCount regression test.
+Issue #14 - P3-08: WordCount regression test.
 
-Validates that the MPI multi-driver WordCount (N=5) produces the same
-top-N word frequency output as the single-driver Spark baseline on an
-identical fixed input file.
+Validates that the MPI multi-driver WordCount (mpirun -n 5) reports the same
+top-N word frequencies as a single-driver Spark baseline on one fixed input.
 
-Guard
------
-  @pytest.mark.skipif(mpi_size < 2, ...)
-  The test is skipped automatically in CI (single-rank / no MPI env).
-  Run manually in a full MPI environment:
+How it runs
+-----------
+Run it with PLAIN pytest.  The test starts its own `mpirun` subprocess, so
+it must NOT be launched under mpirun (that would nest mpirun inside every
+rank).  It is skipped automatically when:
+  - `mpirun` is not on PATH (e.g. GitHub Actions without OpenMPI),
+  - mpi4py is not installed,
+  - pytest itself is already running inside an MPI job, or
+  - SKIP_MPI_E2E=1 is set (opt-out for quick local runs).
 
-    mpirun --oversubscribe -n 5 pytest tests/phase3/test_wordcount_mpi_vs_baseline.py -v
+    python -m pytest tests/phase3/test_wordcount_mpi_vs_baseline.py -v
 
-Acceptance criteria (Issue #14)
---------------------------------
-  1. Test script lives at tests/phase3/test_wordcount_mpi_vs_baseline.py
-  2. Runs single-driver WordCount baseline on a fixed input file
-  3. Runs MPI multi-driver WordCount (mpirun -n 5) on the same file
-  4. Asserts top-N word counts match exactly
-  5. Guarded with @pytest.mark.skipif(mpi_size < 2) — skipped in CI
+Output format parsed
+--------------------
+The root prints the merged result as a block:
+
+    Top-20 words:
+      apple                             9
+      cherry                            7
+
+(padded columns, thousands separators, no colon).  Only that block is
+parsed.  The root prints at most 20 words, so the fixture vocabulary must
+stay under 20 words; a test asserts this.
 """
 
 from __future__ import annotations
 
 import collections
+import importlib.util
+import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# MPI size detection — must be importable even without mpi4py
-# ---------------------------------------------------------------------------
-try:
-    from mpi4py import MPI
-
-    _mpi_size = MPI.COMM_WORLD.Get_size()
-except ImportError:
-    _mpi_size = 1
-
-_NEEDS_MPI = pytest.mark.skipif(
-    _mpi_size < 2,
-    reason="WordCount MPI regression test requires mpirun -n 5 (mpi_size >= 2). "
-    "Skipped in single-rank CI. Run: mpirun --oversubscribe -n 5 pytest "
-    "tests/phase3/test_wordcount_mpi_vs_baseline.py -v",
-)
-
-# ---------------------------------------------------------------------------
-# Project root
-# ---------------------------------------------------------------------------
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-# ---------------------------------------------------------------------------
-# Fixed deterministic input — same text every run
-# ---------------------------------------------------------------------------
+_ROOT_PRINT_LIMIT = 20
+_MPI_RANKS = 5
+_TOP_N = 5
+
 _WORDCOUNT_INPUT = """
 apple banana cherry apple banana apple
 cherry date elderberry fig cherry date
@@ -70,26 +62,51 @@ date grape honeydew honeydew fig apple
 elderberry banana cherry apple date date
 """.strip()
 
-_TOP_N = 5  # number of most-frequent words to compare
+_ROW_RE = re.compile(r"^\s+(\S+)\s+([\d,]+)\s*$")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _skip_reason() -> str | None:
+    if os.environ.get("SKIP_MPI_E2E") == "1":
+        return "SKIP_MPI_E2E=1"
+    if shutil.which("mpirun") is None:
+        return "mpirun not found on PATH (OpenMPI not installed)"
+    if importlib.util.find_spec("mpi4py") is None:
+        return "mpi4py is not installed"
+    if os.environ.get("OMPI_COMM_WORLD_SIZE") or os.environ.get("PMI_SIZE"):
+        return "already inside an MPI job; run this file with plain pytest (it starts mpirun)"
+    return None
 
 
-def _write_input_file(tmp_dir: Path) -> Path:
-    """Write the fixed input to a temp file and return its path."""
-    p = tmp_dir / "wordcount_input.txt"
-    p.write_text(_WORDCOUNT_INPUT)
-    return p
+_NEEDS_MPIRUN = pytest.mark.skipif(
+    _skip_reason() is not None,
+    reason=f"WordCount MPI end-to-end test skipped: {_skip_reason()}",
+)
+
+
+def _parse_top_block(stdout: str) -> dict[str, int]:
+    """Parse the root's 'Top-20 words:' block into word -> count."""
+    result: dict[str, int] = {}
+    in_block = False
+    for line in stdout.splitlines():
+        if not in_block:
+            if line.strip().startswith("Top-20 words"):
+                in_block = True
+            continue
+        if not line.strip():
+            continue
+        match = _ROW_RE.match(line)
+        if match is None:
+            break
+        result[match.group(1).lower()] = int(match.group(2).replace(",", ""))
+    return result
+
+
+def _top_n(counts: dict[str, int], n: int) -> dict[str, int]:
+    return dict(collections.Counter(counts).most_common(n))
 
 
 def _count_words_baseline(input_path: Path) -> dict[str, int]:
-    """
-    Run single-driver Spark WordCount baseline.
-    Returns full word → count dict.
-    """
+    """Single-driver Spark WordCount baseline: full word -> count dict."""
     from pyspark.sql import SparkSession
 
     spark = (
@@ -114,140 +131,103 @@ def _count_words_baseline(input_path: Path) -> dict[str, int]:
         spark.stop()
 
 
-def _parse_mpi_stdout(stdout: str) -> dict[str, int]:
-    """
-    Parse the word-count output lines emitted by the MPI WordCount app.
-    Expected format (produced by mpj_spark.applications.wordcount):
-        word: count
-    Lines not matching this pattern are ignored.
-    """
-    result: dict[str, int] = {}
-    for line in stdout.splitlines():
-        line = line.strip()
-        if ":" in line:
-            parts = line.split(":", 1)
-            word = parts[0].strip().lower()
-            try:
-                count = int(parts[1].strip())
-                if word:
-                    result[word] = result.get(word, 0) + count
-            except ValueError:
-                pass
-    return result
+@pytest.fixture(scope="module")
+def wordcount_runs(tmp_path_factory):
+    """Run the baseline and one MPI job once; share the results."""
+    input_file = tmp_path_factory.mktemp("wc") / "wordcount_input.txt"
+    input_file.write_text(_WORDCOUNT_INPUT)
 
+    baseline = _count_words_baseline(input_file)
 
-def _top_n(counts: dict[str, int], n: int) -> dict[str, int]:
-    """Return the top-n most-frequent words as a dict."""
-    return dict(collections.Counter(counts).most_common(n))
+    env = {
+        k: v for k, v in os.environ.items() if not k.startswith(("OMPI_", "PMIX_", "PMI_"))
+    }
+    cmd = [
+        "mpirun",
+        "--oversubscribe",
+        "-n",
+        str(_MPI_RANKS),
+        sys.executable,
+        "-m",
+        "mpj_spark.core.main_mpi",
+        "--input",
+        str(input_file),
+        "--app",
+        "wordcount",
+        "--cores",
+        "1",
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=str(_PROJECT_ROOT),
+        timeout=300,
+        env=env,
+    )
+    return baseline, proc
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Always-run unit tests (no MPI needed)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_top_block_reads_root_format():
+    out = (
+        "noise line: 5\n"
+        "\n  Top-20 words:\n"
+        "    apple                                 9\n"
+        "    cherry                            1,234\n"
+        "\n"
+        "    banana                                6\n"
+        "  Total rows : 99\n"
+        "    ignored                              77\n"
+    )
+    assert _parse_top_block(out) == {"apple": 9, "cherry": 1234, "banana": 6}
+
+
+def test_parse_top_block_without_block_is_empty():
+    assert _parse_top_block("word: 5\nother: 3\n") == {}
+
+
+def test_fixture_vocabulary_fits_root_print_limit():
+    vocab = set(_WORDCOUNT_INPUT.lower().split())
+    assert len(vocab) <= _ROOT_PRINT_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# End-to-end (needs mpirun; plain pytest)
 # ---------------------------------------------------------------------------
 
 
 class TestWordCountMpiVsBaseline:
-    """MPI multi-driver WordCount must produce identical top-N results as single-driver baseline."""
+    """MPI multi-driver WordCount must match the single-driver baseline."""
 
-    @_NEEDS_MPI
-    def test_top_n_counts_match(self, tmp_path: Path) -> None:
-        """
-        Core regression test.
-        1. Write fixed input.
-        2. Run single-driver baseline — collect top-N.
-        3. Run MPI multi-driver WordCount — collect top-N from stdout.
-        4. Assert top-N word counts are identical.
-        """
-        input_file = _write_input_file(tmp_path)
-
-        # -- Baseline ----------------------------------------------------------
-        baseline_counts = _count_words_baseline(input_file)
-        assert baseline_counts, "Baseline produced empty word counts"
-        baseline_top = _top_n(baseline_counts, _TOP_N)
-
-        # -- MPI multi-driver --------------------------------------------------
-        cmd = [
-            "mpirun",
-            "--oversubscribe",
-            "-n",
-            "5",
-            sys.executable,
-            "-m",
-            "mpj_spark.core.main_mpi",
-            "--input",
-            str(input_file),
-            "--app",
-            "wordcount",
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=str(_PROJECT_ROOT),
-            timeout=120,
+    @_NEEDS_MPIRUN
+    def test_top_n_counts_match(self, wordcount_runs) -> None:
+        baseline, proc = wordcount_runs
+        assert baseline, "Baseline produced empty word counts"
+        assert proc.returncode == 0, (
+            f"MPI WordCount exited with code {proc.returncode}.\n"
+            f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}"
         )
-        assert result.returncode == 0, (
-            f"MPI WordCount exited with code {result.returncode}.\n"
-            f"STDOUT:\n{result.stdout[-2000:]}\n"
-            f"STDERR:\n{result.stderr[-2000:]}"
-        )
-
-        mpi_counts = _parse_mpi_stdout(result.stdout)
+        mpi_counts = _parse_top_block(proc.stdout)
         assert mpi_counts, (
-            "MPI WordCount produced no parseable word counts in stdout.\n"
-            f"STDOUT:\n{result.stdout[-2000:]}"
+            f"No 'Top-20 words' block found in MPI output.\nSTDOUT:\n{proc.stdout[-2000:]}"
         )
+        baseline_top = _top_n(baseline, _TOP_N)
         mpi_top = _top_n(mpi_counts, _TOP_N)
-
-        # -- Assert exact match -----------------------------------------------
         assert baseline_top == mpi_top, (
-            f"Top-{_TOP_N} word counts MISMATCH.\n"
-            f"  Baseline : {baseline_top}\n"
-            f"  MPI      : {mpi_top}\n"
-            "Architecture is NOT regression-free — investigate Allreduce aggregation."
+            f"Top-{_TOP_N} MISMATCH.\n  Baseline : {baseline_top}\n  MPI      : {mpi_top}"
         )
 
-    @_NEEDS_MPI
-    def test_all_words_present_in_mpi_output(self, tmp_path: Path) -> None:
-        """
-        Every word in the baseline output must also appear in the MPI output.
-        Counts may differ by worker partition rounding, but no word should be lost.
-        """
-        input_file = _write_input_file(tmp_path)
-        baseline_counts = _count_words_baseline(input_file)
-
-        cmd = [
-            "mpirun",
-            "--oversubscribe",
-            "-n",
-            "5",
-            sys.executable,
-            "-m",
-            "mpj_spark.core.main_mpi",
-            "--input",
-            str(input_file),
-            "--app",
-            "wordcount",
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=str(_PROJECT_ROOT),
-            timeout=120,
-        )
-        assert result.returncode == 0
-        mpi_counts = _parse_mpi_stdout(result.stdout)
-
-        missing = set(baseline_counts.keys()) - set(mpi_counts.keys())
-        assert not missing, f"Words present in baseline but missing from MPI output: {missing}"
-
-    def test_skipped_in_single_rank(self) -> None:
-        """
-        Smoke-test: this test always passes in CI (documents the skip guard).
-        The actual MPI tests are guarded by @_NEEDS_MPI and skip when mpi_size < 2.
-        """
-        # This test documents that the suite is CI-safe.
-        # The real assertions live in test_top_n_counts_match and
-        # test_all_words_present_in_mpi_output, both guarded by @_NEEDS_MPI.
-        assert _mpi_size >= 1, "mpi_size must be at least 1 (single process)"
+    @_NEEDS_MPIRUN
+    def test_all_words_present_in_mpi_output(self, wordcount_runs) -> None:
+        baseline, proc = wordcount_runs
+        assert proc.returncode == 0
+        mpi_counts = _parse_top_block(proc.stdout)
+        missing = set(baseline) - set(mpi_counts)
+        assert not missing, f"In baseline but missing from MPI output: {missing}"
+        mismatched = {w: (baseline[w], mpi_counts[w]) for w in baseline if baseline[w] != mpi_counts.get(w)}
+        assert not mismatched, f"Count mismatches (baseline, mpi): {mismatched}"
