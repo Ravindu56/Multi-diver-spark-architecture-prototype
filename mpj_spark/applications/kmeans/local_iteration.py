@@ -71,6 +71,13 @@
 #   elements).  Same return contract; cluster counts are identical and the sums
 #   differ only by float summation order (~1e-15 relative).  New
 #   compute_local_wcss() does the same for the per-round WCSS pass.
+# perf(block-cache): every pass still un-pickled ~540k per-row numpy objects from the
+#   cached RDD (~0.5-2 s per pass; six passes per round).  load_partition_rdd() now also
+#   builds a cached twin RDD holding ONE (rows x D) float64 array per Spark partition and
+#   attaches it to the returned RDD as ``_mpj_blocks``.  compute_local_stats() and
+#   compute_local_wcss() use it when present and fall back to the per-row path otherwise
+#   (RDD-like test fakes).  Results are identical; row-based consumers (count,
+#   takeSample in init_centroids) are unchanged.
 # =============================================================================
 
 
@@ -89,15 +96,22 @@ logger = logging.getLogger(__name__)
 # block; keeps each temporary around 16 MB regardless of K and D.
 _BLOCK_BUDGET = 2_000_000
 
+# Attribute under which load_partition_rdd() stores the cached 2-D block twin of the rows.
+_BLOCKS_ATTR = "_mpj_blocks"
+
 
 # ---------------------------------------------------------------------------
 # 0. Vectorised block helpers (module level: shipped to Spark workers by reference)
 # ---------------------------------------------------------------------------
 
 
+def _rows_per_chunk(k: int, d: int) -> int:
+    return max(256, _BLOCK_BUDGET // max(1, k * d))
+
+
 def _iter_blocks(points_iter, k: int, d: int):
     """Yield (rows, D) float64 blocks from an iterator of (D,) points."""
-    rows = max(256, _BLOCK_BUDGET // max(1, k * d))
+    rows = _rows_per_chunk(k, d)
     while True:
         chunk = list(itertools.islice(points_iter, rows))
         if not chunk:
@@ -105,10 +119,41 @@ def _iter_blocks(points_iter, k: int, d: int):
         yield np.asarray(chunk, dtype=np.float64)
 
 
+def _iter_chunks(block_iter, k: int, d: int):
+    """Yield row-chunks (views, no copy) of already-built (rows, D) blocks."""
+    rows = _rows_per_chunk(k, d)
+    for block in block_iter:
+        for start in range(0, block.shape[0], rows):
+            yield block[start : start + rows]
+
+
 def _squared_distances(block: np.ndarray, centroids: np.ndarray) -> np.ndarray:
     """(rows, K) exact squared distances (difference form, no cancellation)."""
     diff = block[:, None, :] - centroids[None, :, :]
     return np.einsum("mkd,mkd->mk", diff, diff)
+
+
+def _rows_to_block(points_iter):
+    """Collapse one partition of (D,) rows into a single (rows, D) float64 array."""
+    rows = list(points_iter)
+    if rows:
+        yield np.asarray(rows, dtype=np.float64)
+
+
+def attach_blocks(points_rdd: RDD) -> RDD:
+    """Build + cache the one-array-per-partition twin of ``points_rdd`` and attach it."""
+    blocks = points_rdd.mapPartitions(_rows_to_block).cache()
+    blocks.count()  # materialise now so timed iterations measure computation
+    setattr(points_rdd, _BLOCKS_ATTR, blocks)
+    return points_rdd
+
+
+def _chunk_source(points_rdd):
+    """Return (source_rdd, chunker): block twin when available, else the per-row RDD."""
+    blocks = getattr(points_rdd, _BLOCKS_ATTR, None)
+    if blocks is not None:
+        return blocks, _iter_chunks
+    return points_rdd, _iter_blocks
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +173,9 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
 
 
     The RDD is cached so that repeated scans during K-Means iterations
-    read from memory rather than re-parsing the file each time.
+    read from memory rather than re-parsing the file each time.  A second,
+    block-shaped cached twin (one (rows, D) array per partition) is attached as
+    ``_mpj_blocks`` for the vectorised passes (see attach_blocks()).
 
 
     Parameters
@@ -168,6 +215,7 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     # before the first iteration begins so timing measurements (Step 4)
     # reflect computation cost, not I/O latency.
     row_count = points_rdd.count()
+    attach_blocks(points_rdd)
     logger.info(
         "[rank local] Loaded %d rows from '%s' (%d features)",
         row_count,
@@ -345,9 +393,9 @@ def compute_local_stats(
 
 
     The accumulation is done inside mapPartitions (once per Spark partition
-    slice) in numpy BLOCKS of points (see _iter_blocks) and then reduced
-    across slices with reduceByKey.  Blocking replaces the former per-point
-    Python loop, which dominated runtime.
+    slice) in numpy BLOCKS of points and then reduced across slices with
+    reduceByKey.  When the RDD carries the cached block twin (_mpj_blocks), the
+    blocks are used directly; otherwise rows are batched on the fly.
 
 
     Parameters
@@ -386,6 +434,7 @@ def compute_local_stats(
     # Capture centroids as a local variable so Spark can serialise the
     # closure without pickling the entire calling frame.
     _centroids = np.asarray(centroids, dtype=np.float64)
+    source, chunker = _chunk_source(points_rdd)
 
     def _map_partition(points_iter):
         """
@@ -398,7 +447,7 @@ def compute_local_stats(
         sums = np.zeros((k, d), dtype=np.float64)
         counts = np.zeros(k, dtype=np.int64)
 
-        for block in _iter_blocks(points_iter, k, d):
+        for block in chunker(points_iter, k, d):
             labels = _squared_distances(block, _centroids).argmin(axis=1)
             counts += np.bincount(labels, minlength=k)
             for j in range(k):
@@ -418,7 +467,7 @@ def compute_local_stats(
     # One Spark action: mapPartitions -> reduceByKey -> collect
     # Result: list of (cluster_id, (sum_vec, count)) for clusters with >= 1 point
     raw_results = (
-        points_rdd.mapPartitions(_map_partition).reduceByKey(_reduce_partition_stats).collect()
+        source.mapPartitions(_map_partition).reduceByKey(_reduce_partition_stats).collect()
     )
 
     # Assemble into dense K-indexed arrays.
@@ -443,11 +492,12 @@ def compute_local_wcss(points_rdd: RDD, centroids: np.ndarray) -> float:
     """
     k, d = centroids.shape
     _centroids = np.asarray(centroids, dtype=np.float64)
+    source, chunker = _chunk_source(points_rdd)
 
     def _wcss_partition(points_iter):
         total = 0.0
-        for block in _iter_blocks(points_iter, k, d):
+        for block in chunker(points_iter, k, d):
             total += float(_squared_distances(block, _centroids).min(axis=1).sum())
         yield total
 
-    return float(points_rdd.mapPartitions(_wcss_partition).sum())
+    return float(source.mapPartitions(_wcss_partition).sum())

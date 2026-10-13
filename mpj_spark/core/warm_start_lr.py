@@ -19,6 +19,16 @@ Objective (identical for every mode, so models are comparable):
     f(w, b) = mean_i logloss(y_i, x_i.w + b) + 0.5 * reg_param * ||w||^2
 The intercept is not regularised.  No feature standardisation (state this when
 comparing with MLlib models, which standardise by default).
+
+CHANGE LOG
+----------
+perf(block-cache): every L-BFGS function evaluation is one Spark pass, and each pass
+  un-pickled ~540k per-row (features, label) objects and stacked them into a matrix
+  (~0.5-2.5 s per pass, 6-8 passes per round).  spark_loss_grad() now builds ONE cached
+  (X, y) block per partition on first use and evaluates every later pass on those blocks
+  (a few large arrays instead of hundreds of thousands of small objects).  Same
+  objective, same numbers; RDD-like fakes (not pyspark RDDs) keep the original per-row
+  path.
 """
 
 from __future__ import annotations
@@ -73,24 +83,55 @@ def numpy_loss_grad(X: np.ndarray, y: np.ndarray, reg: float) -> LossGrad:
     return fg
 
 
+def _is_spark_rdd(rdd) -> bool:
+    """True for real pyspark RDDs (unit-test fakes are not)."""
+    try:
+        from pyspark import RDD
+    except ImportError:
+        return False
+    return isinstance(rdd, RDD)
+
+
+def _rows_to_xy_block(rows_iter):
+    """Collapse one partition of (features, label) rows into one (X, y) array pair."""
+    rows = list(rows_iter)
+    if rows:
+        yield (
+            np.asarray([r[0] for r in rows], dtype=np.float64),
+            np.asarray([r[1] for r in rows], dtype=np.float64),
+        )
+
+
 def spark_loss_grad(rdd, num_features: int, reg: float, n_rows: int) -> LossGrad:
-    """rdd: RDD of (features ndarray(d,), label float).  One Spark pass per call."""
+    """rdd: RDD of (features ndarray(d,), label float).  One Spark pass per call.
+
+    For a real Spark RDD the rows are first collapsed (once, cached) into one (X, y) block
+    per partition; every function evaluation then runs on those blocks.
+    """
+    blocks = None
+    if _is_spark_rdd(rdd):
+        blocks = rdd.mapPartitions(_rows_to_xy_block).cache()
+        blocks.count()  # materialise now so timed passes measure computation
 
     def fg(theta: np.ndarray):
         bc = theta.copy()
 
-        def per_partition(it):
-            rows = list(it)
-            if not rows:
-                return
-            X = np.asarray([r[0] for r in rows], dtype=np.float64)
-            y = np.asarray([r[1] for r in rows], dtype=np.float64)
-            yield partition_stats(X, y, bc)
+        if blocks is not None:
+            partials = blocks.map(lambda blk: partition_stats(blk[0], blk[1], bc))
+        else:
+
+            def per_partition(it):
+                rows = list(it)
+                if not rows:
+                    return
+                X = np.asarray([r[0] for r in rows], dtype=np.float64)
+                y = np.asarray([r[1] for r in rows], dtype=np.float64)
+                yield partition_stats(X, y, bc)
+
+            partials = rdd.mapPartitions(per_partition)
 
         zero = (0.0, np.zeros(num_features + 1), 0)
-        s, g, n = rdd.mapPartitions(per_partition).fold(
-            zero, lambda a, c: (a[0] + c[0], a[1] + c[1], a[2] + c[2])
-        )
+        s, g, n = partials.fold(zero, lambda a, c: (a[0] + c[0], a[1] + c[1], a[2] + c[2]))
         return regularised(s, g, n if n else n_rows, theta, reg)
 
     return fg
