@@ -22,6 +22,7 @@ with scripts/compare_baseline.py.
   python scripts/baseline_eval.py --app kmeans --compare-workers 2 4 --cores 2 --dry-run
   python scripts/baseline_eval.py --app kmeans --compare-workers 2 4 --cores 2 --rounds 8 --reps 3
 """
+
 import argparse
 import os
 import sys
@@ -42,24 +43,56 @@ def default_out_dir(app):
 
 
 def build_argv(a, cores_total, out_dir):
-    argv = ["sync_eval.py", "run", "--app", a.app, "--workers", "1", "--cores", str(cores_total),
-            "--reps", str(a.reps), "--seed", str(a.seed), "--rounds", str(a.rounds),
-            "--features", str(a.features), "--input", a.input, "--pybin", a.pybin,
-            "--mpirun", a.mpirun, "--timeout", str(a.timeout), "--settle", str(a.settle),
-            "--out-dir", out_dir]
+    argv = [
+        "sync_eval.py",
+        "run",
+        "--app",
+        a.app,
+        "--workers",
+        "1",
+        "--cores",
+        str(cores_total),
+        "--reps",
+        str(a.reps),
+        "--seed",
+        str(a.seed),
+        "--rounds",
+        str(a.rounds),
+        "--features",
+        str(a.features),
+        "--input",
+        a.input,
+        "--pybin",
+        a.pybin,
+        "--mpirun",
+        a.mpirun,
+        "--timeout",
+        str(a.timeout),
+        "--settle",
+        str(a.settle),
+        "--out-dir",
+        out_dir,
+    ]
     if a.smoke:
         argv.append("--smoke")
     return argv
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--app", default="kmeans", choices=["kmeans", "logreg"])
-    ap.add_argument("--compare-workers", nargs="+", type=int, default=[2, 4],
-                    help="worker counts of the multi-driver runs this baseline is compared with")
-    ap.add_argument("--cores", type=int, default=2,
-                    help="cores per driver in those multi-driver runs")
+    ap.add_argument(
+        "--compare-workers",
+        nargs="+",
+        type=int,
+        default=[2, 4],
+        help="worker counts of the multi-driver runs this baseline is compared with",
+    )
+    ap.add_argument(
+        "--cores", type=int, default=2, help="cores per driver in those multi-driver runs"
+    )
     ap.add_argument("--rounds", type=int, default=8)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--features", type=int, default=10)
@@ -89,8 +122,11 @@ def main(argv=None):
             se.MODES[:] = [BASELINE_MODE]
         for w, c in jobs:
             argv_se = build_argv(a, c, out_dir)
-            print(f"[baseline] {w} workers x {a.cores} cores -> 1 driver x {c} cores: "
-                  + " ".join(argv_se[1:]), flush=True)
+            print(
+                f"[baseline] {w} workers x {a.cores} cores -> 1 driver x {c} cores: "
+                + " ".join(argv_se[1:]),
+                flush=True,
+            )
             if a.dry_run:
                 continue
             sys.argv = argv_se

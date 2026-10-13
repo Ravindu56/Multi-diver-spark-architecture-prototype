@@ -46,26 +46,64 @@ def _curve(run_id, mode, workers, elapsed, losses):
 def test_kmeans_comparison_matches_total_cores_and_budget():
     fw = _runs(
         [
-            {"workers": 2, "cores": 2, "mode": "gossip", "mean_round_s": 1.0, "wall_s": 20.0,
-             "final_wcss": 100.0},
-            {"workers": 2, "cores": 2, "mode": "gossip", "mean_round_s": 1.2, "wall_s": 22.0,
-             "final_wcss": 100.0},
+            {
+                "workers": 2,
+                "cores": 2,
+                "mode": "gossip",
+                "mean_round_s": 1.0,
+                "wall_s": 20.0,
+                "final_wcss": 100.0,
+            },
+            {
+                "workers": 2,
+                "cores": 2,
+                "mode": "gossip",
+                "mean_round_s": 1.2,
+                "wall_s": 22.0,
+                "final_wcss": 100.0,
+            },
         ]
     )
     ps = "ps_sync_fedavg_mpi"
     base = _runs(
         [
-            {"workers": 1, "cores": 4, "mode": ps, "mean_round_s": 2.2, "wall_s": 30.0,
-             "final_wcss": 101.0},
+            {
+                "workers": 1,
+                "cores": 4,
+                "mode": ps,
+                "mean_round_s": 2.2,
+                "wall_s": 30.0,
+                "final_wcss": 101.0,
+            },
             # wrong total core budget: must not match
-            {"workers": 1, "cores": 2, "mode": ps, "mean_round_s": 9.9, "wall_s": 99.0,
-             "final_wcss": 1.0},
+            {
+                "workers": 1,
+                "cores": 2,
+                "mode": ps,
+                "mean_round_s": 9.9,
+                "wall_s": 99.0,
+                "final_wcss": 1.0,
+            },
             # wrong round budget: must not match
-            {"workers": 1, "cores": 4, "mode": ps, "mean_round_s": 9.9, "wall_s": 99.0,
-             "final_wcss": 1.0, "rounds_cfg": 4},
+            {
+                "workers": 1,
+                "cores": 4,
+                "mode": ps,
+                "mean_round_s": 9.9,
+                "wall_s": 99.0,
+                "final_wcss": 1.0,
+                "rounds_cfg": 4,
+            },
             # failed run: must not match
-            {"workers": 1, "cores": 4, "mode": ps, "mean_round_s": 9.9, "wall_s": 99.0,
-             "final_wcss": 1.0, "exit_code": 1},
+            {
+                "workers": 1,
+                "cores": 4,
+                "mode": ps,
+                "mean_round_s": 9.9,
+                "wall_s": 99.0,
+                "final_wcss": 1.0,
+                "exit_code": 1,
+            },
         ]
     )
     out = cb.compare_kmeans(fw, base)
@@ -79,12 +117,28 @@ def test_kmeans_comparison_matches_total_cores_and_budget():
 
 def test_kmeans_without_matching_baseline_gives_no_rows():
     fw = _runs(
-        [{"workers": 4, "cores": 2, "mode": "gossip", "mean_round_s": 1.0, "wall_s": 20.0,
-          "final_wcss": 100.0}]
+        [
+            {
+                "workers": 4,
+                "cores": 2,
+                "mode": "gossip",
+                "mean_round_s": 1.0,
+                "wall_s": 20.0,
+                "final_wcss": 100.0,
+            }
+        ]
     )
     base = _runs(
-        [{"workers": 1, "cores": 4, "mode": "ps_sync_fedavg_mpi", "mean_round_s": 2.0,
-          "wall_s": 30.0, "final_wcss": 101.0}]
+        [
+            {
+                "workers": 1,
+                "cores": 4,
+                "mode": "ps_sync_fedavg_mpi",
+                "mean_round_s": 2.0,
+                "wall_s": 30.0,
+                "final_wcss": 101.0,
+            }
+        ]
     )
     assert cb.compare_kmeans(fw, base).empty
 
@@ -143,8 +197,20 @@ def test_baseline_plan_gives_equal_total_threads():
 
 def test_baseline_dry_run_prints_single_driver_commands(capsys, tmp_path):
     modes_before = list(be.se.MODES)
-    be.main(["--app", "kmeans", "--compare-workers", "2", "4", "--cores", "2",
-             "--out-dir", str(tmp_path), "--dry-run"])
+    be.main(
+        [
+            "--app",
+            "kmeans",
+            "--compare-workers",
+            "2",
+            "4",
+            "--cores",
+            "2",
+            "--out-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
     out = capsys.readouterr().out
     assert "--workers 1 --cores 4" in out and "--workers 1 --cores 8" in out
     assert "--app kmeans" in out
@@ -159,8 +225,19 @@ def test_baseline_runs_only_fedavg_and_restores_modes(monkeypatch, tmp_path):
         calls.append((list(sys.argv), list(be.se.MODES)))
 
     monkeypatch.setattr(be.se, "main", fake_main)
-    be.main(["--app", "logreg", "--compare-workers", "2", "4", "--cores", "2",
-             "--out-dir", str(tmp_path)])
+    be.main(
+        [
+            "--app",
+            "logreg",
+            "--compare-workers",
+            "2",
+            "4",
+            "--cores",
+            "2",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
     assert len(calls) == 2
     for argv, modes in calls:
         assert modes == [be.BASELINE_MODE]

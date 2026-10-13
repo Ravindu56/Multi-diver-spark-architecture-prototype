@@ -18,6 +18,7 @@ Speedup > 1 means the multi-driver mode beats the single driver with equal resou
   python scripts/compare_baseline.py --app kmeans
   python scripts/compare_baseline.py --app logreg --rel-tol 1e-3
 """
+
 import argparse
 import os
 import sys
@@ -73,15 +74,28 @@ def compare_kmeans(fw_runs, base_runs):
             r = se._median(rr["mean_round_s"])
             wl = se._median(rr["wall_s"])
             wc = se._median(rr["final_wcss"])
-            rows.append(dict(
-                workers=w, cores_per_driver=c, baseline_cores=c * w, rounds_cfg=rc, mode=mode,
-                n_ok=len(rr), n_base=len(b),
-                round_s=r, base_round_s=b_round, round_speedup=_ratio(b_round, r),
-                wall_s=wl, base_wall_s=b_wall, wall_speedup=_ratio(b_wall, wl),
-                final_wcss=wc, base_final_wcss=b_wcss,
-                wcss_vs_base_pct=(100.0 * (wc / b_wcss - 1.0)
-                                  if pd.notna(b_wcss) and b_wcss else float("nan")),
-            ))
+            rows.append(
+                dict(
+                    workers=w,
+                    cores_per_driver=c,
+                    baseline_cores=c * w,
+                    rounds_cfg=rc,
+                    mode=mode,
+                    n_ok=len(rr),
+                    n_base=len(b),
+                    round_s=r,
+                    base_round_s=b_round,
+                    round_speedup=_ratio(b_round, r),
+                    wall_s=wl,
+                    base_wall_s=b_wall,
+                    wall_speedup=_ratio(b_wall, wl),
+                    final_wcss=wc,
+                    base_final_wcss=b_wcss,
+                    wcss_vs_base_pct=(
+                        100.0 * (wc / b_wcss - 1.0) if pd.notna(b_wcss) and b_wcss else float("nan")
+                    ),
+                )
+            )
     return pd.DataFrame(rows)
 
 
@@ -114,18 +128,30 @@ def compare_logreg(fw_runs, fw_rounds, base_runs, base_rounds, rel=1e-3):
                 continue
             f_ttt = _ttts(rr["run_id"], fw_rounds, tgt)
             f_med = _med_list(f_ttt)
-            rows.append(dict(
-                workers=w, cores_per_driver=c, baseline_cores=c * w, rounds_cfg=rc, mode=mode,
-                target_loss=tgt, n_ok=len(rr), n_reached=len(f_ttt), median_ttt_s=f_med,
-                n_base=len(b), base_reached=len(b_ttt), base_median_ttt_s=b_med,
-                speedup=_ratio(b_med, f_med),
-            ))
+            rows.append(
+                dict(
+                    workers=w,
+                    cores_per_driver=c,
+                    baseline_cores=c * w,
+                    rounds_cfg=rc,
+                    mode=mode,
+                    target_loss=tgt,
+                    n_ok=len(rr),
+                    n_reached=len(f_ttt),
+                    median_ttt_s=f_med,
+                    n_base=len(b),
+                    base_reached=len(b_ttt),
+                    base_median_ttt_s=b_med,
+                    speedup=_ratio(b_med, f_med),
+                )
+            )
     return pd.DataFrame(rows)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--app", choices=["kmeans", "logreg"], required=True)
     ap.add_argument("--framework-dir", default=None)
     ap.add_argument("--baseline-dir", default=None)
@@ -140,19 +166,25 @@ def main(argv=None):
     base_runs = pd.read_csv(os.path.join(base_dir, "runs.csv"))
     if a.app == "kmeans":
         table = compare_kmeans(fw_runs, base_runs)
-        note = ("round_speedup > 1: the multi-driver mode is faster per round than ONE driver with "
-                "the same total cores. wall_speedup also counts JVM/partition start-up. Gossip's "
-                "WCSS is a sum over per-worker models and async's is approximate.")
+        note = (
+            "round_speedup > 1: the multi-driver mode is faster per round than ONE driver with "
+            "the same total cores. wall_speedup also counts JVM/partition start-up. Gossip's "
+            "WCSS is a sum over per-worker models and async's is approximate."
+        )
     else:
         fw_rounds = pd.read_csv(os.path.join(fw_dir, "rounds.csv"))
         base_rounds = pd.read_csv(os.path.join(base_dir, "rounds.csv"))
         table = compare_logreg(fw_runs, fw_rounds, base_runs, base_rounds, rel=a.rel_tol)
-        note = ("speedup > 1: the mode reaches the target loss sooner than ONE driver with the same "
-                "total cores. The target comes from the multi-driver runs; gossip/async losses are "
-                "approximations.")
+        note = (
+            "speedup > 1: the mode reaches the target loss sooner than ONE driver with the same "
+            "total cores. The target comes from the multi-driver runs; gossip/async losses are "
+            "approximations."
+        )
     if table.empty:
-        print("no comparable rows: the baseline must be run with --compare-workers and --cores "
-              "matching the multi-driver runs, and the same --rounds")
+        print(
+            "no comparable rows: the baseline must be run with --compare-workers and --cores "
+            "matching the multi-driver runs, and the same --rounds"
+        )
         return 1
     out = a.out or f"results/compare_{a.app}_v2.csv"
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)

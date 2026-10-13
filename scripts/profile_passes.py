@@ -165,9 +165,7 @@ def main():
     from mpj_spark.workers.spark_session import build_spark_session
 
     path = _head(args.input, args.rows)
-    spark = build_spark_session(
-        app_name="profile-passes", cores_override=args.cores, num_workers=2
-    )
+    spark = build_spark_session(app_name="profile-passes", cores_override=args.cores, num_workers=2)
     try:
         print(f"rows={args.rows:,} cores={args.cores} reps={args.reps}")
         if args.only in (None, "kmeans"):

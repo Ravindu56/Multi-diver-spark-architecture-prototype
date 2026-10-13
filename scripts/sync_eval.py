@@ -45,7 +45,22 @@ collide on resume and are never averaged together.
   python scripts/sync_eval.py run    --app kmeans --rounds 8 --workers 2 4
   python scripts/sync_eval.py select --app kmeans
 """
-import argparse, contextlib, csv, glob, hashlib, itertools, os, random, re, shlex, signal, socket, subprocess, sys, time
+
+import argparse
+import contextlib
+import csv
+import glob
+import hashlib
+import itertools
+import os
+import random
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
 from datetime import datetime
 
 import numpy as np
@@ -58,13 +73,51 @@ METRIC_FILES = {
     "ps_async": ("worker_*_async_ps_metrics.csv", []),
     "hybrid_ps_allreduce": ("worker_*_hybrid_metrics.csv", ["allreduce_time_s", "ps_time_s"]),
 }
-RUN_FIELDS = ["run_id", "timestamp", "host", "commit", "dataset_sha256", "mode", "workers", "cores",
-              "rounds_cfg", "rep", "seed", "exit_code", "wall_s", "rounds_logged", "loss_after_last",
-              "mean_round_s", "transfer_s", "wait_s", "wait_share", "run_dir"]
+RUN_FIELDS = [
+    "run_id",
+    "timestamp",
+    "host",
+    "commit",
+    "dataset_sha256",
+    "mode",
+    "workers",
+    "cores",
+    "rounds_cfg",
+    "rep",
+    "seed",
+    "exit_code",
+    "wall_s",
+    "rounds_logged",
+    "loss_after_last",
+    "mean_round_s",
+    "transfer_s",
+    "wait_s",
+    "wait_share",
+    "run_dir",
+]
 ROUND_FIELDS = ["run_id", "mode", "workers", "round", "elapsed_s", "loss_after"]
-KMEANS_FIELDS = ["run_id", "timestamp", "host", "commit", "dataset_sha256", "mode", "workers", "cores",
-                 "rounds_cfg", "rep", "seed", "exit_code", "wall_s", "rounds_logged", "mean_round_s",
-                 "transfer_s", "wait_s", "wait_share", "final_wcss", "run_dir"]
+KMEANS_FIELDS = [
+    "run_id",
+    "timestamp",
+    "host",
+    "commit",
+    "dataset_sha256",
+    "mode",
+    "workers",
+    "cores",
+    "rounds_cfg",
+    "rep",
+    "seed",
+    "exit_code",
+    "wall_s",
+    "rounds_logged",
+    "mean_round_s",
+    "transfer_s",
+    "wait_s",
+    "wait_share",
+    "final_wcss",
+    "run_dir",
+]
 _WCSS_RE = re.compile(r"Total WCSS\s*:\s*([0-9][0-9.,eE+-]*)")
 
 
@@ -77,12 +130,17 @@ def load_rounds(run_dir, mode):
         df = pd.read_csv(p)
         if df.empty:
             continue
-        out = pd.DataFrame({
-            "worker": df["worker_id"], "round": df["iteration"], "iter_s": df["iter_time_s"],
-            "rows": df["row_count"],
-            "loss": pd.to_numeric(df["global_loss"] if "global_loss" in df else df["loss_start"],
-                                  errors="coerce"),
-        })
+        out = pd.DataFrame(
+            {
+                "worker": df["worker_id"],
+                "round": df["iteration"],
+                "iter_s": df["iter_time_s"],
+                "rows": df["row_count"],
+                "loss": pd.to_numeric(
+                    df["global_loss"] if "global_loss" in df else df["loss_start"], errors="coerce"
+                ),
+            }
+        )
         out["sync_s"] = df[sync_cols].sum(axis=1) if sync_cols else np.nan
         out["exact"] = "global_loss" in df
         frames.append(out)
@@ -109,19 +167,27 @@ def summarise_run(df):
         per["loss_enter"] = pd.Series({r: _row_weighted(sub) for r, sub in df.groupby("round")})
     per["elapsed_s"] = per["round_s"].cumsum()
     rounds = per.index.to_numpy()
-    after = pd.DataFrame({
-        "round": rounds[:-1],
-        "elapsed_s": per["elapsed_s"].to_numpy()[:-1],
-        "loss_after": per["loss_enter"].to_numpy()[1:],
-    })
-    summary = {"rounds_logged": int(len(per)), "mean_round_s": float(per["round_s"].mean()),
-               "loss_after_last": float(after["loss_after"].iloc[-1]) if len(after) else np.nan}
+    after = pd.DataFrame(
+        {
+            "round": rounds[:-1],
+            "elapsed_s": per["elapsed_s"].to_numpy()[:-1],
+            "loss_after": per["loss_enter"].to_numpy()[1:],
+        }
+    )
+    summary = {
+        "rounds_logged": int(len(per)),
+        "mean_round_s": float(per["round_s"].mean()),
+        "loss_after_last": float(after["loss_after"].iloc[-1]) if len(after) else np.nan,
+    }
     if df["sync_s"].notna().any():
         transfer = df.groupby("round")["sync_s"].min()
         wait = (df["sync_s"] - df["round"].map(transfer)).groupby(df["round"]).mean()
         total = float(per["round_s"].sum())
-        summary.update(transfer_s=float(transfer.sum()), wait_s=float(wait.sum()),
-                       wait_share=float(wait.sum() / total) if total > 0 else np.nan)
+        summary.update(
+            transfer_s=float(transfer.sum()),
+            wait_s=float(wait.sum()),
+            wait_share=float(wait.sum() / total) if total > 0 else np.nan,
+        )
     else:
         summary.update(transfer_s=np.nan, wait_s=np.nan, wait_share=np.nan)
     return after, summary
@@ -168,16 +234,29 @@ def select_best(runs, rounds, rel=1e-3, min_reps=3):
                 after = rounds[rounds["run_id"] == rid].sort_values("round")
                 ttt.append(time_to_target(after, tgt))
             reached = [t for t in ttt if not np.isnan(t)]
-            table[mode] = dict(n_ok=len(rr), n_reached=len(reached), ttt=reached,
-                               wall=_median(rr["wall_s"]),
-                               final=_median(rr["loss_after_last"]),
-                               wait=_median(rr["wait_share"]))
+            table[mode] = dict(
+                n_ok=len(rr),
+                n_reached=len(reached),
+                ttt=reached,
+                wall=_median(rr["wall_s"]),
+                final=_median(rr["loss_after_last"]),
+                wait=_median(rr["wait_share"]),
+            )
             t = table[mode]
-            rows.append(dict(workers=w, mode=mode, n_ok=t["n_ok"], n_reached=t["n_reached"],
-                             median_ttt_s=float(np.median(reached)) if reached else np.nan,
-                             ttt_iqr=("" if not reached else "%.1f-%.1f" % iqr(reached)),
-                             median_wall_s=t["wall"], median_final_loss=t["final"],
-                             median_wait_share=t["wait"], target_loss=tgt))
+            rows.append(
+                dict(
+                    workers=w,
+                    mode=mode,
+                    n_ok=t["n_ok"],
+                    n_reached=t["n_reached"],
+                    median_ttt_s=float(np.median(reached)) if reached else np.nan,
+                    ttt_iqr=("" if not reached else "%.1f-%.1f" % iqr(reached)),
+                    median_wall_s=t["wall"],
+                    median_final_loss=t["final"],
+                    median_wait_share=t["wait"],
+                    target_loss=tgt,
+                )
+            )
         cand = {m: t for m, t in table.items() if t["n_reached"] >= min_reps}
         if not cand:
             verdicts.append((w, tgt, "no mode reached the target in >= %d runs" % min_reps))
@@ -188,10 +267,19 @@ def select_best(runs, rounds, rel=1e-3, min_reps=3):
             sep = "(only candidate)"
         else:
             nxt = ranked[1]
-            sep = ("SEPARABLE" if iqr(ws["ttt"])[1] < iqr(nxt[1]["ttt"])[0]
-                   else "NOT separable from " + nxt[0])
-        verdicts.append((w, tgt, "best=%s  median time-to-target %.1fs  %s" %
-                         (win, float(np.median(ws["ttt"])), sep)))
+            sep = (
+                "SEPARABLE"
+                if iqr(ws["ttt"])[1] < iqr(nxt[1]["ttt"])[0]
+                else "NOT separable from " + nxt[0]
+            )
+        verdicts.append(
+            (
+                w,
+                tgt,
+                "best=%s  median time-to-target %.1fs  %s"
+                % (win, float(np.median(ws["ttt"])), sep),
+            )
+        )
     return pd.DataFrame(rows), verdicts
 
 
@@ -203,8 +291,16 @@ def load_kmeans_rounds(run_dir):
         df = pd.read_csv(p)
         if df.empty:
             continue
-        frames.append(pd.DataFrame({"worker": os.path.basename(p), "round": df["iteration"],
-                                    "iter_s": df["iter_time_s"], "sync_s": df["sync_time_s"]}))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "worker": os.path.basename(p),
+                    "round": df["iteration"],
+                    "iter_s": df["iter_time_s"],
+                    "sync_s": df["sync_time_s"],
+                }
+            )
+        )
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -216,9 +312,13 @@ def summarise_kmeans(df):
     transfer = df.groupby("round")["sync_s"].min()
     wait = (df["sync_s"] - df["round"].map(transfer)).groupby(df["round"]).mean()
     total = float(per_round.sum())
-    return dict(rounds_logged=int(len(per_round)), mean_round_s=float(per_round.mean()),
-                transfer_s=float(transfer.sum()), wait_s=float(wait.sum()),
-                wait_share=float(wait.sum() / total) if total > 0 else float("nan"))
+    return dict(
+        rounds_logged=int(len(per_round)),
+        mean_round_s=float(per_round.mean()),
+        transfer_s=float(transfer.sum()),
+        wait_s=float(wait.sum()),
+        wait_share=float(wait.sum() / total) if total > 0 else float("nan"),
+    )
 
 
 def parse_total_wcss(log_path):
@@ -242,14 +342,22 @@ def select_kmeans(runs):
             if rr.empty:
                 continue
             wcss = _median(rr["final_wcss"])
-            rows.append(dict(workers=w, rounds_cfg=rc, mode=mode, n_ok=len(rr),
-                             median_wall_s=_median(rr["wall_s"]),
-                             median_round_s=_median(rr["mean_round_s"]),
-                             median_rounds=_median(rr["rounds_logged"]),
-                             median_wait_share=_median(rr["wait_share"]),
-                             median_final_wcss=wcss,
-                             wcss_vs_best_pct=(100.0 * (wcss / best - 1.0)
-                                               if pd.notna(best) and best else np.nan)))
+            rows.append(
+                dict(
+                    workers=w,
+                    rounds_cfg=rc,
+                    mode=mode,
+                    n_ok=len(rr),
+                    median_wall_s=_median(rr["wall_s"]),
+                    median_round_s=_median(rr["mean_round_s"]),
+                    median_rounds=_median(rr["rounds_logged"]),
+                    median_wait_share=_median(rr["wait_share"]),
+                    median_final_wcss=wcss,
+                    wcss_vs_best_pct=(
+                        100.0 * (wcss / best - 1.0) if pd.notna(best) and best else np.nan
+                    ),
+                )
+            )
     return pd.DataFrame(rows)
 
 
@@ -264,8 +372,9 @@ def sha256(path):
 
 def git_commit():
     try:
-        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True,
-                                       stderr=subprocess.DEVNULL).strip()
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
     except Exception:
         return ""
 
@@ -286,13 +395,37 @@ def default_out_dir(app):
     return "results/sync_eval_kmeans" if app == "kmeans" else "results/sync_eval"
 
 
-def build_cmd(mode, w, cores, input_path, pybin, run_dir, rounds, features, caps, mpirun="mpirun",
-              app="logreg"):
+def build_cmd(
+    mode,
+    w,
+    cores,
+    input_path,
+    pybin,
+    run_dir,
+    rounds,
+    features,
+    caps,
+    mpirun="mpirun",
+    app="logreg",
+):
     cmd = [mpirun, "--oversubscribe", "-np", str(w + 1)]
     for var in caps:
         cmd += ["-x", var]
-    cmd += [pybin, "-m", "mpj_spark.core.main_mpi", "--app", app, "--sync-mode", mode,
-            "--input", input_path, "--cores", str(cores), "--results-dir", run_dir]
+    cmd += [
+        pybin,
+        "-m",
+        "mpj_spark.core.main_mpi",
+        "--app",
+        app,
+        "--sync-mode",
+        mode,
+        "--input",
+        input_path,
+        "--cores",
+        str(cores),
+        "--results-dir",
+        run_dir,
+    ]
     if app == "kmeans":
         return cmd + ["--kmeans-iter", str(rounds)]
     return cmd + ["--logreg-iter", str(rounds), "--logreg-features", str(features)]
@@ -313,7 +446,9 @@ def launch(cmd, log_path, timeout, repo):
     with open(log_path, "w") as lf:
         lf.write("CMD: " + " ".join(shlex.quote(c) for c in cmd) + "\n")
         lf.flush()
-        p = subprocess.Popen(cmd, cwd=repo, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+        p = subprocess.Popen(
+            cmd, cwd=repo, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True
+        )
         try:
             code = p.wait(timeout=timeout or None)
         except subprocess.TimeoutExpired:
@@ -364,35 +499,98 @@ def cmd_run(a):
                 continue
             rdir = os.path.abspath(os.path.join(out_dir, "runs", rid))
             os.makedirs(rdir, exist_ok=True)
-            cmd = build_cmd(mode, wk, a.cores, a.input, a.pybin, rdir, a.rounds, a.features, caps,
-                            a.mpirun, a.app)
+            cmd = build_cmd(
+                mode,
+                wk,
+                a.cores,
+                a.input,
+                a.pybin,
+                rdir,
+                a.rounds,
+                a.features,
+                caps,
+                a.mpirun,
+                a.app,
+            )
             print(f"[{datetime.now():%H:%M:%S}] {i}/{len(cells)} {rid}", flush=True)
             code, wall = launch(cmd, os.path.join(rdir, "run.log"), a.timeout, repo)
-            base = dict(run_id=rid, timestamp=datetime.now().isoformat(timespec="seconds"),
-                        host=socket.gethostname(), commit=commit, dataset_sha256=sha, mode=mode,
-                        workers=wk, cores=a.cores, rounds_cfg=a.rounds, rep=rep, seed=a.seed,
-                        exit_code=code, wall_s=f"{wall:.2f}", run_dir=rdir)
+            base = dict(
+                run_id=rid,
+                timestamp=datetime.now().isoformat(timespec="seconds"),
+                host=socket.gethostname(),
+                commit=commit,
+                dataset_sha256=sha,
+                mode=mode,
+                workers=wk,
+                cores=a.cores,
+                rounds_cfg=a.rounds,
+                rep=rep,
+                seed=a.seed,
+                exit_code=code,
+                wall_s=f"{wall:.2f}",
+                run_dir=rdir,
+            )
             if is_km:
                 s = summarise_kmeans(load_kmeans_rounds(rdir))
                 s["final_wcss"] = parse_total_wcss(os.path.join(rdir, "run.log"))
-                wr.writerow(dict(base, **{k: s.get(k, "") for k in (
-                    "rounds_logged", "mean_round_s", "transfer_s", "wait_s", "wait_share",
-                    "final_wcss")}))
+                wr.writerow(
+                    dict(
+                        base,
+                        **{
+                            k: s.get(k, "")
+                            for k in (
+                                "rounds_logged",
+                                "mean_round_s",
+                                "transfer_s",
+                                "wait_s",
+                                "wait_share",
+                                "final_wcss",
+                            )
+                        },
+                    )
+                )
                 fr.flush()
-                print(f"    exit={code} wall={wall:.1f}s rounds={s.get('rounds_logged', 0)} "
-                      f"final_wcss={s.get('final_wcss', float('nan')):.4f}", flush=True)
+                print(
+                    f"    exit={code} wall={wall:.1f}s rounds={s.get('rounds_logged', 0)} "
+                    f"final_wcss={s.get('final_wcss', float('nan')):.4f}",
+                    flush=True,
+                )
             else:
                 after, s = summarise_run(load_rounds(rdir, mode))
-                wr.writerow(dict(base, **{k: s.get(k, "") for k in (
-                    "rounds_logged", "loss_after_last", "mean_round_s", "transfer_s", "wait_s",
-                    "wait_share")}))
+                wr.writerow(
+                    dict(
+                        base,
+                        **{
+                            k: s.get(k, "")
+                            for k in (
+                                "rounds_logged",
+                                "loss_after_last",
+                                "mean_round_s",
+                                "transfer_s",
+                                "wait_s",
+                                "wait_share",
+                            )
+                        },
+                    )
+                )
                 for _, row in after.iterrows():
-                    wo.writerow(dict(run_id=rid, mode=mode, workers=wk, round=int(row["round"]),
-                                     elapsed_s=row["elapsed_s"], loss_after=row["loss_after"]))
+                    wo.writerow(
+                        dict(
+                            run_id=rid,
+                            mode=mode,
+                            workers=wk,
+                            round=int(row["round"]),
+                            elapsed_s=row["elapsed_s"],
+                            loss_after=row["loss_after"],
+                        )
+                    )
                 fr.flush()
                 fo.flush()
-                print(f"    exit={code} wall={wall:.1f}s rounds={s.get('rounds_logged', 0)} "
-                      f"loss_after_last={s.get('loss_after_last', float('nan')):.6f}", flush=True)
+                print(
+                    f"    exit={code} wall={wall:.1f}s rounds={s.get('rounds_logged', 0)} "
+                    f"loss_after_last={s.get('loss_after_last', float('nan')):.6f}",
+                    flush=True,
+                )
             time.sleep(a.settle)
 
 
@@ -404,8 +602,10 @@ def cmd_select(a):
         table.to_csv(os.path.join(out_dir, "mode_table.csv"), index=False)
         print(table.round(4).to_string(index=False))
         print()
-        print("Fixed round budget; no winner declared. FedAvg may stop early (see median_rounds); "
-              "async 'wait' is server round-trip variation, not barrier time.")
+        print(
+            "Fixed round budget; no winner declared. FedAvg may stop early (see median_rounds); "
+            "async 'wait' is server round-trip variation, not barrier time."
+        )
         return
     rounds = pd.read_csv(os.path.join(out_dir, "rounds.csv"))
     table, verdicts = select_best(runs, rounds, rel=a.rel_tol, min_reps=a.min_reps)
@@ -417,7 +617,9 @@ def cmd_select(a):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sp = p.add_subparsers(dest="cmd", required=True)
     s = sp.add_parser("plan")
     s.add_argument("--workers", nargs="+", type=int, default=[2])
@@ -425,7 +627,9 @@ def main():
     s.add_argument("--seed", type=int, default=7)
     s.set_defaults(f=cmd_plan)
     s = sp.add_parser("run")
-    s.add_argument("--app", default="logreg", help="logreg (time to target loss) or kmeans (fixed budget)")
+    s.add_argument(
+        "--app", default="logreg", help="logreg (time to target loss) or kmeans (fixed budget)"
+    )
     s.add_argument("--workers", nargs="+", type=int, default=[2])
     s.add_argument("--reps", type=int, default=5)
     s.add_argument("--seed", type=int, default=7)
@@ -437,8 +641,11 @@ def main():
     s.add_argument("--features", type=int, default=10)
     s.add_argument("--timeout", type=int, default=1800)
     s.add_argument("--settle", type=int, default=10)
-    s.add_argument("--out-dir", default=None,
-                   help="default: results/sync_eval (logreg) or results/sync_eval_kmeans (kmeans)")
+    s.add_argument(
+        "--out-dir",
+        default=None,
+        help="default: results/sync_eval (logreg) or results/sync_eval_kmeans (kmeans)",
+    )
     s.add_argument("--smoke", action="store_true", help="1 rep of every mode to check wiring")
     s.set_defaults(f=cmd_run)
     s = sp.add_parser("select")
