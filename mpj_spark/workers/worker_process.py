@@ -7,7 +7,9 @@
 #   sync_mode='queue'  →  logreg.queue_run.run()   [M2 — FedAvg]
 #   sync_mode='none'   →  logreg.nosync_run.run()  [M1 — no sync]
 #
-# All other apps (wordcount, kmeans) are unaffected.
+# kmeans: gossip / ps_async / hybrid_ps_allreduce are not wired yet and
+# raise instead of silently running allreduce.
+# All other apps (wordcount) are unaffected.
 # ================================================================
 import time
 
@@ -52,6 +54,12 @@ def run_worker_core(
         result = run_wordcount(partition_path, spark)
 
     elif app == "kmeans":
+        if sync_mode in (MODE_GOSSIP, MODE_PS_ASYNC, MODE_HYBRID_PS_ALLREDUCE):
+            raise RuntimeError(
+                f"[W{worker_id}] sync_mode='{sync_mode}' is registered but not wired "
+                "for kmeans — refusing silent fallback to allreduce."
+            )
+
         try:
             from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
 
