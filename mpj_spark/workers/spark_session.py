@@ -166,6 +166,8 @@ def build_spark_session(
     # Configures G1GC explicitly so Spark's GarbageCollectionMetrics
     # can report young/old gen GC events. Removes the WARN:
     # "To enable non-built-in garbage collector(s) List(G1 Concurrent GC)..."
+    # The registered names must equal the JVM collector names Spark reports:
+    # "G1 Young Generation" and "G1 Old Generation".
     gc_flags = (
         "-XX:+UseG1GC "
         "-XX:G1HeapRegionSize=16m "
@@ -201,7 +203,7 @@ def build_spark_session(
             "spark.eventLog.gcMetrics.youngGenerationGarbageCollectors",
             "G1 Young Generation",
         )
-        .config("spark.eventLog.gcMetrics.oldGenerationGarbageCollectors", "G1 Old Gen")
+        .config("spark.eventLog.gcMetrics.oldGenerationGarbageCollectors", "G1 Old Generation")
         # FIX 7: keep stderr progress bar out of merged logs
         .config("spark.ui.showConsoleProgress", "false")
         .getOrCreate()
