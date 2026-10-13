@@ -354,7 +354,8 @@ def run_root_mpi(
 
     if errors:
         print(f"  {len(errors)} worker(s) failed. Aborting.")
-        return
+        # Non-zero exit so scripts (sync_eval, benchmarks) can tell a failed run from a pass.
+        raise SystemExit(1)
 
     _ok(f"All {num_workers} workers completed")
 
