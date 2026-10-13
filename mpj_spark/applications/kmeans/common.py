@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from mpj_spark.applications.kmeans.local_iteration import compute_local_stats
+from mpj_spark.applications.kmeans.local_iteration import compute_local_stats, compute_local_wcss
 
 KMEANS_METRIC_SOLVER = "lloyd"
 
@@ -31,8 +31,14 @@ def unpack_stats(stats) -> tuple[np.ndarray, np.ndarray, float]:
 
 
 def local_wcss(points_rdd, centroids: np.ndarray) -> float:
-    """Sum of squared distances from each local point to its nearest centroid."""
+    """Sum of squared distances from each local point to its nearest centroid.
+
+    Real Spark RDDs take the vectorised block path; an RDD-like object that only offers
+    map()/sum() (unit-test fakes) falls back to the per-point reference implementation.
+    """
     c = np.asarray(centroids, dtype=np.float64)
+    if hasattr(type(points_rdd), "mapPartitions"):
+        return compute_local_wcss(points_rdd, c)
 
     def _sq_dist(p):
         return float(np.min(np.sum((c - np.asarray(p, dtype=np.float64)) ** 2, axis=1)))
