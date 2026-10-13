@@ -163,6 +163,123 @@ def test_end_to_end_selection_resume_and_gates(tmp_path, monkeypatch, capsys):
     assert np.isnan(table.loc["ps_sync_fedavg_mpi", "median_wait_share"])
 
 
-def test_kmeans_is_refused(monkeypatch):
+def test_unknown_app_is_refused(monkeypatch):
     with pytest.raises(SystemExit):
-        _run_cli(["run", "--app", "kmeans"], monkeypatch)
+        _run_cli(["run", "--app", "wordcount"], monkeypatch)
+
+
+# ───────────────────────── K-Means (fixed round budget) ─────────────────────────
+
+
+def test_parse_total_wcss_takes_last_and_handles_missing(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("x\n     Total WCSS : 5.5000\nmore\n     Total WCSS : 2,616,692.1636\n")
+    assert se.parse_total_wcss(str(log)) == pytest.approx(2616692.1636)
+    log.write_text("nothing to see\n")
+    assert np.isnan(se.parse_total_wcss(str(log)))
+    assert np.isnan(se.parse_total_wcss(str(tmp_path / "absent.log")))
+
+
+def test_summarise_kmeans_transfer_and_wait_split(tmp_path):
+    syncs = [(0.0002, 2.8, 0.0002), (2.8, 0.0002, 2.8)]  # workers take turns being the straggler
+    for w, sync in enumerate(syncs):
+        pd.DataFrame(
+            {
+                "iteration": [1, 2, 3],
+                "spark_time_s": [1.0, 1.0, 1.0],
+                "sync_time_s": list(sync),
+                "iter_time_s": [5.0, 5.0, 5.0],
+                "centroid_shift": [0.1, 0.05, 0.02],
+                "global_wcss": [3.0, 2.0, 1.0],
+                "sync_overhead_pct": [0.0, 0.0, 0.0],
+            }
+        ).to_csv(tmp_path / f"kmeans_metrics_rank{w}.csv", index=False)
+    s = se.summarise_kmeans(se.load_kmeans_rounds(str(tmp_path)))
+    assert s["rounds_logged"] == 3
+    assert s["transfer_s"] == pytest.approx(0.0006)
+    assert s["wait_s"] == pytest.approx(3 * 1.4, rel=1e-3)
+    assert s["wait_share"] == pytest.approx(s["wait_s"] / 15)
+    assert se.summarise_kmeans(pd.DataFrame()) == {}
+
+
+def test_build_cmd_kmeans_uses_kmeans_flags():
+    cmd = se.build_cmd("gossip", 4, 2, "in.csv", "py", "/r", 8, 10, [], app="kmeans")
+    assert cmd[cmd.index("-np") + 1] == "5"
+    assert cmd[cmd.index("--app") + 1] == "kmeans"
+    assert cmd[cmd.index("--kmeans-iter") + 1] == "8"
+    assert "--logreg-iter" not in cmd and "--logreg-features" not in cmd
+    default = se.build_cmd("gossip", 4, 2, "in.csv", "py", "/r", 8, 10, [])
+    assert "--logreg-iter" in default and "--kmeans-iter" not in default
+
+
+def _fake_kmeans_mpirun(path):
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, os, csv\n"
+        "a = sys.argv\n"
+        "mode = a[a.index('--sync-mode') + 1]\n"
+        "rd = a[a.index('--results-dir') + 1]\n"
+        "assert a[a.index('--app') + 1] == 'kmeans' and '--kmeans-iter' in a\n"
+        "rounds = int(a[a.index('--kmeans-iter') + 1])\n"
+        "os.makedirs(rd, exist_ok=True)\n"
+        "wcss = {'ps_sync_fedavg_mpi': 2616692.0, 'gossip': 2616692.0,\n"
+        "        'hybrid_ps_allreduce': 2616692.0, 'ps_async': 2616808.0}[mode]\n"
+        "head = ['iteration', 'spark_time_s', 'sync_time_s', 'iter_time_s',\n"
+        "        'centroid_shift', 'global_wcss', 'sync_overhead_pct']\n"
+        "for w in range(2):\n"
+        "    p = os.path.join(rd, 'kmeans_metrics_rank%d.csv' % w)\n"
+        "    with open(p, 'w', newline='') as f:\n"
+        "        wr = csv.writer(f)\n"
+        "        wr.writerow(head)\n"
+        "        for t in range(rounds):\n"
+        "            wr.writerow([t + 1, 1.0, 0.0 if w == 0 else 0.5, 2.0, 0.01, 1.0, 0.0])\n"
+        "print('     Total WCSS : 1.0000')\n"
+        "print('     Total WCSS : %.4f' % wcss)\n"
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def test_kmeans_end_to_end_table_and_resume(tmp_path, monkeypatch, capsys):
+    inp = tmp_path / "km.csv"
+    inp.write_text("1,2,0\n")
+    mpirun = tmp_path / "fakempirun"
+    _fake_kmeans_mpirun(mpirun)
+    out = tmp_path / "out"
+    args = [
+        "run",
+        "--app",
+        "kmeans",
+        "--mpirun",
+        str(mpirun),
+        "--input",
+        str(inp),
+        "--reps",
+        "2",
+        "--workers",
+        "2",
+        "--rounds",
+        "4",
+        "--settle",
+        "0",
+        "--out-dir",
+        str(out),
+    ]
+    _run_cli(args, monkeypatch)
+    runs = pd.read_csv(out / "runs.csv")
+    assert len(runs) == 8 and (runs["exit_code"] == 0).all()
+    assert runs["run_id"].str.startswith("kmeans_").all()
+    assert (runs["rounds_logged"] == 4).all()
+    assert runs["final_wcss"].notna().all()
+    assert not (out / "rounds.csv").exists()  # no per-round loss file for K-Means
+
+    _run_cli(args, monkeypatch)  # resume: nothing is run twice
+    assert len(pd.read_csv(out / "runs.csv")) == 8
+
+    capsys.readouterr()
+    _run_cli(["select", "--app", "kmeans", "--out-dir", str(out)], monkeypatch)
+    assert "no winner declared" in capsys.readouterr().out
+    table = pd.read_csv(out / "mode_table.csv").set_index("mode")
+    assert table.loc["gossip", "wcss_vs_best_pct"] == pytest.approx(0.0)
+    assert table.loc["ps_async", "wcss_vs_best_pct"] > 0
+    assert table.loc["gossip", "median_wait_share"] > 0
+    assert table.loc["ps_sync_fedavg_mpi", "median_rounds"] == 4
