@@ -212,6 +212,12 @@ def test_build_cmd_kmeans_uses_kmeans_flags():
     assert "--logreg-iter" in default and "--kmeans-iter" not in default
 
 
+def test_run_id_carries_rounds_for_kmeans_only():
+    assert se.run_id("gossip", 4, 2, 3, "kmeans", 8) == "kmeans_gossip_w4_c2_n8_r3"
+    assert se.run_id("gossip", 4, 2, 3, "logreg", 10) == "logreg_gossip_w4_c2_r3"
+    assert se.run_id("gossip", 4, 2, 3) == "logreg_gossip_w4_c2_r3"
+
+
 def _fake_kmeans_mpirun(path):
     path.write_text(
         "#!/usr/bin/env python3\n"
@@ -283,3 +289,38 @@ def test_kmeans_end_to_end_table_and_resume(tmp_path, monkeypatch, capsys):
     assert table.loc["ps_async", "wcss_vs_best_pct"] > 0
     assert table.loc["gossip", "median_wait_share"] > 0
     assert table.loc["ps_sync_fedavg_mpi", "median_rounds"] == 4
+
+
+def test_kmeans_budgets_do_not_collide_or_mix(tmp_path, monkeypatch, capsys):
+    inp = tmp_path / "km.csv"
+    inp.write_text("1,2,0\n")
+    mpirun = tmp_path / "fakempirun"
+    _fake_kmeans_mpirun(mpirun)
+    out = tmp_path / "out"
+    base = [
+        "run",
+        "--app",
+        "kmeans",
+        "--mpirun",
+        str(mpirun),
+        "--input",
+        str(inp),
+        "--reps",
+        "1",
+        "--workers",
+        "2",
+        "--settle",
+        "0",
+        "--out-dir",
+        str(out),
+    ]
+    _run_cli([*base, "--rounds", "4"], monkeypatch)
+    _run_cli([*base, "--rounds", "6"], monkeypatch)  # same folder, different budget: runs again
+    runs = pd.read_csv(out / "runs.csv")
+    assert len(runs) == 8 and runs["run_id"].nunique() == 8
+    assert set(runs["rounds_cfg"]) == {4, 6}
+
+    capsys.readouterr()
+    _run_cli(["select", "--app", "kmeans", "--out-dir", str(out)], monkeypatch)
+    table = pd.read_csv(out / "mode_table.csv")
+    assert set(table["rounds_cfg"]) == {4, 6} and len(table) == 8  # never averaged together

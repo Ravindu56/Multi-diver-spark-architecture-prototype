@@ -31,9 +31,12 @@ local value for gossip / async) and the modes end within ~0.01% of each other, s
 time-to-target on it would be meaningless.  Per run it records wall time, mean round
 time, the transfer / wait split of ``sync_time_s`` (async has no barrier: its
 "wait" is server round-trip variation, not barrier time) and the final Total WCSS
-of the returned model parsed from run.log (exact for FedAvg / hybrid / gossip,
-approximate for async).  FedAvg can stop early (tol 1e-4) while the others always run
-the full budget, so ``rounds_logged`` is reported next to every time.
+of the returned model parsed from run.log (exact for FedAvg / hybrid, a sum over
+per-worker models for gossip, approximate for async).  FedAvg can stop early (tol
+1e-4) while the others always run the full budget, so ``rounds_logged`` is reported
+next to every time.  K-Means run ids carry the round budget (..._n<ROUNDS>_r<REP>)
+and the select table is grouped by it, so runs with different --rounds never
+collide on resume and are never averaged together.
 
   python scripts/sync_eval.py plan
   python scripts/sync_eval.py run    --pybin "$(which python)" --reps 5 --workers 2
@@ -229,17 +232,17 @@ def parse_total_wcss(log_path):
 
 
 def select_kmeans(runs):
-    """Per worker count: medians per mode at a fixed round budget. No winner is declared."""
+    """Per (worker count, round budget): medians per mode. No winner is declared."""
     ok = runs[runs["exit_code"] == 0]
     rows = []
-    for w, sub in sorted(ok.groupby("workers")):
+    for (w, rc), sub in sorted(ok.groupby(["workers", "rounds_cfg"])):
         best = sub.groupby("mode")["final_wcss"].median().min()
         for mode in MODES:
             rr = sub[sub["mode"] == mode]
             if rr.empty:
                 continue
             wcss = _median(rr["final_wcss"])
-            rows.append(dict(workers=w, mode=mode, n_ok=len(rr),
+            rows.append(dict(workers=w, rounds_cfg=rc, mode=mode, n_ok=len(rr),
                              median_wall_s=_median(rr["wall_s"]),
                              median_round_s=_median(rr["mean_round_s"]),
                              median_rounds=_median(rr["rounds_logged"]),
@@ -273,8 +276,10 @@ def grid(workers, reps, seed):
     return cells
 
 
-def run_id(mode, w, cores, rep, app="logreg"):
-    return f"{app}_{mode}_w{w}_c{cores}_r{rep}"
+def run_id(mode, w, cores, rep, app="logreg", rounds=None):
+    """LogReg ids are unchanged; K-Means ids carry the round budget (_n<ROUNDS>)."""
+    tag = f"_n{rounds}" if (app == "kmeans" and rounds is not None) else ""
+    return f"{app}_{mode}_w{w}_c{cores}{tag}_r{rep}"
 
 
 def default_out_dir(app):
@@ -354,7 +359,7 @@ def cmd_run(a):
         if wo is not None and new_rounds:
             wo.writeheader()
         for i, (mode, wk, rep) in enumerate(cells, 1):
-            rid = run_id(mode, wk, a.cores, rep, a.app)
+            rid = run_id(mode, wk, a.cores, rep, a.app, a.rounds)
             if rid in done:
                 continue
             rdir = os.path.abspath(os.path.join(out_dir, "runs", rid))
