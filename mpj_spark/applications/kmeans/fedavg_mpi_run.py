@@ -32,6 +32,9 @@
 #   on THIS worker's partition, so the root's sum is the exact global WCSS of
 #   the returned model.  The old cross-worker sum is still returned as
 #   ``global_wcss``.  Cost: one extra pass over the partition after the loop.
+# perf(vectorise): _local_wcss() now uses the blocked numpy implementation
+#   (local_iteration.compute_local_wcss) for real Spark RDDs; the per-point
+#   path remains for RDD-like objects without mapPartitions.
 # ================================================================
 from __future__ import annotations
 
@@ -41,6 +44,7 @@ import numpy as np
 
 from mpj_spark.applications.kmeans.local_iteration import (
     compute_local_stats,
+    compute_local_wcss,
     init_centroids,
     load_partition_rdd,
 )
@@ -68,6 +72,9 @@ def _unpack_stats(stats):
 
 def _local_wcss(points_rdd, centroids: np.ndarray) -> float:
     """Sum of squared distances from each point to its nearest centroid."""
+    if hasattr(type(points_rdd), "mapPartitions"):
+        return compute_local_wcss(points_rdd, np.asarray(centroids, dtype=np.float64))
+
     c = centroids  # closure for Spark serialisation
 
     def _sq_dist(p):
