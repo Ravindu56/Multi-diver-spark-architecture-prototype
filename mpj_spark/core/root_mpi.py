@@ -144,8 +144,11 @@ def run_root_mpi(
     do_seed = use_global_seed and use_gossip and app == "kmeans"
     do_reassign = use_reassign and use_gossip and app == "kmeans"
     do_logreg_allreduce_p2p = app == "logreg" and sync_mode == MODE_PS_SYNC_FEDAVG_QUEUE
-    do_logreg_async_ps = app == "logreg" and sync_mode == MODE_PS_ASYNC
-    do_logreg_hybrid = app == "logreg" and sync_mode == MODE_HYBRID_PS_ALLREDUCE
+    # LogReg and K-Means share the same root-side parameter servers (async / hybrid scalar).
+    ps_app = app in ("logreg", "kmeans")
+    ps_rounds = kmeans_iter if app == "kmeans" else logreg_iter
+    do_logreg_async_ps = ps_app and sync_mode == MODE_PS_ASYNC
+    do_logreg_hybrid = ps_app and sync_mode == MODE_HYBRID_PS_ALLREDUCE
     do_logreg_gossip = app == "logreg" and sync_mode == MODE_GOSSIP
 
     from mpj_spark.config import DATA_DIR, TOTAL_CORES
@@ -298,7 +301,7 @@ def run_root_mpi(
             res = run_logreg_async_ps(
                 comm,  # COMM_WORLD on root — P2P with worker ranks 1..N
                 num_workers=num_workers,
-                num_iterations=logreg_iter,
+                num_iterations=ps_rounds,
                 num_features=logreg_features,
                 results_dir=results_dir,
             )
@@ -317,7 +320,7 @@ def run_root_mpi(
             res = run_logreg_hybrid_scalar_ps(
                 comm,  # COMM_WORLD on root — scalar P2P with worker ranks 1..N
                 num_workers=num_workers,
-                num_iterations=logreg_iter,
+                num_iterations=ps_rounds,
                 results_dir=results_dir,
             )
             _allreduce_store.append(res)  # intercept-only result; weights via Allreduce

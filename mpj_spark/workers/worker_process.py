@@ -7,10 +7,10 @@
 #   sync_mode='queue'  →  logreg.queue_run.run()   [M2 — FedAvg]
 #   sync_mode='none'   →  logreg.nosync_run.run()  [M1 — no sync]
 #
-# kmeans: gossip runs kmeans.gossip_run.run_kmeans_gossip() on the MPI worker
-# sub-communicator; ps_async / hybrid_ps_allreduce (and gossip without a
-# sub-communicator) are not wired yet and raise instead of silently running
-# allreduce.
+# kmeans: gossip, hybrid_ps_allreduce and ps_async run their own kmeans.*_run runners on
+# the MPI worker sub-communicator (hybrid / async also need COMM_WORLD for the root
+# parameter server).  Those modes without the channels they need (the multiprocessing
+# transport) raise instead of silently running allreduce.
 # All other apps (wordcount) are unaffected.
 # ================================================================
 import time
@@ -56,8 +56,9 @@ def run_worker_core(
         result = run_wordcount(partition_path, spark)
 
     elif app == "kmeans":
-        if sync_mode in (MODE_PS_ASYNC, MODE_HYBRID_PS_ALLREDUCE) or (
-            sync_mode == MODE_GOSSIP and comm is None
+        ps_mode = sync_mode in (MODE_PS_ASYNC, MODE_HYBRID_PS_ALLREDUCE)
+        if (sync_mode == MODE_GOSSIP and comm is None) or (
+            ps_mode and (comm is None or root_comm is None)
         ):
             raise RuntimeError(
                 f"[W{worker_id}] sync_mode='{sync_mode}' is registered but not wired "
@@ -84,6 +85,40 @@ def run_worker_core(
                 max_iter=worker_config.get("kmeans_max_iter", 20),
                 local_epochs=worker_config.get("kmeans_local_epochs", 5),
                 fanout=worker_config.get("gossip_fanout", 1),
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif sync_mode == MODE_HYBRID_PS_ALLREDUCE:
+            from mpj_spark.applications.kmeans.hybrid_run import run_kmeans_hybrid
+
+            result = run_kmeans_hybrid(
+                comm=comm,  # worker sub-comm: dense-centroid Allreduce channel
+                root_comm=root_comm,  # COMM_WORLD: scalar PS channel (root is rank 0)
+                rank=worker_id,  # 0-based sub-comm rank
+                world_rank=worker_id + 1,  # COMM_WORLD rank (workers are 1..N)
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif sync_mode == MODE_PS_ASYNC:
+            from mpj_spark.applications.kmeans.async_ps_run import run_kmeans_async_ps
+
+            result = run_kmeans_async_ps(
+                comm=comm,  # worker sub-comm: one-time seed broadcast
+                root_comm=root_comm,  # COMM_WORLD: async parameter server (root is rank 0)
+                rank=worker_id,  # 0-based sub-comm rank
+                world_rank=worker_id + 1,  # COMM_WORLD rank (workers are 1..N)
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
                 seed=42,
                 metrics_output_dir=results_dir,
                 sync_mode=sync_mode,
