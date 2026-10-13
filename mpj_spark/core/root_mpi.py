@@ -147,6 +147,7 @@ def run_root_mpi(
     # LogReg and K-Means share the same root-side parameter servers (async / hybrid scalar).
     ps_app = app in ("logreg", "kmeans")
     ps_rounds = kmeans_iter if app == "kmeans" else logreg_iter
+    app_label = "KMeans" if app == "kmeans" else "LogReg"
     do_logreg_async_ps = ps_app and sync_mode == MODE_PS_ASYNC
     do_logreg_hybrid = ps_app and sync_mode == MODE_HYBRID_PS_ALLREDUCE
     do_logreg_gossip = app == "logreg" and sync_mode == MODE_GOSSIP
@@ -304,6 +305,7 @@ def run_root_mpi(
                 num_iterations=ps_rounds,
                 num_features=logreg_features,
                 results_dir=results_dir,
+                label=app_label,
             )
             _allreduce_store.append(res)  # same result shape as run_logreg_allreduce_mpi()
 
@@ -311,7 +313,7 @@ def run_root_mpi(
             target=_async_ps_thread_fn, daemon=True, name="logreg-async-ps"
         )
         allreduce_thread.start()
-        print("  [LogReg Async PS] Coordinator thread started (P3-09, non-blocking P2P)")
+        print(f"  [{app_label} Async PS] Coordinator thread started (P3-09, non-blocking P2P)")
 
     if do_logreg_hybrid:
         from mpj_spark.core.hybrid_ps import run_logreg_hybrid_scalar_ps
@@ -322,6 +324,7 @@ def run_root_mpi(
                 num_workers=num_workers,
                 num_iterations=ps_rounds,
                 results_dir=results_dir,
+                label=app_label,
             )
             _allreduce_store.append(res)  # intercept-only result; weights via Allreduce
 
@@ -329,7 +332,7 @@ def run_root_mpi(
             target=_hybrid_ps_thread_fn, daemon=True, name="logreg-hybrid-ps"
         )
         allreduce_thread.start()
-        print("  [LogReg Hybrid PS] Scalar coordinator thread started (P3-10)")
+        print(f"  [{app_label} Hybrid PS] Scalar coordinator thread started (P3-10)")
 
     if do_logreg_gossip:
         print(
