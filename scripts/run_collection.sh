@@ -10,6 +10,7 @@
 #   bash scripts/run_collection.sh start --archive-old   # detached (setsid nohup), all stages
 #   bash scripts/run_collection.sh status                # running? manifest tail, log tails
 #   bash scripts/run_collection.sh stop                  # stop it, clean up mpirun/JVMs
+#   bash scripts/run_collection.sh reset                 # forget the v2 marker and .done files (data untouched)
 #   bash scripts/run_collection.sh run [--dry-run]       # foreground (what start launches)
 #
 # Stages (default order; override with STAGES="doe_kmeans eval_kmeans ..."):
@@ -24,11 +25,17 @@
 # Settings (environment variables, defaults in brackets): WORKERS [2 4], CORES [2],
 #   ROUNDS_KM [8], ROUNDS_LR [10], REPS_KM [3], REPS_LR [5], DOE_CONFIGS [40],
 #   DOE_REPS [2], INPUT [shared_storage/logreg_100mb.csv], COOLDOWN_S [30],
-#   FAIL_FAST [0], FORCE [0], PYBIN [python of the activated venv].
+#   FAIL_FAST [0], FORCE [0], ALLOW_BOUND [0], PYBIN [python of the activated venv].
 # A finished stage leaves results/collection_logs/<stage>.done and is skipped on the
 # next run (FORCE=1 reruns it); every stage script is itself resumable.
 # Old pre-optimisation DOE / sync results must be archived first (--archive-old):
 # the DOE scripts would otherwise treat the old rows as already done and skip them.
+#
+# MPI core binding: Open MPI binds each rank to one core when a job has only 2 ranks,
+# which silently restricts a single-driver (np=2) run to ONE physical core whatever
+# --cores says. This script exports OMPI_MCA_hwloc_base_binding_policy=none and refuses
+# to run unless a 2-rank probe sees every CPU (ALLOW_BOUND=1 skips the check). Anything
+# launched by hand outside this script needs `mpirun --bind-to none`.
 set -u -o pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -48,7 +55,9 @@ cd "$REPO" || exit 1
 : "${COOLDOWN_S:=30}"
 : "${FAIL_FAST:=0}"
 : "${FORCE:=0}"
+: "${ALLOW_BOUND:=0}"
 read -r -a WARR <<< "$WORKERS"
+export OMPI_MCA_hwloc_base_binding_policy="${OMPI_MCA_hwloc_base_binding_policy:-none}"
 
 LOGDIR=results/collection_logs
 MANIFEST=results/collection_manifest.txt
@@ -73,6 +82,16 @@ for arg in "$@"; do
   esac
 done
 
+check_binding() {
+  local seen total
+  total="$(nproc)"
+  seen="$(mpirun --oversubscribe -np 2 "$PY" -c 'import os; print(len(os.sched_getaffinity(0)))' 2>/dev/null | grep -E '^[0-9]+$' | sort -n | head -n 1)"
+  note "MPI binding probe (np=2): smallest per-rank CPU set = ${seen:-unknown} of $total CPUs (policy: ${OMPI_MCA_hwloc_base_binding_policy:-default})"
+  if [ -z "$seen" ] || [ "$seen" -lt "$total" ]; then
+    die "mpirun restricts ranks to ${seen:-an unknown number of} of $total CPUs, which would throttle every np=2 run. Fix the binding or set ALLOW_BOUND=1 to override."
+  fi
+}
+
 setup_python() {
   if [ -z "${PYBIN:-}" ] && [ -f .venv/bin/activate ]; then
     . .venv/bin/activate
@@ -80,6 +99,7 @@ setup_python() {
   PY="${PYBIN:-$(command -v python)}"
   if [ -z "$PY" ] || [ ! -x "$PY" ]; then die "no python found (activate the venv or set PYBIN)"; fi
   command -v mpirun >/dev/null 2>&1 || die "mpirun not found on PATH"
+  if [ "$DRYRUN" != 1 ] && [ "$ALLOW_BOUND" != 1 ]; then check_binding; fi
 }
 
 stage_argv() {
@@ -123,7 +143,7 @@ run_stage() {
 }
 
 preflight() {
-  local need_input=0 st stale=() move=() p dest avail
+  local need_input=0 refuse=0 st stale=() move=() p dest avail
   for st in $STAGES; do
     case "$st" in eval_*|base_*) need_input=1 ;; esac
   done
@@ -135,18 +155,25 @@ preflight() {
       if [ -e "$p" ]; then stale+=("$p"); fi
     done
     if [ "${#stale[@]}" -gt 0 ] && [ "$ARCHIVE" != 1 ]; then
-      die "old results present (${stale[*]}). Re-run with --archive-old (moves them to results/pre_opt_*); otherwise the DOE scripts would skip designs already recorded."
-    fi
-    move=("${stale[@]+"${stale[@]}"}")
-    for p in results/logs results/traces; do
-      if [ -e "$p" ]; then move+=("$p"); fi
-    done
-    if [ "${#move[@]}" -gt 0 ]; then
-      dest="results/pre_opt_$(date +%Y%m%d_%H%M%S)"
       if [ "$DRYRUN" = 1 ]; then
-        note "would archive: ${move[*]} -> $dest"
+        refuse=1
+        note "dry run: a real start would refuse, old results present (${stale[*]}); pass --archive-old"
       else
-        mkdir -p "$dest" && mv "${move[@]}" "$dest"/ && note "archived: ${move[*]} -> $dest"
+        die "old results present (${stale[*]}). Re-run with --archive-old (moves them to results/pre_opt_*); otherwise the DOE scripts would skip designs already recorded."
+      fi
+    fi
+    if [ "$refuse" = 0 ]; then
+      move=("${stale[@]+"${stale[@]}"}")
+      for p in results/logs results/traces; do
+        if [ -e "$p" ]; then move+=("$p"); fi
+      done
+      if [ "${#move[@]}" -gt 0 ]; then
+        dest="results/pre_opt_$(date +%Y%m%d_%H%M%S)"
+        if [ "$DRYRUN" = 1 ]; then
+          note "would archive: ${move[*]} -> $dest"
+        else
+          mkdir -p "$dest" && mv "${move[@]}" "$dest"/ && note "archived: ${move[*]} -> $dest"
+        fi
       fi
     fi
     if [ "$DRYRUN" != 1 ]; then : > "$MARKER"; fi
@@ -191,6 +218,14 @@ cmd_stop() {
   echo "stopped; finished runs are saved, rerun 'start' to resume"
 }
 
+cmd_reset() {
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    die "a collection is running; stop it first"
+  fi
+  rm -f "$MARKER" "$LOGDIR"/*.done "$PIDFILE"
+  echo "reset done: the next 'start --archive-old' archives the current results and begins afresh"
+}
+
 cmd_run() {
   local st failed=()
   if [ "$DRYRUN" != 1 ] && [ -z "${COLLECTION_INHIBITED:-}" ] && command -v systemd-inhibit >/dev/null 2>&1 && systemd-inhibit --what=sleep:idle --why=probe true >/dev/null 2>&1; then
@@ -216,11 +251,14 @@ cmd_run() {
 }
 
 cmd_pilot() {
-  local rc=0
+  local rc=0 p
   exec 9> results/.collection.lock
   flock -n 9 || die "another collection is already running"
   setup_python
-  note "pilot start: commit=$(git rev-parse HEAD 2>/dev/null)"
+  for p in results/pilot_*; do
+    if [ -e "$p" ]; then rm -rf "$p"; fi
+  done
+  note "pilot start: commit=$(git rev-parse HEAD 2>/dev/null) (previous results/pilot_* removed)"
   "$PY" scripts/doe_kmeans.py --pybin "$PY" --n-configs 3 --reps 1 --out results/pilot_doe_kmeans.csv || rc=1
   "$PY" scripts/doe_logreg.py --pybin "$PY" --n-configs 3 --reps 1 --out results/pilot_doe_logreg.csv || rc=1
   "$PY" scripts/sync_eval.py run --app kmeans --smoke --rounds 4 --workers 2 --settle 2 --pybin "$PY" --input "$INPUT" --out-dir results/pilot_sync_kmeans || rc=1
@@ -235,6 +273,7 @@ case "$CMD" in
   pilot) cmd_pilot ;;
   status) cmd_status ;;
   stop) cmd_stop ;;
+  reset) cmd_reset ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac
