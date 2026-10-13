@@ -139,9 +139,7 @@ def wordcount_runs(tmp_path_factory):
 
     baseline = _count_words_baseline(input_file)
 
-    env = {
-        k: v for k, v in os.environ.items() if not k.startswith(("OMPI_", "PMIX_", "PMI_"))
-    }
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OMPI_", "PMIX_", "PMI_"))}
     cmd = [
         "mpirun",
         "--oversubscribe",
@@ -213,14 +211,14 @@ class TestWordCountMpiVsBaseline:
             f"STDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}"
         )
         mpi_counts = _parse_top_block(proc.stdout)
-        assert mpi_counts, (
-            f"No 'Top-20 words' block found in MPI output.\nSTDOUT:\n{proc.stdout[-2000:]}"
-        )
+        assert (
+            mpi_counts
+        ), f"No 'Top-20 words' block found in MPI output.\nSTDOUT:\n{proc.stdout[-2000:]}"
         baseline_top = _top_n(baseline, _TOP_N)
         mpi_top = _top_n(mpi_counts, _TOP_N)
-        assert baseline_top == mpi_top, (
-            f"Top-{_TOP_N} MISMATCH.\n  Baseline : {baseline_top}\n  MPI      : {mpi_top}"
-        )
+        assert (
+            baseline_top == mpi_top
+        ), f"Top-{_TOP_N} MISMATCH.\n  Baseline : {baseline_top}\n  MPI      : {mpi_top}"
 
     @_NEEDS_MPIRUN
     def test_all_words_present_in_mpi_output(self, wordcount_runs) -> None:
@@ -229,5 +227,7 @@ class TestWordCountMpiVsBaseline:
         mpi_counts = _parse_top_block(proc.stdout)
         missing = set(baseline) - set(mpi_counts)
         assert not missing, f"In baseline but missing from MPI output: {missing}"
-        mismatched = {w: (baseline[w], mpi_counts[w]) for w in baseline if baseline[w] != mpi_counts.get(w)}
+        mismatched = {
+            w: (baseline[w], mpi_counts[w]) for w in baseline if baseline[w] != mpi_counts.get(w)
+        }
         assert not mismatched, f"Count mismatches (baseline, mpi): {mismatched}"
