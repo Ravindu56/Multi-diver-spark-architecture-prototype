@@ -80,26 +80,33 @@ BEST_CV_FAMILIES = ("lookup", "ridge", "ridge_wl", "rf")
 FAMILY_POLICY: dict[str, str] = {"cpu_cores_p95": "rf_wl", "cpu_cores_mean": "rf_wl"}
 
 # Growth trends used BEYOND the measured range: axis → workload → target →
-# beta source.  Decided by the fixed rules of scripts/transfer_trend_tests.py
-# (report: data/models/transfer_trends/report.json):
-#   size   LogReg memory — local trend beats the model's own extrapolation;
-#          Scout agrees with it but adds nothing when local data has the trend
-#   cores  K-Means, all targets — local trend; Scout's VM-size trend does not
-#          transfer (bigger AWS VMs also have more memory)
+# beta source ("combined" = Scout-informed, "local" = local data only).
+# Evidence: scripts/transfer_trend_tests.py (data/models/transfer_trends/report.json)
+#   size   LogReg memory → "combined" (Scout-informed).  DESIGN CHOICE made
+#          after the fixed-rule tests, whose literal outcome was "local": the
+#          rule could not compare the two in the scarce test because local data
+#          had no size trend there — where Scout's trend alone cut the memory
+#          error by 106 MB (11 groups).  With full local data the Scout-informed
+#          rate equals the local one (0.362 vs 0.362; +5 MB in test S2), so
+#          predictions are unchanged today and Scout's trend becomes the
+#          automatic fallback when local data cannot show a trend.
+#   cores  K-Means, all targets → "local"; Scout's VM-size trend does not
+#          transfer (bigger AWS VMs also have more memory) and was clearly worse.
 # Everything else beyond the range keeps the model's own prediction.
 TREND_POLICY: dict[str, dict[str, dict[str, str]]] = {
-    "size": {"logreg": {"mem_mb_p95_max": "local", "mem_mb_peak_max": "local"}},
+    "size": {"logreg": {"mem_mb_p95_max": "combined", "mem_mb_peak_max": "combined"}},
     "cores": {"kmeans": {target: "local" for target in m.TARGETS}},
 }
 TREND_CHOICES: dict[str, dict] = {
     "policy": TREND_POLICY,
-    # same cases with the Scout-informed beta (for comparison)
-    "scout_informed": {
-        axis: {wl: dict.fromkeys(targets, "combined") for wl, targets in by_wl.items()}
+    # the fixed rule's literal outcome: local trends only (for comparison)
+    "local_only": {
+        axis: {wl: dict.fromkeys(targets, "local") for wl, targets in by_wl.items()}
         for axis, by_wl in TREND_POLICY.items()
     },
     "off": {},
 }
+TREND_SOURCE_LABELS = {"combined": "Scout-informed", "local": "local"}
 
 
 @dataclass
@@ -341,7 +348,8 @@ class ResourcePredictor:
             else:
                 anchor["cores_per_driver"] = x_max
             factor *= (x / x_max) ** beta
-            applied.append(f"{axis}^{beta:.2f} {source} trend from {x_max:g} to {x:g}")
+            label = TREND_SOURCE_LABELS.get(source, source)
+            applied.append(f"{axis}^{beta:.2f} {label} trend from {x_max:g} to {x:g}")
         if not applied:
             return float(value), float(value + margin)
         anchor_df = m.add_derived(pd.DataFrame([anchor]))[self.features]

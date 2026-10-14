@@ -275,6 +275,30 @@ def test_size_trend_only_for_logreg_memory(model_dir):
     assert not res.source["cpu_cores_p95"].endswith("+trend")
 
 
+def test_size_trend_is_scout_informed_by_default(model_dir):
+    p = pr.ResourcePredictor.load(str(model_dir), "rf")
+    assert pr.TREND_POLICY["size"]["logreg"]["mem_mb_p95_max"] == "combined"
+    assert pr.TREND_POLICY["cores"]["kmeans"]["mem_mb_p95_max"] == "local"
+    res = p.predict(_req(dataset_mb=400, num_workers=1))
+    assert any("Scout-informed trend" in n for n in res.notes)
+
+
+def test_scout_trend_is_the_fallback_without_local_trend(model_dir):
+    p = pr.ResourcePredictor.load(str(model_dir), "rf")
+    off = pr.ResourcePredictor.load(str(model_dir), "rf", trends="off")
+    entry = p.card["growth_trends"]["size"]["logreg"]["mem_mb_p95_max"]
+    entry["local"] = None  # no local size trend, Scout only (as in the scarce test)
+    entry["combined"] = {"beta": 0.5, "scout_weight": 1.0, "source": "scout"}
+    x_max = entry["x_max"]
+    res = p.predict(_req(dataset_mb=4 * x_max, num_workers=1))
+    at_anchor = off.predict(_req(dataset_mb=x_max, num_workers=1))
+    assert res.mem_mb_p95_max == pytest.approx(at_anchor.mem_mb_p95_max * 4**0.5)
+    local_only = pr.ResourcePredictor.load(str(model_dir), "rf", trends="local_only")
+    local_only.card = p.card  # same edited card: the local trend is missing
+    kept = local_only.predict(_req(dataset_mb=4 * x_max, num_workers=1))
+    assert any("no local size trend available" in n for n in kept.notes)
+
+
 def test_trends_off_and_unknown_choice(model_dir):
     off = pr.ResourcePredictor.load(str(model_dir), "rf", trends="off")
     res = off.predict(_req(dataset_mb=400, num_workers=1))

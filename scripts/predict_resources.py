@@ -21,7 +21,7 @@
 #   --iterations N       planned iterations      --features N
 #   --k N                K-Means clusters (default 0 = not K-Means)
 #   --thread-cap N       BLAS/OpenMP threads (default: same as cores)
-#   --trends NAME        policy (default) | scout_informed | off — growth trends
+#   --trends NAME        policy (default) | local_only | off — growth trends
 #                        beyond the measured range (predictor.TREND_POLICY)
 #   --json               JSON output instead of a table
 # =============================================================================
