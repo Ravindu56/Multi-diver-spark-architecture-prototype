@@ -67,8 +67,17 @@ SOURCE_NAMES: dict[str, str] = {
     "ridge": "local_ridge",
     "ridge_wl": "local_ridge_wl",
     "rf": "local_rf",
+    "rf_wl": "local_rf_wl",
 }
 MODEL_CHOICES = ["best_cv", *SOURCE_NAMES]
+
+# "best_cv" = the family with the lowest out-of-fold MAE among BEST_CV_FAMILIES,
+# except where FAMILY_POLICY fixes the family by a pre-registered test:
+#   CPU → rf_wl (forest per workload): scripts/per_workload_rf_test.py showed a
+#   single forest answers K-Means jobs beyond the K-Means range from LogReg runs
+#   (T3: CPU p95 MAE 6.35 → 0.47 cores) while in-range accuracy is not worse.
+BEST_CV_FAMILIES = ("lookup", "ridge", "ridge_wl", "rf")
+FAMILY_POLICY: dict[str, str] = {"cpu_cores_p95": "rf_wl", "cpu_cores_mean": "rf_wl"}
 
 # Growth trends used BEYOND the measured range: axis → workload → target →
 # beta source.  Decided by the fixed rules of scripts/transfer_trend_tests.py
@@ -156,13 +165,15 @@ def _fmt(v: float) -> str:
 
 
 def _pick_family(card: dict, target: str, model: str) -> str:
-    """'best_cv' = the family with the lowest out-of-fold MAE for this target."""
+    """'best_cv' = FAMILY_POLICY, else the lowest out-of-fold MAE among BEST_CV_FAMILIES."""
     if model != "best_cv":
         if model not in SOURCE_NAMES:
             raise ValueError(f"unknown model {model!r}; choose from {MODEL_CHOICES}")
         return model
     cv = card["choices"][target]["cv_uncertainty"]
-    return min(SOURCE_NAMES, key=lambda fam: cv[fam]["mae"])
+    if target in FAMILY_POLICY and FAMILY_POLICY[target] in cv:
+        return FAMILY_POLICY[target]
+    return min(BEST_CV_FAMILIES, key=lambda fam: cv[fam]["mae"])
 
 
 class ResourcePredictor:

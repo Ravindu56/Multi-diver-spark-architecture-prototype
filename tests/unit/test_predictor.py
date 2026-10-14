@@ -169,7 +169,11 @@ def test_best_cv_picks_lowest_out_of_fold_error(model_dir):
     p = pr.ResourcePredictor.load(str(model_dir))
     for target in m.TARGETS:
         cv = p.card["choices"][target]["cv_uncertainty"]
-        assert p.families[target] == min(pr.SOURCE_NAMES, key=lambda f: cv[f]["mae"])
+        expected = pr.FAMILY_POLICY.get(target) or min(
+            pr.BEST_CV_FAMILIES, key=lambda f: cv[f]["mae"]
+        )
+        assert p.families[target] == expected
+    assert p.families["cpu_cores_p95"] == "rf_wl"  # forest per workload for CPU
 
 
 # ── request checks and domain flags ───────────────────────────

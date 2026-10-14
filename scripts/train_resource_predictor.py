@@ -7,7 +7,9 @@
 # ------------------------------
 # For each target (models.TARGETS: CPU p95 and mean per driver, memory p95 and
 # peak of the largest driver per run) this script:
-#   Models: lookup, ridge (shared slopes), ridge_wl (per-workload slopes), rf.
+#   Models: lookup, ridge (shared slopes), ridge_wl (per-workload slopes), rf,
+#   rf_wl (the forest fitted per workload inside one model; see
+#   scripts/per_workload_rf_test.py).
 #   1. runs leave-one-configuration-out CV on TRAIN+VAL: every configuration
 #      group is predicted by models trained on all other groups,
 #   2. picks Ridge alpha and RF depth/leaf size by CV MAE,
@@ -208,6 +210,12 @@ def select_and_train(
         f"rf|{p['max_depth']}|{p['min_samples_leaf']}": (lambda p=p: m.make_rf(**p))
         for p in m.RF_GRID
     }
+    candidates |= {
+        f"rf_wl|{p['max_depth']}|{p['min_samples_leaf']}": (
+            lambda p=p: m.PerWorkloadModel(m.make_rf(**p))
+        )
+        for p in m.RF_GRID
+    }
     oof_all = m.group_cv_predictions(trval, target, candidates, features=features)
     cand_mae = (
         oof_all.assign(ae=(oof_all["predicted"] - oof_all["actual"]).abs())
@@ -216,7 +224,7 @@ def select_and_train(
     )
     best = {
         family: cand_mae[[c for c in cand_mae.index if c.split("|")[0] == family]].idxmin()
-        for family in ("lookup", "ridge", "ridge_wl", "rf")
+        for family in m.MODEL_FAMILIES
     }
     factories = {family: candidates[key] for family, key in best.items()}
     oof = oof_all[oof_all["model"].isin(best.values())].replace(
@@ -229,6 +237,8 @@ def select_and_train(
     }
     # does a per-workload slope improve on the shared-slope Ridge?
     uncertainty["ridge_wl_vs_ridge"] = m.group_bootstrap(oof, "ridge_wl", baseline="ridge")
+    # does fitting the forest per workload change in-range accuracy?
+    uncertainty["rf_wl_vs_rf"] = m.group_bootstrap(oof, "rf_wl", baseline="rf")
 
     h = holdout[holdout[target].notna()] if holdout is not None else None
     rows, preds, fitted, margins_by_model = [], [], {}, {}

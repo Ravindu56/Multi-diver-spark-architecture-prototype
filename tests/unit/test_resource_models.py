@@ -143,14 +143,14 @@ def test_training_script_end_to_end(tmp_path, monkeypatch):
     metrics = trp.main(
         ["--drivers", str(path), "--out-dir", str(out), "--training-set", "uncapped"]
     )
-    assert set(metrics["model"]) == {"lookup", "ridge", "ridge_wl", "rf"}
+    assert set(metrics["model"]) == set(m.MODEL_FAMILIES)
     assert set(metrics["target"]) == set(m.TARGETS)
     card = json.loads((out / "model_card.json").read_text())
     assert card["rows"]["rows_dropped_unknown_inputs"] == 2
     assert card["rows"]["workloads_dropped_entirely"] == ["wordcount"]
     assert (out / "mem_mb_peak_max__rf.joblib").exists()
     cv = pd.read_csv(out / "cv_metrics.csv")
-    assert set(cv["model"]) == {"lookup", "ridge", "ridge_wl", "rf"}
+    assert set(cv["model"]) == set(m.MODEL_FAMILIES)
     sel = card["choices"]["mem_mb_peak_max"]["selected"]
     assert sel["ridge"].startswith("ridge|") and sel["rf"].startswith("rf|")
     assert "mae_diff_ci95" in card["choices"]["mem_mb_peak_max"]["cv_uncertainty"]["rf"]
@@ -307,3 +307,57 @@ def test_ridge_wl_captures_per_workload_slopes():
     mae_shared = m.regression_metrics(df["mem_mb_peak"], shared.predict(df[m.FEATURES]))["mae"]
     mae_wl = m.regression_metrics(df["mem_mb_peak"], per_wl.predict(df[m.FEATURES]))["mae"]
     assert mae_wl < 0.5 * mae_shared
+
+
+# ── per-workload model ────────────────────────────────────────
+
+
+def _two_workloads():
+    """K-Means measured at small sizes, LogReg at large sizes with much higher CPU."""
+    rows = []
+    for wl, sizes, level in (("kmeans", (25, 50, 100), 5.0), ("logreg", (100, 200, 400), 15.0)):
+        for size in sizes:
+            for cores in (1, 2, 4):
+                rows.append(
+                    {
+                        "workload_type": wl,
+                        "dataset_mb": size,
+                        "num_workers": 1,
+                        "cores_per_driver": cores,
+                        "heap_mb_per_driver": 3072,
+                        "cpu_cores_p95": level + 0.1 * cores,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_per_workload_model_never_borrows_another_workload():
+    df = _two_workloads()
+    big_kmeans = df[df["workload_type"] == "logreg"].assign(workload_type="kmeans")
+    per_wl = m.make_rf_wl(5, 1, n_estimators=20).fit(df[m.FEATURES], df["cpu_cores_p95"])
+    # K-Means sizes beyond the K-Means range are answered from K-Means rows only
+    assert per_wl.predict(big_kmeans[m.FEATURES]) == pytest.approx(5.2, abs=0.3)
+    assert set(per_wl.models_) == {"kmeans", "logreg"}
+
+
+def test_per_workload_model_routes_rows_and_refuses_unseen_workloads():
+    df = _two_workloads()
+    per_wl = m.make_rf_wl(5, 1, n_estimators=20).fit(df[m.FEATURES], df["cpu_cores_p95"])
+    mixed = pd.concat([df.head(2), df.tail(2)])
+    pred = per_wl.predict(mixed[m.FEATURES])
+    assert pred[:2] == pytest.approx(5.1, abs=0.3) and pred[2:] == pytest.approx(15.4, abs=0.3)
+    with pytest.raises(ValueError, match="no per-workload model"):
+        per_wl.predict(df[m.FEATURES].head(1).assign(workload_type="wordcount"))
+
+
+def test_per_workload_model_is_one_saveable_object(tmp_path):
+    import joblib
+    from sklearn.base import clone
+
+    df = _two_workloads()
+    per_wl = m.make_rf_wl(5, 1, n_estimators=10).fit(df[m.FEATURES], df["cpu_cores_p95"])
+    path = tmp_path / "cpu.joblib"
+    joblib.dump(per_wl, path)
+    back = joblib.load(path)
+    assert back.predict(df[m.FEATURES]) == pytest.approx(per_wl.predict(df[m.FEATURES]))
+    assert clone(per_wl).get_params()["base"] is not None  # scikit-learn compatible

@@ -29,6 +29,9 @@
 #   ridge     regularised linear regression on scaled / one-hot features
 #   ridge_wl  the same with a separate slope per workload (interactions)
 #   rf      small random forest (non-linear comparator)
+#   rf_wl   the same forest fitted separately per workload, inside ONE model
+#           object, so a workload never borrows another workload's data when
+#           a request lies outside its own measured range
 #
 # Preprocessing lives inside each scikit-learn Pipeline, so scaling and
 # encoding are fitted on training rows only (no leakage).
@@ -42,7 +45,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
@@ -135,6 +138,8 @@ TARGETS: dict[str, str] = {
     "cpu_cores_mean": "cores",  # per driver
     "mem_mb_peak_max": "MB",  # largest driver of the run
 }
+
+MODEL_FAMILIES = ("lookup", "ridge", "ridge_wl", "rf", "rf_wl")
 
 RIDGE_ALPHAS = [0.1, 1.0, 10.0, 100.0]
 RF_GRID = [{"max_depth": d, "min_samples_leaf": leaf} for d in (3, 5, 8) for leaf in (2, 5)]
@@ -229,6 +234,46 @@ class WorkloadInteractions(BaseEstimator, TransformerMixin):
         )
         inter = np.column_stack([onehot[:, [i]] * z for i in range(onehot.shape[1])])
         return np.hstack([onehot, z, inter])
+
+
+class PerWorkloadModel(BaseEstimator, RegressorMixin):
+    """
+    One copy of `base` per workload, each fitted on that workload's rows only;
+    predict() routes every row to the copy of its workload.  Without it, a
+    single forest answers e.g. a K-Means job with more data per driver than
+    any K-Means run from LogReg runs of that size.  A workload not seen in
+    fit() is refused (the predictor reports such requests as unsupported).
+    """
+
+    def __init__(self, base=None):
+        self.base = base
+
+    def fit(self, X: pd.DataFrame, y) -> PerWorkloadModel:
+        y = np.asarray(y, dtype=float)
+        workloads = X["workload_type"].to_numpy()
+        self.models_ = {
+            wl: clone(self.base).fit(X[workloads == wl], y[workloads == wl])
+            for wl in np.unique(workloads)
+        }
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        workloads = X["workload_type"].to_numpy()
+        unseen = sorted(set(workloads) - set(self.models_))
+        if unseen:
+            raise ValueError(f"no per-workload model for {unseen}")
+        out = np.empty(len(X))
+        for wl in np.unique(workloads):
+            mask = workloads == wl
+            out[mask] = self.models_[wl].predict(X[mask])
+        return out
+
+
+def make_rf_wl(
+    max_depth: int = 5, min_samples_leaf: int = 2, seed: int = 0, n_estimators: int = 200
+) -> PerWorkloadModel:
+    """make_rf fitted per workload (see PerWorkloadModel)."""
+    return PerWorkloadModel(make_rf(max_depth, min_samples_leaf, seed, n_estimators))
 
 
 def make_ridge_wl(alpha: float = 1.0, numeric: list[str] = NUMERIC_FEATURES) -> Pipeline:
