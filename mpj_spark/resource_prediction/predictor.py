@@ -1,0 +1,259 @@
+# =============================================================================
+# mpj_spark/resource_prediction/predictor.py
+# Phase 6 — pre-launch resource prediction for one job (Objective 2b → 2c)
+#
+# PURPOSE
+# -------
+# The single entry point for asking the trained models
+# "how much CPU and memory will EACH driver of this job use?"
+#
+#   predictor = ResourcePredictor.load("data/models/local_capped")
+#   result = predictor.predict(PredictionRequest(
+#       workload_type="logreg", dataset_mb=100, num_workers=2,
+#       cores_per_driver=4, heap_mb_per_driver=6144,
+#       iterations=30, num_features=20))
+#
+# A PredictionResult holds, PER DRIVER:
+#   cpu_cores_mean, cpu_cores_p95, mem_mb_peak      point predictions
+#   *_upper                                         prediction + empirical margin
+# and where the numbers come from (source per target, training set, model
+# version), plus whether the request lies outside the measured domain
+# (out_of_domain + reasons) or is not covered at all (status "unsupported").
+#
+# RULES
+# -----
+#   * pre-launch inputs only; `iterations` is the PLANNED iteration count
+#   * missing / invalid mandatory inputs are rejected (ValueError)
+#   * inputs outside the values measured for that workload are flagged,
+#     never silently trusted; values between measured ones become notes
+#   * no numbers are invented for workloads without training data — they
+#     come back "unsupported" so the allocator uses its static fallback
+#   * this module predicts DEMAND; turning demand into Docker limits, with a
+#     safety factor and host-total checks, is the allocator's job
+#
+# Upper margins: per workload, the q-quantile of out-of-fold residuals from
+# leave-one-configuration-out CV on train+val (never the test split); see
+# scripts/train_resource_predictor.py.
+# =============================================================================
+
+from __future__ import annotations
+
+import json
+import math
+import os
+from dataclasses import asdict, dataclass, field
+
+import joblib
+import pandas as pd
+import sklearn
+
+from mpj_spark.resource_prediction import models as m
+
+# model card layout this module understands (written by the training script)
+CARD_SCHEMA_VERSION = 1
+
+# model family in the model card → provenance name reported to the allocator
+SOURCE_NAMES: dict[str, str] = {
+    "lookup": "profile_lookup",
+    "ridge": "local_ridge",
+    "ridge_wl": "local_ridge_wl",
+    "rf": "local_rf",
+}
+MODEL_CHOICES = ["best_cv", *SOURCE_NAMES]
+
+
+@dataclass
+class PredictionRequest:
+    """One job, described with pre-launch inputs only (values per driver)."""
+
+    workload_type: str
+    dataset_mb: float
+    num_workers: int  # number of Spark drivers (MPI ranks >= 1)
+    cores_per_driver: float
+    heap_mb_per_driver: float
+    iterations: int | None = None  # planned, not realised after early stopping
+    num_features: int | None = None
+    num_clusters: int = 0  # K-Means k; ignored (0) for other workloads
+    thread_cap: int | None = None  # BLAS/OpenMP threads; None = same as cores
+
+    def feature_row(self) -> dict:
+        row = asdict(self)
+        row.pop("thread_cap")
+        if row["workload_type"] != "kmeans":
+            row["num_clusters"] = 0
+        return row
+
+
+@dataclass
+class PredictionResult:
+    """Predicted demand of EACH driver of the job, with provenance."""
+
+    status: str  # "ok" | "out_of_domain" | "unsupported"
+    workload_type: str
+    num_workers: int
+    cpu_cores_mean: float | None = None
+    cpu_cores_p95: float | None = None
+    mem_mb_peak: float | None = None
+    cpu_cores_mean_upper: float | None = None
+    cpu_cores_p95_upper: float | None = None
+    mem_mb_peak_upper: float | None = None
+    upper_quantile: float | None = None
+    source: dict = field(default_factory=dict)  # target → provenance name
+    out_of_domain: bool = False
+    reasons: list = field(default_factory=list)  # why out of domain / unsupported
+    notes: list = field(default_factory=list)  # in-domain remarks
+    training_set: str | None = None
+    model_version: str | None = None
+    schema_version: int = CARD_SCHEMA_VERSION
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _fmt(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else f"{v:.2f}"
+
+
+def _pick_family(card: dict, target: str, model: str) -> str:
+    """'best_cv' = the family with the lowest out-of-fold MAE for this target."""
+    if model != "best_cv":
+        if model not in SOURCE_NAMES:
+            raise ValueError(f"unknown model {model!r}; choose from {MODEL_CHOICES}")
+        return model
+    cv = card["choices"][target]["cv_uncertainty"]
+    return min(SOURCE_NAMES, key=lambda fam: cv[fam]["mae"])
+
+
+class ResourcePredictor:
+    """Trained per-driver CPU / memory models plus the checks around them."""
+
+    def __init__(self, card: dict, models: dict, families: dict[str, str]):
+        self.card = card
+        self.models = models
+        self.families = families
+        self.features = card["features"]
+        self.valid = card["valid_inputs"]
+
+    @classmethod
+    def load(cls, model_dir: str, model: str = "best_cv") -> ResourcePredictor:
+        """Load the model card and one fitted model per target from model_dir."""
+        with open(os.path.join(model_dir, "model_card.json")) as fh:
+            card = json.load(fh)
+        if card.get("card_schema_version") != CARD_SCHEMA_VERSION:
+            raise ValueError(
+                f"model card in {model_dir!r} has layout "
+                f"{card.get('card_schema_version')!r}, expected {CARD_SCHEMA_VERSION}; "
+                "re-run scripts/train_resource_predictor.py"
+            )
+        families = {t: _pick_family(card, t, model) for t in m.TARGETS}
+        models = {
+            t: joblib.load(os.path.join(model_dir, f"{t}__{fam}.joblib"))
+            for t, fam in families.items()
+        }
+        return cls(card, models, families)
+
+    # ── checks ────────────────────────────────────────────────────────────
+
+    def _empty_result(self, req: PredictionRequest, status: str) -> PredictionResult:
+        return PredictionResult(
+            status=status,
+            workload_type=req.workload_type,
+            num_workers=req.num_workers,
+            upper_quantile=self.card["upper_quantile"],
+            source={t: SOURCE_NAMES[f] for t, f in self.families.items()},
+            training_set=self.card["training_set"],
+            model_version=self.card["model_version"],
+        )
+
+    def _validate(self, req: PredictionRequest) -> dict:
+        """Feature row of a supported workload; ValueError on missing / invalid input."""
+        row = req.feature_row()
+        problems = []
+        for col in self.features:
+            if col in m.CATEGORICAL_FEATURES:
+                continue
+            v = row.get(col)
+            if v is None or not math.isfinite(float(v)):
+                problems.append(f"{col} is missing")
+            elif col == "num_clusters":
+                if req.workload_type == "kmeans" and v < 1:
+                    problems.append("num_clusters (k) must be >= 1 for kmeans")
+            elif v <= 0:
+                problems.append(f"{col} must be > 0 (got {v})")
+        if problems:
+            raise ValueError("invalid pre-launch input: " + "; ".join(problems))
+        return {col: row[col] for col in self.features}
+
+    def _domain(self, req: PredictionRequest, row: dict, res: PredictionResult) -> None:
+        """Flag inputs outside the measured domain of this workload."""
+        wl = req.workload_type
+        for col, dom in self.valid[wl].items():
+            v = float(row[col])
+            if v < dom["min"] or v > dom["max"]:
+                res.reasons.append(
+                    f"{col}={_fmt(v)} outside the measured range "
+                    f"{_fmt(dom['min'])}-{_fmt(dom['max'])} for {wl}"
+                )
+            elif "values" in dom and v not in dom["values"]:
+                measured = ", ".join(_fmt(x) for x in dom["values"])
+                res.notes.append(
+                    f"{col}={_fmt(v)} was not measured for {wl} (measured: {measured}); "
+                    "the model interpolates"
+                )
+        cap = req.thread_cap if req.thread_cap is not None else req.cores_per_driver
+        policy = self.card.get("thread_cap_policy")
+        if policy == "equals_cores" and cap != req.cores_per_driver:
+            res.reasons.append(
+                f"thread_cap={_fmt(cap)} differs from cores_per_driver="
+                f"{_fmt(req.cores_per_driver)}; all training runs used thread cap = cores"
+            )
+        elif policy == "uncapped" and req.thread_cap is not None:
+            res.reasons.append("thread cap requested, but the models were trained on uncapped runs")
+        trained = self.card.get("versions", {}).get("scikit-learn")
+        if trained and trained != sklearn.__version__:
+            res.notes.append(
+                f"models saved with scikit-learn {trained}, running {sklearn.__version__}"
+            )
+        res.out_of_domain = bool(res.reasons)
+        res.status = "out_of_domain" if res.out_of_domain else "ok"
+
+    # ── prediction ────────────────────────────────────────────────────────
+
+    def predict(self, request: PredictionRequest) -> PredictionResult:
+        return self.predict_many([request])[0]
+
+    def predict_many(self, requests: list[PredictionRequest]) -> list[PredictionResult]:
+        """One result per request; supported requests are predicted in one batch."""
+        results, rows, idx = [], [], []
+        for i, req in enumerate(requests):
+            if req.workload_type not in self.valid:
+                res = self._empty_result(req, "unsupported")
+                res.source = {t: "none" for t in self.families}
+                res.reasons.append(
+                    f"no training data for workload {req.workload_type!r} in the "
+                    f"{self.card['training_set']!r} training set; use the allocator's "
+                    "static fallback profile"
+                )
+                results.append(res)
+                continue
+            row = self._validate(req)
+            res = self._empty_result(req, "ok")
+            self._domain(req, row, res)
+            results.append(res)
+            rows.append(row)
+            idx.append(i)
+        if not rows:
+            return results
+        X = pd.DataFrame(rows, columns=self.features)
+        for target, model in self.models.items():
+            margins = self.card["choices"][target]["upper_margins"][self.families[target]]
+            for i, value in zip(idx, model.predict(X), strict=True):
+                res = results[i]
+                if value < 0:  # linear models can dip below zero; demand cannot
+                    res.notes.append(f"{target} prediction {value:.3f} clipped to 0")
+                    value = 0.0
+                setattr(res, target, float(value))
+                setattr(
+                    res, f"{target}_upper", float(value + m.margin_for(margins, res.workload_type))
+                )
+        return results

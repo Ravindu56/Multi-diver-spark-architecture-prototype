@@ -275,6 +275,28 @@ def upper_margin(y_true, y_pred, quantile: float = 0.9) -> float:
     return float(max(np.quantile(resid, quantile), 0.0))
 
 
+# a workload gets its own margin only with at least this many out-of-fold rows
+MIN_ROWS_WORKLOAD_MARGIN = 20
+
+
+def upper_margins(oof: pd.DataFrame, quantile: float = 0.9) -> dict[str, float]:
+    """
+    Upper margins per workload from out-of-fold rows (columns workload_type,
+    actual, predicted), plus "pooled" over all rows.  Workloads differ in how
+    noisy they are, so one shared margin is too wide for one and too narrow
+    for the other; a workload with too few rows uses the pooled margin.
+    """
+    out = {"pooled": upper_margin(oof["actual"], oof["predicted"], quantile)}
+    for wl, g in oof.groupby("workload_type"):
+        if len(g) >= MIN_ROWS_WORKLOAD_MARGIN:
+            out[wl] = upper_margin(g["actual"], g["predicted"], quantile)
+    return out
+
+
+def margin_for(margins: dict[str, float], workload: str) -> float:
+    return margins.get(workload, margins["pooled"])
+
+
 # =============================================================================
 # Leave-one-configuration-out cross-validation (train+val only; test untouched)
 # =============================================================================

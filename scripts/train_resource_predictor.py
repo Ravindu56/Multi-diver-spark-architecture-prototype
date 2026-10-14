@@ -12,8 +12,14 @@
 #   2. picks Ridge alpha and RF depth/leaf size by CV MAE,
 #   3. reports CV errors with 95 % group-bootstrap intervals and paired
 #      differences against the lookup baseline,
-#   4. calibrates the empirical upper margin from out-of-fold residuals,
+#   4. calibrates the empirical upper margin PER WORKLOAD from out-of-fold
+#      residuals (never from TEST),
 #   5. refits the chosen models on TRAIN+VAL and evaluates ONCE on TEST.
+#
+# The model card also records, per workload, the input values the models
+# were trained on (valid_inputs) and the thread-cap rule of the training
+# runs; mpj_spark/resource_prediction/predictor.py uses both to flag
+# requests outside the measured domain.
 #
 # TRAINING SETS (never mixed; see models.TRAINING_SETS)
 #   capped    thread-capped runs + workload design inputs   (default)
@@ -25,7 +31,7 @@
 #   cv_metrics.csv       out-of-fold CV metrics per target × model × workload
 #   predictions_test.csv per-row test predictions and upper bounds
 #   <target>__<model>.joblib   fitted models (refit on train+val)
-#   model_card.json      data, features, ranges, choices, versions
+#   model_card.json      data, features, valid inputs, margins, choices, versions
 #
 #   python scripts/train_resource_predictor.py
 #
@@ -59,6 +65,10 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from mpj_spark.resource_prediction import models as m  # noqa: E402
+from mpj_spark.resource_prediction.predictor import CARD_SCHEMA_VERSION  # noqa: E402
+
+# inputs with at most this many distinct training values also list them
+_MAX_LISTED_VALUES = 12
 
 
 def _parse_args(argv=None):
@@ -140,14 +150,14 @@ def select_and_train(
     # does a per-workload slope improve on the shared-slope Ridge?
     uncertainty["ridge_wl_vs_ridge"] = m.group_bootstrap(oof, "ridge_wl", baseline="ridge")
 
-    rows, preds, fitted = [], [], {}
+    rows, preds, fitted, margins_by_model = [], [], {}, {}
     for name, factory in factories.items():
-        # upper margin from out-of-fold residuals of the selected configuration
-        sel = oof[oof["model"] == name]
-        margin = m.upper_margin(sel["actual"], sel["predicted"], q)
+        # per-workload upper margins from out-of-fold residuals of the selection
+        margins = m.upper_margins(oof[oof["model"] == name], q)
+        margins_by_model[name] = margins
         # final model on TRAIN+VAL, evaluated once on TEST
         model, test_pred = _fit_predict(factory(), trval, test, target, features)
-        upper = test_pred + margin
+        upper = test_pred + np.array([m.margin_for(margins, w) for w in test["workload_type"]])
         fitted[name] = model
         for wl, idx in [("all", test.index)] + [
             (w, g.index) for w, g in test.groupby("workload_type")
@@ -159,7 +169,7 @@ def select_and_train(
                     "unit": m.TARGETS[target],
                     "model": name,
                     "workload": wl,
-                    "upper_margin": margin,
+                    "upper_margin": np.nan if wl == "all" else m.margin_for(margins, wl),
                     **m.regression_metrics(test[target][mask], test_pred[mask], upper[mask]),
                 }
             )
@@ -174,6 +184,7 @@ def select_and_train(
         "selected": best,
         "cv_mae_by_candidate": cand_mae.round(4).to_dict(),
         "cv_uncertainty": uncertainty,
+        "upper_margins": margins_by_model,
         "n_trainval_rows": len(trval),
         "n_trainval_groups": int(trval["config_group"].nunique()),
         "n_test_rows": len(test),
@@ -181,6 +192,31 @@ def select_and_train(
         "fitted": fitted,
     }
     return rows, cv_rows, preds, choices
+
+
+def valid_inputs(df: pd.DataFrame, features: list[str]) -> dict:
+    """Per workload: min / max (and the distinct values, if few) of each numeric input."""
+    out = {}
+    for wl, g in df.groupby("workload_type"):
+        out[wl] = {}
+        for col in features:
+            if col in m.CATEGORICAL_FEATURES:
+                continue
+            vals = sorted(float(v) for v in g[col].dropna().unique())
+            entry = {"min": vals[0], "max": vals[-1]}
+            if len(vals) <= _MAX_LISTED_VALUES:
+                entry["values"] = vals
+            out[wl][col] = entry
+    return out
+
+
+def thread_cap_policy(df: pd.DataFrame) -> str:
+    """How the thread cap related to the cores in the training runs."""
+    if "thread_cap" not in df or df["thread_cap"].isna().all():
+        return "uncapped"
+    if (df["thread_cap"] == df["cores_per_driver"]).all():
+        return "equals_cores"
+    return "mixed"
 
 
 def main(argv=None):
@@ -211,7 +247,10 @@ def main(argv=None):
 
     with open(args.drivers, "rb") as fh:
         data_sha = hashlib.sha256(fh.read()).hexdigest()
+    trval = df[df["split"].isin(["train", "val"])]
     card = {
+        "card_schema_version": CARD_SCHEMA_VERSION,
+        "model_version": f"{args.training_set}-{data_sha[:12]}",
         "stage": "local_only_baselines",
         "training_set": args.training_set,
         "training_set_description": m.TRAINING_SETS[args.training_set]["description"],
@@ -223,6 +262,9 @@ def main(argv=None):
         "thread_caps_seen": sorted(df["thread_cap"].dropna().unique().tolist())
         if "thread_cap" in df
         else [],
+        "thread_cap_policy": thread_cap_policy(df),
+        "valid_inputs": valid_inputs(trval, features),
+        "valid_inputs_note": "train+val rows the deployed models were fitted on",
         "valid_ranges": {c: [float(df[c].min()), float(df[c].max())] for c in features[1:]}
         | {"workload_type": sorted(df["workload_type"].unique())},
         "rows_by_split": df["split"].value_counts().to_dict(),
@@ -270,6 +312,13 @@ def main(argv=None):
                 f"   {target:15s} {name:17s} MAE {u['mae']:.3f} "
                 f"[{u['mae_ci95'][0]:.3f}, {u['mae_ci95'][1]:.3f}]{diff}"
             )
+    margin_rows = [
+        {"target": t, "model": name, **margins}
+        for t, ch in card_targets.items()
+        for name, margins in ch["upper_margins"].items()
+    ]
+    print(f"── upper margins per workload (q = {args.upper_quantile}, out-of-fold) ──")
+    print(pd.DataFrame(margin_rows).round(3).to_string(index=False))
     print("── final evaluation on TEST ──")
     print(show.round(3).to_string(index=False))
     print(f"[train] outputs written to {args.out_dir}")
