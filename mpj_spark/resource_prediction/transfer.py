@@ -280,3 +280,93 @@ def learning_curve(
                     }
                 )
     return pd.DataFrame(rows)
+
+
+# =============================================================================
+# Option A — transfer of the DATA-SIZE TREND (extrapolation beyond local sizes)
+# =============================================================================
+#
+# Scout jobs are larger (769–1537 MiB) than any local job, so the one thing
+# Scout may know that local data does not is how demand GROWS with data size.
+# The trend is transferred as an elasticity β (demand ∝ size^β), estimated
+# within each Scout VM type (fixed effects), and applied only to requests with
+# more data per driver than measured locally:
+#
+#   prediction = base(anchor at the largest local shard) × (shard / s_max)^β
+#
+# Scout records input sizes for LogReg only (K-Means rows have no size), so
+# the trend exists for LogReg only.  The fair comparison is the same
+# anchor-and-scale with β estimated from LOCAL data.
+
+# local target → Scout column used for the size trend (same mapping as above)
+SIZE_TREND_SOURCE: dict[str, str] = {
+    "cpu_cores_p95": "host_cpu_busy_p95_cores",
+    "mem_mb_p95_max": "host_mem_app_peak_mib",
+    "cpu_cores_mean": "cpu_cores_mean",  # derived from busy % × vCPUs
+    "mem_mb_peak_max": "host_mem_app_peak_mib",
+}
+
+
+def _within_slope(x: np.ndarray, y: np.ndarray, groups: np.ndarray) -> tuple[float, int]:
+    """Least-squares slope of y on x after removing each group's mean (fixed effects)."""
+    df = pd.DataFrame({"x": x, "y": y, "g": groups})
+    df = df[df.groupby("g")["x"].transform("nunique") >= 2]
+    if df.empty:
+        return float("nan"), 0
+    dx = df["x"] - df.groupby("g")["x"].transform("mean")
+    dy = df["y"] - df.groupby("g")["y"].transform("mean")
+    denom = float((dx**2).sum())
+    return (float((dx * dy).sum()) / denom if denom > 0 else float("nan")), int(df["g"].nunique())
+
+
+def scout_size_elasticity(scout_hosts: pd.DataFrame, target: str, workload: str) -> dict | None:
+    """β of `target` with respect to input size on Scout single-node hosts, or None."""
+    s = scout_hosts[
+        (scout_hosts["setting"] == SOURCE_SETTING)
+        & (scout_hosts["workload_type"] == workload)
+        & scout_hosts["input_mib"].notna()
+    ].copy()
+    if s.empty:
+        return None
+    s["cpu_cores_mean"] = s["host_cpu_busy_mean_pct"] / 100.0 * s["vcpus_per_host"]
+    y = s[SIZE_TREND_SOURCE[target]].to_numpy(float)
+    ok = y > 0
+    beta, n_groups = _within_slope(
+        np.log(s["input_mib"].to_numpy(float)[ok]), np.log(y[ok]), s["vm_type"].to_numpy()[ok]
+    )
+    if not np.isfinite(beta):
+        return None
+    return {"beta": beta, "vm_types": n_groups, "rows": int(ok.sum())}
+
+
+def local_size_elasticity(df: pd.DataFrame, target: str, workload: str) -> float | None:
+    """β of `target` with respect to data per driver, within configurations that differ only in size."""
+    d = df[(df["workload_type"] == workload) & df[target].notna() & (df[target] > 0)]
+    if d.empty:
+        return None
+    key_cols = [c for c in m.FEATURES + m.DESIGN_FEATURES if c in d and c != "dataset_mb"]
+    key = d[key_cols].astype(str).agg("|".join, axis=1).to_numpy()
+    shard = (d["dataset_mb"] / d["num_workers"]).to_numpy(float)
+    beta, _ = _within_slope(np.log(shard), np.log(d[target].to_numpy(float)), key)
+    return beta if np.isfinite(beta) else None
+
+
+def anchor_and_scale(
+    model, X: pd.DataFrame, features: list[str], s_max: float, beta: float | None
+) -> np.ndarray:
+    """
+    Model prediction, except for rows with more data per driver than s_max:
+    those are predicted at s_max and scaled by (shard / s_max)^beta
+    (beta None = keep the model's own prediction, beta 0 = flat).
+    """
+    pred = model.predict(X[features])
+    shard = (X["dataset_mb"] / X["num_workers"]).to_numpy(float)
+    beyond = shard > s_max
+    if beta is None or not beyond.any():
+        return pred
+    anchor = X.loc[beyond].copy()
+    anchor["dataset_mb"] = s_max * anchor["num_workers"]
+    anchor = m.add_derived(anchor)
+    out = pred.copy()
+    out[beyond] = model.predict(anchor[features]) * (shard[beyond] / s_max) ** beta
+    return out
