@@ -39,6 +39,11 @@
 #             every co-located container on a VM — 4 ranks sharing one
 #             2-vCPU VM would each request local[2], not local[~0.5].
 #
+#   FIX 7  — Disable Spark's console progress bar. Its "[Stage N:> (a + b)
+#             / c]" text goes to stderr with carriage returns and
+#             interleaves with worker log lines when stderr is merged
+#             into stdout (2>&1), producing garbled output.
+#
 # Pre-requisite (run once on your machine):
 #   sudo apt-get install -y libopenblas-dev
 # ================================================================
@@ -147,7 +152,7 @@ def build_spark_session(
 
     heap_str = f"{heap_mb}m"
 
-    # ── FIX 3a: Native BLAS JVM flags ──────────────────────────
+    # ── FIX 3a: Native BLAS JVM flags ──────────────────────────────
     # Forces netlib-java to use the system's native OpenBLAS/MKL library.
     # Without this, all matrix operations in K-Means fall back to
     # pure-JVM F2J BLAS which is ~3-5x slower.
@@ -157,10 +162,12 @@ def build_spark_session(
         "-Dcom.github.fommil.netlib.ARPACK=com.github.fommil.netlib.NativeSystemARPACK"
     )
 
-    # ── FIX 3b: G1GC flags ──────────────────────────────────────
+    # ── FIX 3b: G1GC flags ───────────────────────────────────────────────
     # Configures G1GC explicitly so Spark's GarbageCollectionMetrics
     # can report young/old gen GC events. Removes the WARN:
     # "To enable non-built-in garbage collector(s) List(G1 Concurrent GC)..."
+    # The registered names must equal the JVM collector names Spark reports:
+    # "G1 Young Generation" and "G1 Old Generation".
     gc_flags = (
         "-XX:+UseG1GC "
         "-XX:G1HeapRegionSize=16m "
@@ -196,7 +203,9 @@ def build_spark_session(
             "spark.eventLog.gcMetrics.youngGenerationGarbageCollectors",
             "G1 Young Generation",
         )
-        .config("spark.eventLog.gcMetrics.oldGenerationGarbageCollectors", "G1 Old Gen")
+        .config("spark.eventLog.gcMetrics.oldGenerationGarbageCollectors", "G1 Old Generation")
+        # FIX 7: keep stderr progress bar out of merged logs
+        .config("spark.ui.showConsoleProgress", "false")
         .getOrCreate()
     )
 

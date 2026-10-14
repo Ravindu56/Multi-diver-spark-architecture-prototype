@@ -43,6 +43,7 @@ def _serve(
     num_iterations: int,
     tag_up: int = TAG_ALLREDUCE_UP,
     tag_down: int = TAG_ALLREDUCE_DOWN,
+    label: str = "LogReg",
 ) -> dict[str, Any]:
     """Core synchronous scalar-PS loop.
 
@@ -50,13 +51,18 @@ def _serve(
     compute the row-weighted mean, reply to every worker.  Workers block
     on the reply before their next round, so per-round tag reuse is safe
     (same barrier argument as run_logreg_allreduce_mpi).
+
+    ``label`` only changes the log prefix ("LogReg" or "KMeans"); for
+    K-Means the scalar carried in the "intercept" field is the per-row
+    WCSS, so the round line names it accordingly.
     """
     worker_ranks = list(range(1, num_workers + 1))
     records: list[dict[str, Any]] = []
     final_intercept = 0.0
+    scalar_name = "mean_wcss_per_row" if label == "KMeans" else "intercept"
 
     print(
-        f"  [LogReg Hybrid PS] Serving scalars - {num_workers} workers x "
+        f"  [{label} Hybrid PS] Serving scalars - {num_workers} workers x "
         f"{num_iterations} rounds (dense weights ride the Allreduce channel)"
     )
     t_start = time.perf_counter()
@@ -84,12 +90,12 @@ def _serve(
             }
         )
         print(
-            f"  [LogReg Hybrid PS] round {iteration + 1}/{num_iterations}  "
-            f"intercept={final_intercept:.6f}"
+            f"  [{label} Hybrid PS] round {iteration + 1}/{num_iterations}  "
+            f"{scalar_name}={final_intercept:.6f}"
         )
 
     wall_time = time.perf_counter() - t_start
-    print(f"  [LogReg Hybrid PS] Complete - {num_iterations} rounds in {wall_time:.3f}s")
+    print(f"  [{label} Hybrid PS] Complete - {num_iterations} rounds in {wall_time:.3f}s")
 
     return {
         "weight_vector": None,  # dense weights live on the Allreduce channel
@@ -118,6 +124,7 @@ def run_logreg_hybrid_scalar_ps(
     results_dir: str = "results",
     tag_up: int = TAG_ALLREDUCE_UP,
     tag_down: int = TAG_ALLREDUCE_DOWN,
+    label: str = "LogReg",
 ) -> dict[str, Any]:
     """Root-side hybrid scalar-PS entry point (called in a daemon thread by root_mpi).
 
@@ -131,7 +138,8 @@ def run_logreg_hybrid_scalar_ps(
         num_iterations=num_iterations,
         tag_up=tag_up,
         tag_down=tag_down,
+        label=label,
     )
     csv_path = _write_scalar_csv(result.pop("round_records"), results_dir)
-    print(f"  [LogReg Hybrid PS] Scalar round log : {csv_path}")
+    print(f"  [{label} Hybrid PS] Scalar round log : {csv_path}")
     return result
