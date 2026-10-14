@@ -162,3 +162,95 @@ def test_size_trend_script_end_to_end(tmp_path):
     }
     saved = json.loads((out / "report.json").read_text())
     assert saved["targets"]["cpu_cores_p95"]["scout"]["beta"] == pytest.approx(0.3, abs=1e-6)
+
+
+# ── cores trend and Scout-informed combination ────────────────
+
+
+def _scout_both(size_beta=0.3, cores_beta=0.6):
+    """Hosts varying in input size (LogReg) and in vCPUs within VM family and size label."""
+    rows = []
+    for wl in ("kmeans", "logreg"):
+        for fam, level in (("c", 1.0), ("m", 2.0), ("r", 5.0)):
+            for label, size in (("small", 769.0), ("large", 1537.0)):
+                for vcpus in (2, 4, 8):
+                    y = level * size**size_beta * vcpus**cores_beta
+                    rows.append(
+                        {
+                            "setting": "single_node",
+                            "workload_type": wl,
+                            "vm_type": f"{fam}{vcpus}",
+                            "vm_family": fam,
+                            "datasize_label": label,
+                            "vcpus_per_host": vcpus,
+                            "input_mib": size if wl == "logreg" else np.nan,
+                            "host_cpu_busy_p95_cores": y,
+                            "host_cpu_busy_mean_pct": y,
+                            "host_mem_app_peak_mib": 100 * y,
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def test_scout_cores_elasticity_within_family_and_size():
+    out = t.scout_elasticity(_scout_both(cores_beta=0.6), "cpu_cores_p95", "kmeans", "cores")
+    assert out["beta"] == pytest.approx(0.6, abs=1e-6) and out["groups"] == 6
+
+
+def test_local_cores_elasticity():
+    df = _local()
+    df["cpu_cores_p95"] = (df["num_workers"] + 1) * df["cores_per_driver"] ** 0.6
+    out = t.local_elasticity(df, "cpu_cores_p95", "kmeans", "cores")
+    assert out["beta"] == pytest.approx(0.6, abs=1e-6) and out["groups"] > 0
+
+
+def test_combine_elasticity_weights_scout_like_k_local_families():
+    local, scout = {"beta": 0.4, "groups": 3}, {"beta": 0.1, "groups": 18}
+    comb = t.combine_elasticity(local, scout, k=3)
+    assert comb["beta"] == pytest.approx(0.25) and comb["scout_weight"] == pytest.approx(0.5)
+    assert t.combine_elasticity(local, None)["source"] == "local"
+    assert t.combine_elasticity(None, scout)["beta"] == 0.1
+    assert t.combine_elasticity(None, None) is None
+    many = t.combine_elasticity({"beta": 0.4, "groups": 297}, scout, k=3)
+    assert many["beta"] == pytest.approx(0.397)  # plenty of local data → mostly local
+
+
+def test_anchor_and_scale_on_cores():
+    class _Cores:
+        def predict(self, X):
+            return X["cores_per_driver"].to_numpy(float)
+
+    X = pd.DataFrame({"cores_per_driver": [1.0, 4.0, 8.0], "dataset_mb": 10.0, "num_workers": 1})
+    out = t.anchor_and_scale(_Cores(), X, ["cores_per_driver"], 4.0, 1.0, axis="cores")
+    assert out.tolist() == [1, 4, 8]  # anchored at 4 cores, grown linearly
+    flat = t.anchor_and_scale(_Cores(), X, ["cores_per_driver"], 4.0, 0.0, axis="cores")
+    assert flat.tolist() == [1, 4, 4]
+
+
+def test_trend_tests_script_end_to_end(tmp_path):
+    sys.path.insert(0, os.path.abspath(_SCRIPTS))
+    import transfer_trend_tests as tt
+
+    local = _local()
+    local["split"], local["in_main_set"], local["status"] = "train", True, "ok"
+    local["alloc_known"], local["design_known"] = True, True
+    local["experiment"], local["run_key"], local["driver_idx"] = "D", local.index.astype(str), 1
+    lp, sp = tmp_path / "drivers.csv", tmp_path / "scout.csv"
+    local.to_csv(lp, index=False)
+    _scout_both().to_csv(sp, index=False)
+    out = tmp_path / "out"
+    report = tt.main(
+        ["--drivers", str(lp), "--scout-hosts", str(sp), "--out-dir", str(out),
+         "--rf-trees", "10", "--n-boot", "200"]
+    )  # fmt: skip
+    policy = report["policy"]
+    assert set(policy) == {"size", "cores"}
+    decision = policy["size"]["logreg"]["mem_mb_p95_max"]
+    assert set(decision) == {"source", "use_trend", "rule"} and isinstance(
+        decision["use_trend"], bool
+    )
+    assert "kmeans" in policy["cores"]  # K-Means 4 cores predicted from 1-2
+    assert (out / "trend_metrics.csv").exists() and (out / "trend_paired.csv").exists()
+    case = report["cases"]["size_S2|size|logreg|mem_mb_p95_max"]
+    assert case["beta_scout"]["beta"] == pytest.approx(0.3, abs=1e-6)
+    assert case["beta_combined"]["source"] == "scout_informed"

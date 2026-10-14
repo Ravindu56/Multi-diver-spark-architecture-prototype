@@ -79,7 +79,10 @@ def model_dir(tmp_path_factory):
         mp.setattr(m, "RF_GRID", [{"max_depth": 5, "min_samples_leaf": 1}])
         full_rf = m.make_rf
         mp.setattr(m, "make_rf", lambda **kw: full_rf(n_estimators=20, **kw))
-        trp.main(["--drivers", str(path), "--out-dir", str(out), "--training-set", "capped"])
+        trp.main(
+            ["--drivers", str(path), "--out-dir", str(out), "--training-set", "capped",
+             "--scout-hosts", str(root / "no_scout.csv")]
+        )  # fmt: skip
     return out
 
 
@@ -234,6 +237,46 @@ def test_old_model_card_is_refused(tmp_path):
 def test_unknown_model_name_is_refused(model_dir):
     with pytest.raises(ValueError, match="unknown model"):
         pr.ResourcePredictor.load(str(model_dir), "lstm")
+
+
+# ── growth trends beyond the measured range ───────────────────
+
+
+def test_card_records_growth_trends(model_dir):
+    card = json.loads((model_dir / "model_card.json").read_text())
+    entry = card["growth_trends"]["cores"]["kmeans"]["mem_mb_p95_max"]
+    assert entry["x_max"] == 4 and entry["local"]["beta"] > 0
+    assert entry["scout"] is None and entry["combined"]["source"] == "local"  # no Scout file
+
+
+def test_kmeans_beyond_measured_cores_grows_with_local_trend(model_dir):
+    km = {"workload_type": "kmeans", "num_clusters": 5}
+    on = pr.ResourcePredictor.load(str(model_dir), "rf")
+    off = pr.ResourcePredictor.load(str(model_dir), "rf", trends="off")
+    res = on.predict(_req(cores_per_driver=8, thread_cap=8, **km))
+    at4 = off.predict(_req(cores_per_driver=4, **km))
+    for target in m.TARGETS:
+        beta = on.card["growth_trends"]["cores"]["kmeans"][target]["local"]["beta"]
+        assert getattr(res, target) == pytest.approx(getattr(at4, target) * 2**beta)
+        assert res.source[target].endswith("+trend")
+    assert res.out_of_domain  # still extrapolation, still flagged
+    assert any("grown" in n and "cores^" in n for n in res.notes)
+
+
+def test_size_trend_only_for_logreg_memory(model_dir):
+    p = pr.ResourcePredictor.load(str(model_dir), "rf")
+    res = p.predict(_req(dataset_mb=400, num_workers=1))  # 400 MB per driver > measured 100
+    assert res.source["mem_mb_p95_max"].endswith("+trend")
+    assert res.source["mem_mb_peak_max"].endswith("+trend")
+    assert not res.source["cpu_cores_p95"].endswith("+trend")
+
+
+def test_trends_off_and_unknown_choice(model_dir):
+    off = pr.ResourcePredictor.load(str(model_dir), "rf", trends="off")
+    res = off.predict(_req(dataset_mb=400, num_workers=1))
+    assert not any(v.endswith("+trend") for v in res.source.values())
+    with pytest.raises(ValueError, match="unknown trends"):
+        pr.ResourcePredictor.load(str(model_dir), "rf", trends="always")
 
 
 # ── command line ──────────────────────────────────────────────

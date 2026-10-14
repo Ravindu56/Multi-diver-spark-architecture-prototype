@@ -34,6 +34,12 @@
 #   * this module predicts DEMAND; turning demand into Docker limits, with a
 #     safety factor and host-total checks, is the allocator's job
 #
+# Beyond the measured range, TREND_POLICY may replace the model's own
+# extrapolation by a growth trend: the request is predicted at the largest
+# measured value and grown by (value / x_max)^beta (beta from the model card;
+# "local" = local data, "combined" = Scout-informed).  Such requests stay
+# flagged out_of_domain and the note says which trend was applied.
+#
 # Upper margins: per workload, the q-quantile of out-of-fold residuals from
 # leave-one-configuration-out CV on train+val (never the test split); see
 # scripts/train_resource_predictor.py.
@@ -53,7 +59,7 @@ import sklearn
 from mpj_spark.resource_prediction import models as m
 
 # model card layout this module understands (written by the training script)
-CARD_SCHEMA_VERSION = 2
+CARD_SCHEMA_VERSION = 3
 
 # model family in the model card → provenance name reported to the allocator
 SOURCE_NAMES: dict[str, str] = {
@@ -63,6 +69,28 @@ SOURCE_NAMES: dict[str, str] = {
     "rf": "local_rf",
 }
 MODEL_CHOICES = ["best_cv", *SOURCE_NAMES]
+
+# Growth trends used BEYOND the measured range: axis → workload → target →
+# beta source.  Decided by the fixed rules of scripts/transfer_trend_tests.py
+# (report: data/models/transfer_trends/report.json):
+#   size   LogReg memory — local trend beats the model's own extrapolation;
+#          Scout agrees with it but adds nothing when local data has the trend
+#   cores  K-Means, all targets — local trend; Scout's VM-size trend does not
+#          transfer (bigger AWS VMs also have more memory)
+# Everything else beyond the range keeps the model's own prediction.
+TREND_POLICY: dict[str, dict[str, dict[str, str]]] = {
+    "size": {"logreg": {"mem_mb_p95_max": "local", "mem_mb_peak_max": "local"}},
+    "cores": {"kmeans": {target: "local" for target in m.TARGETS}},
+}
+TREND_CHOICES: dict[str, dict] = {
+    "policy": TREND_POLICY,
+    # same cases with the Scout-informed beta (for comparison)
+    "scout_informed": {
+        axis: {wl: dict.fromkeys(targets, "combined") for wl, targets in by_wl.items()}
+        for axis, by_wl in TREND_POLICY.items()
+    },
+    "off": {},
+}
 
 
 @dataclass
@@ -140,15 +168,20 @@ def _pick_family(card: dict, target: str, model: str) -> str:
 class ResourcePredictor:
     """Trained per-driver CPU / memory models plus the checks around them."""
 
-    def __init__(self, card: dict, models: dict, families: dict[str, str]):
+    def __init__(self, card: dict, models: dict, families: dict[str, str], trends: str = "policy"):
         self.card = card
         self.models = models
         self.families = families
         self.features = card["features"]
         self.valid = card["valid_inputs"]
+        if trends not in TREND_CHOICES:
+            raise ValueError(f"unknown trends {trends!r}; choose from {list(TREND_CHOICES)}")
+        self.trend_policy = TREND_CHOICES[trends]
 
     @classmethod
-    def load(cls, model_dir: str, model: str = "best_cv") -> ResourcePredictor:
+    def load(
+        cls, model_dir: str, model: str = "best_cv", trends: str = "policy"
+    ) -> ResourcePredictor:
         """Load the model card and one fitted model per target from model_dir."""
         with open(os.path.join(model_dir, "model_card.json")) as fh:
             card = json.load(fh)
@@ -163,7 +196,7 @@ class ResourcePredictor:
             t: joblib.load(os.path.join(model_dir, f"{t}__{fam}.joblib"))
             for t, fam in families.items()
         }
-        return cls(card, models, families)
+        return cls(card, models, families, trends)
 
     # ── checks ────────────────────────────────────────────────────────────
 
@@ -260,13 +293,50 @@ class ResourcePredictor:
         X = pd.DataFrame(rows, columns=self.features)
         for target, model in self.models.items():
             margins = self.card["choices"][target]["upper_margins"][self.families[target]]
-            for i, value in zip(idx, model.predict(X), strict=True):
+            for i, row, value in zip(idx, rows, model.predict(X), strict=True):
                 res = results[i]
+                margin = m.margin_for(margins, res.workload_type)
+                value, upper = self._apply_trends(target, model, row, value, margin, res)
                 if value < 0:  # linear models can dip below zero; demand cannot
                     res.notes.append(f"{target} prediction {value:.3f} clipped to 0")
-                    value = 0.0
+                    value, upper = 0.0, max(upper, 0.0)
                 setattr(res, target, float(value))
-                setattr(
-                    res, f"{target}_upper", float(value + m.margin_for(margins, res.workload_type))
-                )
+                setattr(res, f"{target}_upper", float(upper))
         return results
+
+    def _apply_trends(self, target, model, row, value, margin, res) -> tuple[float, float]:
+        """Prediction and upper bound, grown by TREND_POLICY trends beyond the measured range."""
+        wl = res.workload_type
+        anchor, factor, applied = dict(row), 1.0, []
+        for axis, by_wl in self.trend_policy.items():
+            source = by_wl.get(wl, {}).get(target)
+            entry = self.card.get("growth_trends", {}).get(axis, {}).get(wl, {}).get(target)
+            if not source or not entry:
+                continue
+            x = (
+                row["dataset_mb"] / row["num_workers"]
+                if axis == "size"
+                else row["cores_per_driver"]
+            )
+            x_max = entry["x_max"]
+            if x <= x_max:
+                continue
+            beta = (entry.get(source) or {}).get("beta")
+            if beta is None:
+                res.notes.append(f"{target}: no {source} {axis} trend available; model kept")
+                continue
+            if axis == "size":
+                anchor["dataset_mb"] = x_max * row["num_workers"]
+            else:
+                anchor["cores_per_driver"] = x_max
+            factor *= (x / x_max) ** beta
+            applied.append(f"{axis}^{beta:.2f} {source} trend from {x_max:g} to {x:g}")
+        if not applied:
+            return float(value), float(value + margin)
+        anchor_df = m.add_derived(pd.DataFrame([anchor]))[self.features]
+        base = float(model.predict(anchor_df)[0])
+        res.source[target] = f"{res.source[target]}+trend"
+        res.notes.append(
+            f"{target}: grown ×{factor:.2f} beyond the measured range ({'; '.join(applied)})"
+        )
+        return base * factor, (base + margin) * factor

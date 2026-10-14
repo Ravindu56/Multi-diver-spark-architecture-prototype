@@ -21,6 +21,8 @@
 #   --iterations N       planned iterations      --features N
 #   --k N                K-Means clusters (default 0 = not K-Means)
 #   --thread-cap N       BLAS/OpenMP threads (default: same as cores)
+#   --trends NAME        policy (default) | scout_informed | off — growth trends
+#                        beyond the measured range (predictor.TREND_POLICY)
 #   --json               JSON output instead of a table
 # =============================================================================
 
@@ -38,6 +40,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from mpj_spark.resource_prediction.predictor import (  # noqa: E402
     MODEL_CHOICES,
+    TREND_CHOICES,
     PredictionRequest,
     ResourcePredictor,
 )
@@ -58,6 +61,7 @@ def _parse_args(argv=None):
     p.add_argument("--features", type=int)
     p.add_argument("--k", type=int, default=0)
     p.add_argument("--thread-cap", type=int)
+    p.add_argument("--trends", choices=list(TREND_CHOICES), default="policy")
     p.add_argument("--json", action="store_true")
     return p.parse_args(argv)
 
@@ -70,7 +74,7 @@ def _cell(value, upper, digits):
 
 def main(argv=None):
     args = _parse_args(argv)
-    predictor = ResourcePredictor.load(args.model_dir, args.model)
+    predictor = ResourcePredictor.load(args.model_dir, args.model, args.trends)
     requests = [
         PredictionRequest(
             workload_type=args.workload,

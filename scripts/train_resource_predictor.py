@@ -19,7 +19,11 @@
 #   6. scores the same models on the E1 holdout runs, separately for
 #      interior sizes and extrapolation (handoff validation protocol),
 #   7. reports the noise ceiling: the R² that replicate runs of one exact
-#      configuration (Set D + E2) reach — no model can be expected to beat it.
+#      configuration (Set D + E2) reach — no model can be expected to beat it,
+#   8. stores growth trends (elasticities along data size and cores, from the
+#      local train+val rows, from Scout, and Scout-informed) in the model card;
+#      the predictor applies the ones its TREND_POLICY selects beyond the
+#      measured range (see scripts/transfer_trend_tests.py).
 #
 # The model card also records, per workload, the input values the models
 # were trained on (valid_inputs) and the thread-cap rule of the training
@@ -50,6 +54,7 @@
 #                          (or, for capped, without the workload design)
 #                          are excluded until those inputs are confirmed
 #   --upper-quantile Q     residual quantile for the upper bound (default 0.9)
+#   --scout-hosts PATH     Scout hosts table for the Scout trends (skipped if absent)
 # =============================================================================
 
 from __future__ import annotations
@@ -72,6 +77,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from mpj_spark.resource_prediction import models as m  # noqa: E402
+from mpj_spark.resource_prediction import transfer as t  # noqa: E402
 from mpj_spark.resource_prediction.predictor import CARD_SCHEMA_VERSION  # noqa: E402
 
 # inputs with at most this many distinct training values also list them
@@ -87,6 +93,9 @@ def _parse_args(argv=None):
     p.add_argument("--out-dir", default=None)
     p.add_argument("--unknown-alloc", choices=["drop"], default="drop")
     p.add_argument("--upper-quantile", type=float, default=0.9)
+    p.add_argument(
+        "--scout-hosts", default=os.path.join(_PROJECT_ROOT, "data", "scout", "scout_hosts.csv")
+    )
     return p.parse_args(argv)
 
 
@@ -295,6 +304,24 @@ def valid_inputs(df: pd.DataFrame, features: list[str]) -> dict:
     return out
 
 
+def growth_trends(trval: pd.DataFrame, scout: pd.DataFrame | None) -> dict:
+    """{axis: {workload: {target: x_max + local / Scout / Scout-informed elasticity}}}."""
+    out = {}
+    for axis in t.TREND_AXES:
+        for wl, g in trval.groupby("workload_type"):
+            x_max = float(t.axis_value(g, axis).max())
+            for target in m.TARGETS:
+                local = t.local_elasticity(trval, target, wl, axis)
+                scout_b = t.scout_elasticity(scout, target, wl, axis) if scout is not None else None
+                out.setdefault(axis, {}).setdefault(wl, {})[target] = {
+                    "x_max": x_max,
+                    "local": local,
+                    "scout": scout_b,
+                    "combined": t.combine_elasticity(local, scout_b),
+                }
+    return out
+
+
 def thread_cap_policy(df: pd.DataFrame) -> str:
     """How the thread cap related to the cores in the training runs."""
     if "thread_cap" not in df or df["thread_cap"].isna().all():
@@ -371,6 +398,12 @@ def main(argv=None):
             else {},
         },
         "noise_ceiling": ceilings,
+        "growth_trends": growth_trends(
+            trval,
+            pd.read_csv(args.scout_hosts) if os.path.isfile(args.scout_hosts) else None,
+        ),
+        "growth_trends_note": "x_max = largest data per driver (size) or cores (cores) in "
+        "train+val; beta: demand ∝ x^beta; applied by the predictor's TREND_POLICY only",
         "upper_quantile": args.upper_quantile,
         "choices": card_targets,
         "versions": {

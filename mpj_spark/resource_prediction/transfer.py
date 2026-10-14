@@ -283,28 +283,34 @@ def learning_curve(
 
 
 # =============================================================================
-# Option A — transfer of the DATA-SIZE TREND (extrapolation beyond local sizes)
+# Growth TRENDS beyond the measured range (transfer options A and cores)
 # =============================================================================
 #
-# Scout jobs are larger (769–1537 MiB) than any local job, so the one thing
-# Scout may know that local data does not is how demand GROWS with data size.
-# The trend is transferred as an elasticity β (demand ∝ size^β), estimated
-# within each Scout VM type (fixed effects), and applied only to requests with
-# more data per driver than measured locally:
+# The laptop cannot measure large jobs or many cores; Scout (AWS VMs) can.
+# What may transfer is how demand GROWS: an elasticity β (demand ∝ x^β) along
+#   size   x = data per driver (local) / input size (Scout, within VM type)
+#   cores  x = cores per driver (local) / vCPUs (Scout, within VM family and
+#          data size, so only the VM size changes)
+# applied only to requests beyond the largest measured value x_max:
 #
-#   prediction = base(anchor at the largest local shard) × (shard / s_max)^β
+#   prediction = base(anchored at x_max) × (x / x_max)^β
 #
-# Scout records input sizes for LogReg only (K-Means rows have no size), so
-# the trend exists for LogReg only.  The fair comparison is the same
-# anchor-and-scale with β estimated from LOCAL data.
+# Scout-informed β combines both sources, Scout acting as a prior worth
+# SCOUT_PRIOR_GROUPS local configuration families:
+#   β = (n_local · β_local + k · β_scout) / (n_local + k)
+# Scout records input sizes only for LogReg (not K-Means); vCPUs 2, 4, 8.
 
-# local target → Scout column used for the size trend (same mapping as above)
+TREND_AXES = ("size", "cores")
+SCOUT_PRIOR_GROUPS = 3
+
+# local target → Scout column used for trends (same label mapping as above)
 SIZE_TREND_SOURCE: dict[str, str] = {
     "cpu_cores_p95": "host_cpu_busy_p95_cores",
     "mem_mb_p95_max": "host_mem_app_peak_mib",
     "cpu_cores_mean": "cpu_cores_mean",  # derived from busy % × vCPUs
     "mem_mb_peak_max": "host_mem_app_peak_mib",
 }
+TREND_SOURCE = SIZE_TREND_SOURCE
 
 
 def _within_slope(x: np.ndarray, y: np.ndarray, groups: np.ndarray) -> tuple[float, int]:
@@ -319,54 +325,112 @@ def _within_slope(x: np.ndarray, y: np.ndarray, groups: np.ndarray) -> tuple[flo
     return (float((dx * dy).sum()) / denom if denom > 0 else float("nan")), int(df["g"].nunique())
 
 
-def scout_size_elasticity(scout_hosts: pd.DataFrame, target: str, workload: str) -> dict | None:
-    """β of `target` with respect to input size on Scout single-node hosts, or None."""
+def scout_elasticity(
+    scout_hosts: pd.DataFrame, target: str, workload: str, axis: str = "size"
+) -> dict | None:
+    """β of `target` along `axis` on Scout single-node hosts, or None if Scout cannot tell."""
     s = scout_hosts[
-        (scout_hosts["setting"] == SOURCE_SETTING)
-        & (scout_hosts["workload_type"] == workload)
-        & scout_hosts["input_mib"].notna()
+        (scout_hosts["setting"] == SOURCE_SETTING) & (scout_hosts["workload_type"] == workload)
     ].copy()
+    if axis == "size":
+        s = s[s["input_mib"].notna()]
     if s.empty:
         return None
     s["cpu_cores_mean"] = s["host_cpu_busy_mean_pct"] / 100.0 * s["vcpus_per_host"]
-    y = s[SIZE_TREND_SOURCE[target]].to_numpy(float)
+    y = s[TREND_SOURCE[target]].to_numpy(float)
     ok = y > 0
+    if axis == "size":
+        x, groups = s["input_mib"], s["vm_type"]
+    else:
+        x = s["vcpus_per_host"]
+        groups = s["vm_family"].astype(str) + "|" + s["datasize_label"].astype(str)
     beta, n_groups = _within_slope(
-        np.log(s["input_mib"].to_numpy(float)[ok]), np.log(y[ok]), s["vm_type"].to_numpy()[ok]
+        np.log(x.to_numpy(float)[ok]), np.log(y[ok]), groups.to_numpy()[ok]
     )
     if not np.isfinite(beta):
         return None
-    return {"beta": beta, "vm_types": n_groups, "rows": int(ok.sum())}
+    return {"beta": beta, "groups": n_groups, "rows": int(ok.sum())}
 
 
-def local_size_elasticity(df: pd.DataFrame, target: str, workload: str) -> float | None:
-    """β of `target` with respect to data per driver, within configurations that differ only in size."""
+def scout_size_elasticity(scout_hosts: pd.DataFrame, target: str, workload: str) -> dict | None:
+    """β of `target` with respect to input size on Scout (groups = VM types), or None."""
+    out = scout_elasticity(scout_hosts, target, workload, "size")
+    return out | {"vm_types": out["groups"]} if out else None
+
+
+def axis_value(df: pd.DataFrame, axis: str) -> np.ndarray:
+    if axis == "size":
+        return (df["dataset_mb"] / df["num_workers"]).to_numpy(float)
+    return df["cores_per_driver"].to_numpy(float)
+
+
+def local_elasticity(
+    df: pd.DataFrame, target: str, workload: str, axis: str = "size"
+) -> dict | None:
+    """β of `target` along `axis`, within configurations that differ only on that axis."""
     d = df[(df["workload_type"] == workload) & df[target].notna() & (df[target] > 0)]
     if d.empty:
         return None
-    key_cols = [c for c in m.FEATURES + m.DESIGN_FEATURES if c in d and c != "dataset_mb"]
+    varying = {"size": {"dataset_mb"}, "cores": {"cores_per_driver", "thread_cap"}}[axis]
+    key_cols = [c for c in m.FEATURES + m.DESIGN_FEATURES if c in d and c not in varying]
     key = d[key_cols].astype(str).agg("|".join, axis=1).to_numpy()
-    shard = (d["dataset_mb"] / d["num_workers"]).to_numpy(float)
-    beta, _ = _within_slope(np.log(shard), np.log(d[target].to_numpy(float)), key)
-    return beta if np.isfinite(beta) else None
+    beta, n_groups = _within_slope(
+        np.log(axis_value(d, axis)), np.log(d[target].to_numpy(float)), key
+    )
+    if not np.isfinite(beta):
+        return None
+    return {"beta": beta, "groups": n_groups}
+
+
+def local_size_elasticity(df: pd.DataFrame, target: str, workload: str) -> float | None:
+    """β of `target` with respect to data per driver (local data), or None."""
+    out = local_elasticity(df, target, workload, "size")
+    return out["beta"] if out else None
+
+
+def combine_elasticity(
+    local: dict | None, scout: dict | None, k: float = SCOUT_PRIOR_GROUPS
+) -> dict | None:
+    """Scout-informed β: Scout as a prior worth k local configuration families."""
+    if local is None and scout is None:
+        return None
+    if scout is None:
+        return {"beta": local["beta"], "scout_weight": 0.0, "source": "local"}
+    if local is None:
+        return {"beta": scout["beta"], "scout_weight": 1.0, "source": "scout"}
+    n = local["groups"]
+    w = k / (n + k)
+    return {
+        "beta": (1 - w) * local["beta"] + w * scout["beta"],
+        "scout_weight": w,
+        "source": "scout_informed",
+    }
 
 
 def anchor_and_scale(
-    model, X: pd.DataFrame, features: list[str], s_max: float, beta: float | None
+    model,
+    X: pd.DataFrame,
+    features: list[str],
+    limit: float,
+    beta: float | None,
+    axis: str = "size",
 ) -> np.ndarray:
     """
-    Model prediction, except for rows with more data per driver than s_max:
-    those are predicted at s_max and scaled by (shard / s_max)^beta
-    (beta None = keep the model's own prediction, beta 0 = flat).
+    Model prediction, except for rows beyond `limit` on `axis` (data per
+    driver or cores): those are predicted at the limit and scaled by
+    (value / limit)^beta (beta None = the model's own prediction, 0 = flat).
     """
     pred = model.predict(X[features])
-    shard = (X["dataset_mb"] / X["num_workers"]).to_numpy(float)
-    beyond = shard > s_max
+    value = axis_value(X, axis)
+    beyond = value > limit
     if beta is None or not beyond.any():
         return pred
     anchor = X.loc[beyond].copy()
-    anchor["dataset_mb"] = s_max * anchor["num_workers"]
+    if axis == "size":
+        anchor["dataset_mb"] = limit * anchor["num_workers"]
+    else:
+        anchor["cores_per_driver"] = limit
     anchor = m.add_derived(anchor)
     out = pred.copy()
-    out[beyond] = model.predict(anchor[features]) * (shard[beyond] / s_max) ** beta
+    out[beyond] = model.predict(anchor[features]) * (value[beyond] / limit) ** beta
     return out
