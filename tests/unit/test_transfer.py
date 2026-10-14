@@ -56,6 +56,8 @@ def _local(shift=3.0, seed=0):
                             "cpu_cores_mean": base + shift + rng.normal(0, 0.01),
                             "cpu_cores_p95": 2 * base + shift,
                             "mem_mb_peak": 1000 * base + 200 * np.log2(heap) + rng.normal(0, 5),
+                            "mem_mb_peak_max": 1000 * base + 200 * np.log2(heap) + 5,
+                            "mem_mb_p95_max": 950 * base + 200 * np.log2(heap),
                             "config_group": group,
                             "rep": rep,
                         }

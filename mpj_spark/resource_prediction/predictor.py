@@ -10,12 +10,15 @@
 #   predictor = ResourcePredictor.load("data/models/local_capped")
 #   result = predictor.predict(PredictionRequest(
 #       workload_type="logreg", dataset_mb=100, num_workers=2,
-#       cores_per_driver=4, heap_mb_per_driver=6144,
-#       iterations=30, num_features=20))
+#       cores_per_driver=4, iterations=30, num_features=20))
 #
-# A PredictionResult holds, PER DRIVER:
-#   cpu_cores_mean, cpu_cores_p95, mem_mb_peak      point predictions
-#   *_upper                                         prediction + empirical margin
+# A PredictionResult holds, for the job's drivers:
+#   cpu_cores_p95, cpu_cores_mean        CPU of each driver (cores)
+#   mem_mb_p95_max, mem_mb_peak_max      memory of the LARGEST driver (MB) —
+#                                        every driver gets the same limit
+#   *_upper                              prediction + empirical margin
+# The derived inputs of the handoff (data per driver and its products) are
+# computed from the request; the heap is only needed by models trained with it.
 # and where the numbers come from (source per target, training set, model
 # version), plus whether the request lies outside the measured domain
 # (out_of_domain + reasons) or is not covered at all (status "unsupported").
@@ -50,7 +53,7 @@ import sklearn
 from mpj_spark.resource_prediction import models as m
 
 # model card layout this module understands (written by the training script)
-CARD_SCHEMA_VERSION = 1
+CARD_SCHEMA_VERSION = 2
 
 # model family in the model card → provenance name reported to the allocator
 SOURCE_NAMES: dict[str, str] = {
@@ -70,10 +73,10 @@ class PredictionRequest:
     dataset_mb: float
     num_workers: int  # number of Spark drivers (MPI ranks >= 1)
     cores_per_driver: float
-    heap_mb_per_driver: float
     iterations: int | None = None  # planned, not realised after early stopping
     num_features: int | None = None
     num_clusters: int = 0  # K-Means k; ignored (0) for other workloads
+    heap_mb_per_driver: float | None = None  # only for models trained with heap
     thread_cap: int | None = None  # BLAS/OpenMP threads; None = same as cores
 
     def feature_row(self) -> dict:
@@ -81,22 +84,32 @@ class PredictionRequest:
         row.pop("thread_cap")
         if row["workload_type"] != "kmeans":
             row["num_clusters"] = 0
+        shard = (
+            row["dataset_mb"] / row["num_workers"]
+            if row["dataset_mb"] is not None and row["num_workers"]
+            else None
+        )
+        row["shard_mb"] = shard
+        for name, col in (("shard_x_iters", "iterations"), ("shard_x_features", "num_features")):
+            row[name] = shard * row[col] if shard is not None and row[col] is not None else None
         return row
 
 
 @dataclass
 class PredictionResult:
-    """Predicted demand of EACH driver of the job, with provenance."""
+    """Predicted demand: CPU of each driver, memory of the largest driver; with provenance."""
 
     status: str  # "ok" | "out_of_domain" | "unsupported"
     workload_type: str
     num_workers: int
-    cpu_cores_mean: float | None = None
     cpu_cores_p95: float | None = None
-    mem_mb_peak: float | None = None
-    cpu_cores_mean_upper: float | None = None
+    mem_mb_p95_max: float | None = None
+    cpu_cores_mean: float | None = None
+    mem_mb_peak_max: float | None = None
     cpu_cores_p95_upper: float | None = None
-    mem_mb_peak_upper: float | None = None
+    mem_mb_p95_max_upper: float | None = None
+    cpu_cores_mean_upper: float | None = None
+    mem_mb_peak_max_upper: float | None = None
     upper_quantile: float | None = None
     source: dict = field(default_factory=dict)  # target → provenance name
     out_of_domain: bool = False
@@ -170,8 +183,8 @@ class ResourcePredictor:
         row = req.feature_row()
         problems = []
         for col in self.features:
-            if col in m.CATEGORICAL_FEATURES:
-                continue
+            if col in m.CATEGORICAL_FEATURES or col in m.DERIVED_FEATURES:
+                continue  # derived inputs follow from the checked ones
             v = row.get(col)
             if v is None or not math.isfinite(float(v)):
                 problems.append(f"{col} is missing")

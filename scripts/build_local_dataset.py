@@ -78,7 +78,9 @@ def save_splits(path: str, previous: dict, current: dict) -> None:
     # free its groups to be re-assigned to another split later
     merged = {**previous, **current}
     payload = {
-        "policy": "workload-stratified, deterministic; existing groups never move",
+        "policy": "groups = design_id (A, B) / workload_id (D), merged when they share a "
+        "configuration; stratified by workload and reference vs core sweep; deterministic; "
+        "existing groups never move",
         "counts": {s: sum(v == s for v in merged.values()) for s in ("train", "val", "test")},
         "groups": dict(sorted(merged.items())),
     }

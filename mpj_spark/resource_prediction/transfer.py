@@ -14,13 +14,15 @@
 #     source_target ≈ a_w + b_w · log2(cores)
 # Only `workload_type` and `cores` are shared between the domains:
 #   * Scout vcpus_per_host  ↔ local cores_per_driver
-#   * data size is NOT used: local inputs (25–50 MB per driver) lie far
+#   * data size is NOT used: local data per driver (about 8–200 MB) lies far
 #     below every Scout input (≥ 769 MiB) — that would be pure extrapolation
-#   * local heap has no Scout counterpart; only the local correction sees it
+#   * the workload design (iterations, features, k) has no Scout counterpart;
+#     only the local correction sees it
 # Label mapping (scope differs — documented, not hidden):
-#   cpu_cores_mean ← host_cpu_busy_mean_pct / 100 × vcpus   (whole VM)
-#   cpu_cores_p95  ← host_cpu_busy_p95_cores                 (whole VM)
-#   mem_mb_peak    ← host_mem_app_peak_mib                   (whole VM, no cache)
+#   cpu_cores_p95   ← host_cpu_busy_p95_cores                 (whole VM)
+#   cpu_cores_mean  ← host_cpu_busy_mean_pct / 100 × vcpus    (whole VM)
+#   mem_mb_p95_max  ← host_mem_app_peak_mib   (whole VM; Scout has no p95)
+#   mem_mb_peak_max ← host_mem_app_peak_mib   (whole VM, no cache)
 #
 # TRANSFER METHODS (all see the source prediction as column `source_pred`)
 # -----------------------------------------------------------------------
@@ -41,9 +43,10 @@ from mpj_spark.resource_prediction import models as m
 
 # local target → (Scout column or derivation, unit note)
 SOURCE_LABELS: dict[str, str] = {
-    "cpu_cores_mean": "host_cpu_busy_mean_pct / 100 * vcpus_per_host",
     "cpu_cores_p95": "host_cpu_busy_p95_cores",
-    "mem_mb_peak": "host_mem_app_peak_mib",
+    "mem_mb_p95_max": "host_mem_app_peak_mib (Scout records no p95)",
+    "cpu_cores_mean": "host_cpu_busy_mean_pct / 100 * vcpus_per_host",
+    "mem_mb_peak_max": "host_mem_app_peak_mib",
 }
 SOURCE_SETTING = "single_node"  # one Spark application per VM ≈ one driver
 
@@ -55,9 +58,10 @@ def scout_source_frame(scout_hosts: pd.DataFrame) -> pd.DataFrame:
         {
             "workload_type": s["workload_type"],
             "cores_per_driver": s["vcpus_per_host"].astype(float),
-            "cpu_cores_mean": s["host_cpu_busy_mean_pct"] / 100.0 * s["vcpus_per_host"],
             "cpu_cores_p95": s["host_cpu_busy_p95_cores"],
-            "mem_mb_peak": s["host_mem_app_peak_mib"],
+            "mem_mb_p95_max": s["host_mem_app_peak_mib"],
+            "cpu_cores_mean": s["host_cpu_busy_mean_pct"] / 100.0 * s["vcpus_per_host"],
+            "mem_mb_peak_max": s["host_mem_app_peak_mib"],
         }
     )
 

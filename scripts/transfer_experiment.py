@@ -3,7 +3,7 @@
 # scripts/transfer_experiment.py
 # Phase 6 — does Scout help? (transfer-learning experiment, Objective 2b)
 #
-# Compares, per target (cpu_cores_mean, cpu_cores_p95, mem_mb_peak):
+# Compares, per target (models.TARGETS):
 #   local_lookup, local_ridge_wl, local_rf          — local data only
 #   scout_only, scout_offset, scout_residual        — Scout source line (+ local)
 # (methods: mpj_spark/resource_prediction/transfer.py)
@@ -211,9 +211,11 @@ def main(argv=None):
             "rows": len(source),
             "shared_features": ["workload_type", "cores_per_driver (Scout vcpus_per_host)"],
             "not_transferred": {
-                "dataset_mb": "local 25-50 MB per driver vs Scout >= 769 MiB: out of range",
-                "heap_mb_per_driver": "no Scout counterpart",
+                "dataset_mb": "local data per driver about 8-200 MB vs Scout >= 769 MiB: "
+                "out of range",
+                "iterations, num_features, num_clusters": "no Scout counterpart",
             },
+            "label_mapping": t.SOURCE_LABELS,
         },
         "local": {
             "file": os.path.relpath(args.drivers, _PROJECT_ROOT),

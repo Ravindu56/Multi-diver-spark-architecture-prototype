@@ -5,7 +5,8 @@
 #
 # STAGE 1 — local-only baselines
 # ------------------------------
-# For each target (cpu_cores_mean, cpu_cores_p95, mem_mb_peak) this script:
+# For each target (models.TARGETS: CPU p95 and mean per driver, memory p95 and
+# peak of the largest driver per run) this script:
 #   Models: lookup, ridge (shared slopes), ridge_wl (per-workload slopes), rf.
 #   1. runs leave-one-configuration-out CV on TRAIN+VAL: every configuration
 #      group is predicted by models trained on all other groups,
@@ -14,7 +15,11 @@
 #      differences against the lookup baseline,
 #   4. calibrates the empirical upper margin PER WORKLOAD from out-of-fold
 #      residuals (never from TEST),
-#   5. refits the chosen models on TRAIN+VAL and evaluates ONCE on TEST.
+#   5. refits the chosen models on TRAIN+VAL and evaluates ONCE on TEST,
+#   6. scores the same models on the E1 holdout runs, separately for
+#      interior sizes and extrapolation (handoff validation protocol),
+#   7. reports the noise ceiling: the R² that replicate runs of one exact
+#      configuration (Set D + E2) reach — no model can be expected to beat it.
 #
 # The model card also records, per workload, the input values the models
 # were trained on (valid_inputs) and the thread-cap rule of the training
@@ -22,14 +27,16 @@
 # requests outside the measured domain.
 #
 # TRAINING SETS (never mixed; see models.TRAINING_SETS)
-#   capped    thread-capped runs + workload design inputs   (default)
-#   uncapped  earlier runs without a thread cap (comparison; earlier results)
+#   capped    thread-capped DOE runs, handoff inputs   (default)
+#   uncapped  runs without a thread cap (none in the current data)
 #
 # Input:  data/local/local_drivers.csv  (scripts/build_local_dataset.py)
 # Output: data/models/local_<training-set>/  (git-ignored)
 #   metrics.csv          test metrics per target × model × workload
 #   cv_metrics.csv       out-of-fold CV metrics per target × model × workload
 #   predictions_test.csv per-row test predictions and upper bounds
+#   holdout_metrics.csv  E1 holdout metrics per target × model × kind
+#   predictions_holdout.csv  per-row E1 predictions
 #   <target>__<model>.joblib   fitted models (refit on train+val)
 #   model_card.json      data, features, valid inputs, margins, choices, versions
 #
@@ -83,8 +90,50 @@ def _parse_args(argv=None):
     return p.parse_args(argv)
 
 
+# holdout set scored by the final models (interior / extrapolation kinds)
+HOLDOUT_SCORED_SET = "E1"
+# replicate sets for the noise ceiling (same configuration repeated)
+NOISE_CEILING_SETS = ("D", "E2")
+
+
 def load_training_rows(path: str, training_set: str) -> tuple[pd.DataFrame, dict]:
     return m.select_training_rows(pd.read_csv(path), training_set)
+
+
+def load_holdout_rows(path: str, training_set: str) -> pd.DataFrame:
+    """E1 holdout rows of the same environment (empty if the table has none)."""
+    df = pd.read_csv(path)
+    if "experiment" not in df or "split" not in df:
+        return df.iloc[0:0]
+    h = df[(df["split"] == "holdout") & (df["experiment"] == HOLDOUT_SCORED_SET)]
+    h = h[h["status"] == "ok"]
+    capped = h["thread_cap"].notna()
+    h = h[capped if training_set == "capped" else ~capped]
+    return m.add_derived(h) if len(h) else h
+
+
+def noise_ceiling(path: str, target: str) -> dict | None:
+    """
+    R² reached by the mean of replicate runs of each exact configuration
+    (Sets D + E2): 1 − within-configuration SS / total SS.
+    """
+    df = pd.read_csv(path)
+    if "exact_config" not in df or "experiment" not in df:
+        return None
+    d = df[df["experiment"].isin(NOISE_CEILING_SETS) & (df["status"] == "ok")]
+    d = d[d[target].notna()]
+    d = d[d.groupby("exact_config")[target].transform("size") >= 2]
+    if d.empty:
+        return None
+    y = d[target].to_numpy(float)
+    within = d[target] - d.groupby("exact_config")[target].transform("mean")
+    total = ((y - y.mean()) ** 2).sum()
+    return {
+        "r2": float(1 - (within**2).sum() / total) if total > 0 else None,
+        "n_configs": int(d["exact_config"].nunique()),
+        "n_rows": len(d),
+        "within_config_sd": float(np.sqrt((within**2).mean())),
+    }
 
 
 def _fit_predict(model, train, test, target, features):
@@ -110,8 +159,30 @@ def _cv_rows(oof: pd.DataFrame, target: str) -> list[dict]:
     return rows
 
 
+def _holdout_rows(h, target, name, pred, upper) -> list[dict]:
+    """E1 metrics of one model, overall and per holdout kind."""
+    rows = []
+    kinds = [("all", h.index)] + [(k, g.index) for k, g in h.groupby("holdout_kind")]
+    for kind, idx in kinds:
+        mask = h.index.isin(idx)
+        rows.append(
+            {
+                "target": target,
+                "unit": m.TARGETS[target],
+                "model": name,
+                "kind": kind,
+                **m.regression_metrics(h[target][mask], pred[mask], upper[mask]),
+            }
+        )
+    return rows
+
+
 def select_and_train(
-    df: pd.DataFrame, target: str, q: float, training_set: str = "uncapped"
+    df: pd.DataFrame,
+    target: str,
+    q: float,
+    training_set: str = "uncapped",
+    holdout: pd.DataFrame | None = None,
 ) -> tuple[list[dict], list[dict], list, dict]:
     """Return (test metric rows, CV metric rows, test prediction frames, choices)."""
     features = m.features_for(training_set)
@@ -150,7 +221,9 @@ def select_and_train(
     # does a per-workload slope improve on the shared-slope Ridge?
     uncertainty["ridge_wl_vs_ridge"] = m.group_bootstrap(oof, "ridge_wl", baseline="ridge")
 
+    h = holdout[holdout[target].notna()] if holdout is not None else None
     rows, preds, fitted, margins_by_model = [], [], {}, {}
+    holdout_rows, holdout_preds = [], []
     for name, factory in factories.items():
         # per-workload upper margins from out-of-fold residuals of the selection
         margins = m.upper_margins(oof[oof["model"] == name], q)
@@ -179,6 +252,15 @@ def select_and_train(
         if name == "lookup":
             p["lookup_level"] = model.level_used_
         preds.append(p)
+        # the same final model on the E1 holdout (never used for fitting)
+        if h is not None and len(h):
+            h_pred = model.predict(h[features])
+            h_upper = h_pred + np.array([m.margin_for(margins, w) for w in h["workload_type"]])
+            holdout_rows += _holdout_rows(h, target, name, h_pred, h_upper)
+            ph = h[["run_key", "driver_idx", "holdout_kind", *features]].copy()
+            ph["target"], ph["model"] = target, name
+            ph["actual"], ph["predicted"], ph["upper"] = h[target].values, h_pred, h_upper
+            holdout_preds.append(ph)
 
     choices = {
         "selected": best,
@@ -189,7 +271,10 @@ def select_and_train(
         "n_trainval_groups": int(trval["config_group"].nunique()),
         "n_test_rows": len(test),
         "n_test_groups": int(test["config_group"].nunique()),
+        "n_holdout_rows": 0 if h is None else len(h),
         "fitted": fitted,
+        "holdout_rows": holdout_rows,
+        "holdout_preds": holdout_preds,
     }
     return rows, cv_rows, preds, choices
 
@@ -200,7 +285,7 @@ def valid_inputs(df: pd.DataFrame, features: list[str]) -> dict:
     for wl, g in df.groupby("workload_type"):
         out[wl] = {}
         for col in features:
-            if col in m.CATEGORICAL_FEATURES:
+            if col in m.CATEGORICAL_FEATURES or col in m.DERIVED_FEATURES:
                 continue
             vals = sorted(float(v) for v in g[col].dropna().unique())
             entry = {"min": vals[0], "max": vals[-1]}
@@ -224,17 +309,22 @@ def main(argv=None):
     if args.out_dir is None:
         args.out_dir = os.path.join(_PROJECT_ROOT, "data", "models", f"local_{args.training_set}")
     df, info = load_training_rows(args.drivers, args.training_set)
+    holdout = load_holdout_rows(args.drivers, args.training_set)
     features = m.features_for(args.training_set)
     os.makedirs(args.out_dir, exist_ok=True)
 
     all_rows, all_cv, all_preds, card_targets = [], [], [], {}
+    all_holdout, all_holdout_preds, ceilings = [], [], {}
     for target in m.TARGETS:
         rows, cv_rows, preds, choices = select_and_train(
-            df, target, args.upper_quantile, args.training_set
+            df, target, args.upper_quantile, args.training_set, holdout
         )
         all_rows += rows
         all_cv += cv_rows
         all_preds += preds
+        all_holdout += choices.pop("holdout_rows")
+        all_holdout_preds += choices.pop("holdout_preds")
+        ceilings[target] = noise_ceiling(args.drivers, target)
         for name, model in choices.pop("fitted").items():
             joblib.dump(model, os.path.join(args.out_dir, f"{target}__{name}.joblib"))
         card_targets[target] = choices
@@ -244,6 +334,12 @@ def main(argv=None):
     cv_metrics = pd.DataFrame(all_cv)
     cv_metrics.to_csv(os.path.join(args.out_dir, "cv_metrics.csv"), index=False)
     pd.concat(all_preds).to_csv(os.path.join(args.out_dir, "predictions_test.csv"), index=False)
+    holdout_metrics = pd.DataFrame(all_holdout)
+    if all_holdout:
+        holdout_metrics.to_csv(os.path.join(args.out_dir, "holdout_metrics.csv"), index=False)
+        pd.concat(all_holdout_preds).to_csv(
+            os.path.join(args.out_dir, "predictions_holdout.csv"), index=False
+        )
 
     with open(args.drivers, "rb") as fh:
         data_sha = hashlib.sha256(fh.read()).hexdigest()
@@ -268,6 +364,13 @@ def main(argv=None):
         "valid_ranges": {c: [float(df[c].min()), float(df[c].max())] for c in features[1:]}
         | {"workload_type": sorted(df["workload_type"].unique())},
         "rows_by_split": df["split"].value_counts().to_dict(),
+        "holdout": {
+            "set": HOLDOUT_SCORED_SET,
+            "rows_by_kind": holdout["holdout_kind"].value_counts().to_dict()
+            if len(holdout)
+            else {},
+        },
+        "noise_ceiling": ceilings,
         "upper_quantile": args.upper_quantile,
         "choices": card_targets,
         "versions": {
@@ -321,6 +424,14 @@ def main(argv=None):
     print(pd.DataFrame(margin_rows).round(3).to_string(index=False))
     print("── final evaluation on TEST ──")
     print(show.round(3).to_string(index=False))
+    if all_holdout:
+        print(f"── {HOLDOUT_SCORED_SET} holdout (models refit on train+val) ──")
+        cols = ["target", "model", "kind", "n", "mae", "r2", "upper_bound_coverage"]
+        print(holdout_metrics[cols].round(3).to_string(index=False))
+    print("── noise ceiling (replicates of Sets " + " + ".join(NOISE_CEILING_SETS) + ") ──")
+    for target, c in ceilings.items():
+        if c:
+            print(f"   {target:16s} R2 {c['r2']:.3f}  ({c['n_configs']} configurations)")
     print(f"[train] outputs written to {args.out_dir}")
     return metrics
 

@@ -4,17 +4,24 @@
 #
 # PURPOSE
 # -------
-# Small, transparent regressors that predict one driver's resource demand
-# from PRE-RUN inputs only (what is known before the job is launched):
+# Small, transparent regressors that predict resource demand from PRE-RUN
+# inputs only (what is known before the job is launched).  Inputs of the
+# "capped" training set (predictor handoff):
 #
-#   workload_type, dataset_mb, num_workers, cores_per_driver, heap_mb_per_driver
-#   (+ iterations, num_features, num_clusters in the "capped" feature set)
+#   workload_type, dataset_mb, num_workers, cores_per_driver,
+#   iterations, num_features, num_clusters (K-Means k, 0 otherwise)
+#   + derived: shard_mb = dataset_mb / num_workers, shard_mb x iterations,
+#              shard_mb x num_features
 #
-# Two TRAINING SETS (thread-capped and uncapped runs are never mixed):
+# Targets (TARGETS): per-driver CPU p95 and mean in cores; memory as the
+# largest driver of the run (RSS p95 and peak, MB), because every driver of a
+# job gets the same memory limit.
+#
+# TRAINING SETS (thread-capped and uncapped runs are never mixed):
 #   capped    runs with a BLAS/OpenMP thread cap and a recorded workload
-#             design — the environment the allocator deploys
-#   uncapped  the earlier grid / floor runs without a cap — kept as the
-#             comparison ("uncapped demand") and to reproduce earlier results
+#             design (Sets A, B, D) — the environment the allocator deploys
+#   uncapped  runs without a thread cap: none in the current data; kept so
+#             such runs are never mixed into the capped models
 #
 # Models (one per target; CPU and memory are trained separately):
 #   lookup  median of the most specific matching configuration seen in
@@ -50,20 +57,41 @@ CATEGORICAL_FEATURES = ["workload_type"]
 NUMERIC_FEATURES = ["dataset_mb", "num_workers", "cores_per_driver", "heap_mb_per_driver"]
 FEATURES = CATEGORICAL_FEATURES + NUMERIC_FEATURES
 DESIGN_FEATURES = ["iterations", "num_features", "num_clusters"]
+# engineered inputs of the predictor handoff, computed from pre-launch inputs
+DERIVED_FEATURES = ["shard_mb", "shard_x_iters", "shard_x_features"]
 
 # numeric inputs used in log2 form by the linear models (all strictly positive)
-LOG_FEATURES = ("dataset_mb", "heap_mb_per_driver", "iterations", "num_features")
+LOG_FEATURES = (
+    "dataset_mb",
+    "heap_mb_per_driver",
+    "iterations",
+    "num_features",
+    *DERIVED_FEATURES,
+)
 
 TRAINING_SETS: dict[str, dict] = {
     "capped": {
-        "numeric": NUMERIC_FEATURES + DESIGN_FEATURES,
-        "description": "thread-capped runs with recorded workload design",
+        # no heap: it is fixed per workload in the runs and not an allocator input
+        "numeric": ["dataset_mb", "num_workers", "cores_per_driver"]
+        + DESIGN_FEATURES
+        + DERIVED_FEATURES,
+        "description": "thread-capped DOE runs (Sets A, B, D) with the handoff inputs",
     },
     "uncapped": {
         "numeric": NUMERIC_FEATURES,
-        "description": "earlier runs without a thread cap (comparison only)",
+        "description": "runs without a thread cap (none in the current data)",
     },
 }
+
+
+def add_derived(df: pd.DataFrame) -> pd.DataFrame:
+    """Copy of df with the derived inputs (data per driver and its products)."""
+    out = df.copy()
+    shard = out["dataset_mb"] / out["num_workers"]
+    out["shard_mb"] = shard
+    out["shard_x_iters"] = shard * out["iterations"] if "iterations" in out else np.nan
+    out["shard_x_features"] = shard * out["num_features"] if "num_features" in out else np.nan
+    return out
 
 
 def features_for(training_set: str) -> list[str]:
@@ -86,24 +114,26 @@ def select_training_rows(df: pd.DataFrame, training_set: str) -> tuple[pd.DataFr
     info["workloads_dropped_entirely"] = sorted(
         set(d.loc[unknown, "workload_type"]) - set(d.loc[~unknown, "workload_type"])
     )
-    d = d[~unknown].copy()
+    d = add_derived(d[~unknown])
     check_features(d, features_for(training_set))
     return d, info
 
 
-# Most specific → least specific key for the lookup baseline.
+# Fallback keys of the lookup baseline after the full feature key, most →
+# least specific (levels whose columns are not model inputs are skipped).
 LOOKUP_LEVELS: list[list[str]] = [
-    FEATURES,
     ["workload_type", "dataset_mb", "num_workers", "cores_per_driver"],
     ["workload_type", "dataset_mb", "num_workers"],
     ["workload_type"],
     [],
 ]
 
+# target → unit.  The first two are the targets named in the predictor handoff.
 TARGETS: dict[str, str] = {
-    "cpu_cores_mean": "cores",
-    "cpu_cores_p95": "cores",
-    "mem_mb_peak": "MB",
+    "cpu_cores_p95": "cores",  # per driver
+    "mem_mb_p95_max": "MB",  # largest driver of the run
+    "cpu_cores_mean": "cores",  # per driver
+    "mem_mb_peak_max": "MB",  # largest driver of the run
 }
 
 RIDGE_ALPHAS = [0.1, 1.0, 10.0, 100.0]
@@ -209,14 +239,16 @@ def make_ridge_wl(alpha: float = 1.0, numeric: list[str] = NUMERIC_FEATURES) -> 
 class LookupModel:
     """
     Median of the training rows that share the most specific configuration
-    key available (see LOOKUP_LEVELS; with extra `features` the full
-    feature key is tried first).  `level_used_` records which level
-    answered each prediction, so fallbacks are visible in the report.
+    key available: the full feature key first, then the coarser keys of
+    LOOKUP_LEVELS.  `level_used_` records which level answered each
+    prediction, so fallbacks are visible in the report.
     """
 
     def __init__(self, features: list[str] = FEATURES):
         self.features = features
-        self.levels = LOOKUP_LEVELS if features == FEATURES else [features, *LOOKUP_LEVELS]
+        self.levels = [features] + [
+            lvl for lvl in LOOKUP_LEVELS if set(lvl) <= set(features) and lvl != features
+        ]
 
     def fit(self, X: pd.DataFrame, y) -> LookupModel:
         y = pd.Series(np.asarray(y, dtype=float), index=X.index)

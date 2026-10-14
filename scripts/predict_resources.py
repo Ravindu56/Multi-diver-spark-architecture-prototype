@@ -4,18 +4,20 @@
 # Phase 6 — ask the trained resource predictor about one job (by hand)
 #
 #   python scripts/predict_resources.py --workload logreg --dataset-mb 100 \
-#       --workers 2 --cores 1,2,4,8 --heap-mb 6144 --iterations 30 --features 20
+#       --workers 2 --cores 1,2,4,8 --iterations 30 --features 20
 #
 # Prints one line per value of --cores (a comma list answers "what if I give
-# it X cores?").  All values are PER DRIVER; "upper" = prediction + the
-# calibrated margin of that workload.  --json prints the full
+# it X cores?").  CPU is per driver, memory is the largest driver (every
+# driver gets the same limit); "upper" = prediction + the calibrated margin
+# of that workload.  --json prints the full
 # PredictionResult records (mpj_spark/resource_prediction/predictor.py).
 #
 # CLI FLAGS
 #   --model-dir PATH     trained models  (default: data/models/local_capped)
 #   --model NAME         best_cv (default) | lookup | ridge | ridge_wl | rf
 #   --workload NAME      kmeans | logreg | ...
-#   --dataset-mb MB      --workers N (drivers)   --cores LIST   --heap-mb MB
+#   --dataset-mb MB      --workers N (drivers)   --cores LIST
+#   --heap-mb MB         only for models trained with the heap as input
 #   --iterations N       planned iterations      --features N
 #   --k N                K-Means clusters (default 0 = not K-Means)
 #   --thread-cap N       BLAS/OpenMP threads (default: same as cores)
@@ -51,7 +53,7 @@ def _parse_args(argv=None):
     p.add_argument("--dataset-mb", type=float, required=True)
     p.add_argument("--workers", type=int, required=True)
     p.add_argument("--cores", required=True, help="cores per driver, e.g. 4 or 1,2,4,8")
-    p.add_argument("--heap-mb", type=float, required=True)
+    p.add_argument("--heap-mb", type=float)
     p.add_argument("--iterations", type=int)
     p.add_argument("--features", type=int)
     p.add_argument("--k", type=int, default=0)
@@ -93,16 +95,18 @@ def main(argv=None):
         f"model {first.model_version} · training set {first.training_set} · "
         f"upper = {first.upper_quantile:.0%} margin · source {first.source}"
     )
-    print("values are PER DRIVER; (≤x) = upper bound")
+    print("CPU per driver, memory of the largest driver; (≤x) = upper bound")
     print(
-        f"{'cores':>5}  {'CPU avg (cores)':>17}  {'CPU p95 (cores)':>17}  {'peak mem (MB)':>19}  status"
+        f"{'cores':>5}  {'CPU p95 (cores)':>17}  {'CPU avg (cores)':>17}  "
+        f"{'mem p95 (MB)':>19}  {'mem peak (MB)':>19}  status"
     )
     for req, res in zip(requests, results, strict=True):
         print(
             f"{req.cores_per_driver:>5g}  "
-            f"{_cell(res.cpu_cores_mean, res.cpu_cores_mean_upper, 2):>17}  "
             f"{_cell(res.cpu_cores_p95, res.cpu_cores_p95_upper, 2):>17}  "
-            f"{_cell(res.mem_mb_peak, res.mem_mb_peak_upper, 0):>19}  {res.status}"
+            f"{_cell(res.cpu_cores_mean, res.cpu_cores_mean_upper, 2):>17}  "
+            f"{_cell(res.mem_mb_p95_max, res.mem_mb_p95_max_upper, 0):>19}  "
+            f"{_cell(res.mem_mb_peak_max, res.mem_mb_peak_max_upper, 0):>19}  {res.status}"
         )
     remarks = dict.fromkeys(r for res in results for r in res.reasons + res.notes)
     for remark in remarks:

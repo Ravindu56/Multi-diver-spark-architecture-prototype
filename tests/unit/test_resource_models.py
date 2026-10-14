@@ -37,6 +37,8 @@ def _frame(n_per_group=2, seed=0):
                                 "cpu_cores_mean": cpu,
                                 "cpu_cores_p95": cpu * 1.2,
                                 "mem_mb_peak": mem,
+                                "mem_mb_p95_max": 0.95 * mem,
+                                "mem_mb_peak_max": mem,
                                 "rep": rep,
                             }
                         )
@@ -146,12 +148,12 @@ def test_training_script_end_to_end(tmp_path, monkeypatch):
     card = json.loads((out / "model_card.json").read_text())
     assert card["rows"]["rows_dropped_unknown_inputs"] == 2
     assert card["rows"]["workloads_dropped_entirely"] == ["wordcount"]
-    assert (out / "mem_mb_peak__rf.joblib").exists()
+    assert (out / "mem_mb_peak_max__rf.joblib").exists()
     cv = pd.read_csv(out / "cv_metrics.csv")
     assert set(cv["model"]) == {"lookup", "ridge", "ridge_wl", "rf"}
-    sel = card["choices"]["mem_mb_peak"]["selected"]
+    sel = card["choices"]["mem_mb_peak_max"]["selected"]
     assert sel["ridge"].startswith("ridge|") and sel["rf"].startswith("rf|")
-    assert "mae_diff_ci95" in card["choices"]["mem_mb_peak"]["cv_uncertainty"]["rf"]
+    assert "mae_diff_ci95" in card["choices"]["mem_mb_peak_max"]["cv_uncertainty"]["rf"]
     preds = pd.read_csv(out / "predictions_test.csv")
     test_keys = set(df.loc[df["split"] == "test", "run_key"])
     assert set(preds["run_key"].astype(str)) == test_keys  # only TEST rows scored
@@ -179,7 +181,10 @@ def test_training_sets_never_mix_environments():
     uncapped, _ = m.select_training_rows(df, "uncapped")
     assert capped["thread_cap"].notna().all() and uncapped["thread_cap"].isna().all()
     assert len(capped) + len(uncapped) == len(df)
-    assert m.features_for("capped")[-3:] == m.DESIGN_FEATURES
+    capped_inputs = m.features_for("capped")
+    assert set(m.DESIGN_FEATURES + m.DERIVED_FEATURES) <= set(capped_inputs)
+    assert "heap_mb_per_driver" not in capped_inputs  # fixed per workload in the runs
+    assert set(m.DERIVED_FEATURES) <= set(capped.columns)  # added by the selection
     assert m.features_for("uncapped") == m.FEATURES
 
 
@@ -191,11 +196,28 @@ def test_capped_set_drops_rows_without_design():
     assert info["workloads_dropped_entirely"] == ["logreg"]
 
 
+def test_derived_inputs_follow_the_handoff():
+    df = pd.DataFrame(
+        {"dataset_mb": [100.0], "num_workers": [2], "iterations": [30], "num_features": [20]}
+    )
+    d = m.add_derived(df)
+    assert d[m.DERIVED_FEATURES].iloc[0].tolist() == [50.0, 1500.0, 1000.0]
+
+
+def test_lookup_skips_levels_with_columns_that_are_not_inputs():
+    feats = m.features_for("capped")
+    levels = m.LookupModel(feats).levels
+    assert levels[0] == feats and levels[-1] == []
+    assert all(set(lvl) <= set(feats) for lvl in levels)
+    assert m.LookupModel().levels[0] == m.FEATURES  # base inputs unchanged
+
+
 def test_design_features_reach_every_model():
     rng = np.random.default_rng(0)
     df = _env_frame()
     df = df[df["thread_cap"].notna()].copy()
     df["iterations"] = rng.choice([10.0, 20.0, 40.0], len(df))
+    df = m.add_derived(df)
     df["cpu_cores_mean"] = np.log2(df["iterations"]) + (df["workload_type"] == "logreg")
     feats = m.features_for("capped")
     num = m.TRAINING_SETS["capped"]["numeric"]

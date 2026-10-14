@@ -46,11 +46,14 @@ def _capped_frame(seed=0):
                                 "cpu_cores_mean": cpu,
                                 "cpu_cores_p95": 1.3 * cpu,
                                 "mem_mb_peak": 800 + 4 * size + 100 * cores + rng.normal(0, 20),
+                                "mem_mb_p95_max": 750 + 4 * size + 100 * cores,
+                                "mem_mb_peak_max": 800 + 4 * size + 100 * cores,
                                 "rep": rep,
                             }
                         )
     df = pd.DataFrame(rows)
-    df["config_group"] = df[m.features_for("capped")].astype(str).agg("|".join, axis=1)
+    key_cols = [c for c in m.features_for("capped") if c not in m.DERIVED_FEATURES]
+    df["config_group"] = df[key_cols].astype(str).agg("|".join, axis=1)
     groups = sorted(df["config_group"].unique())
     split = {
         g: ("test" if i % 6 == 0 else "val" if i % 6 == 1 else "train")
@@ -86,7 +89,6 @@ def _req(**kw):
         "dataset_mb": 100,
         "num_workers": 2,
         "cores_per_driver": 4,
-        "heap_mb_per_driver": 6144,
         "iterations": 20,
         "num_features": 16,
     }
@@ -117,7 +119,8 @@ def test_card_records_margins_inputs_and_cap_rule(model_dir):
     cores = card["valid_inputs"]["logreg"]["cores_per_driver"]
     assert cores["min"] == 1 and cores["max"] == 8
     assert set(cores["values"]) <= {1, 2, 4, 8}
-    assert card["valid_inputs"]["kmeans"]["heap_mb_per_driver"]["values"] == [3072]
+    assert "heap_mb_per_driver" not in card["valid_inputs"]["kmeans"]  # not an input
+    assert not set(m.DERIVED_FEATURES) & set(card["valid_inputs"]["kmeans"])  # follow inputs
 
 
 def test_upper_margins_fall_back_to_pooled_for_small_workloads():
@@ -156,7 +159,7 @@ def test_predict_many_matches_single_requests(model_dir):
     batch = p.predict_many(reqs)
     for got, req in zip(batch, reqs, strict=True):
         _same(got.to_dict(), p.predict(req).to_dict())
-    assert batch[0].source["mem_mb_peak"] == "local_ridge_wl"
+    assert batch[0].source["mem_mb_peak_max"] == "local_ridge_wl"
 
 
 def test_best_cv_picks_lowest_out_of_fold_error(model_dir):
@@ -176,12 +179,12 @@ def test_missing_or_invalid_inputs_are_rejected(model_dir):
     with pytest.raises(ValueError, match="dataset_mb must be > 0"):
         p.predict(_req(dataset_mb=0))
     with pytest.raises(ValueError, match="num_clusters"):
-        p.predict(_req(workload_type="kmeans", heap_mb_per_driver=3072, num_clusters=0))
+        p.predict(_req(workload_type="kmeans", num_clusters=0))
 
 
 def test_workload_without_training_data_is_unsupported(model_dir):
     p = pr.ResourcePredictor.load(str(model_dir), "rf")
-    res = p.predict(pr.PredictionRequest("wordcount", 50, 2, 4, 3072))
+    res = p.predict(pr.PredictionRequest("wordcount", 50, 2, 4))
     assert res.status == "unsupported" and res.cpu_cores_mean is None
     assert "wordcount" in res.reasons[0] and "fallback" in res.reasons[0]
     assert set(res.source.values()) == {"none"}
@@ -192,7 +195,7 @@ def test_workload_without_training_data_is_unsupported(model_dir):
     [
         ({"cores_per_driver": 16, "thread_cap": 16}, "cores_per_driver=16 outside"),
         ({"dataset_mb": 1000}, "dataset_mb=1000 outside"),
-        ({"heap_mb_per_driver": 4096}, "heap_mb_per_driver=4096 outside"),
+        ({"iterations": 100}, "iterations=100 outside"),
         ({"thread_cap": 2}, "thread_cap=2 differs"),
     ],
 )
@@ -209,6 +212,12 @@ def test_unmeasured_value_inside_range_is_only_a_note(model_dir):
     res = p.predict(_req(cores_per_driver=3))
     assert res.status == "ok" and not res.reasons
     assert any("cores_per_driver=3 was not measured" in n for n in res.notes)
+
+
+def test_request_computes_the_derived_inputs():
+    row = _req(dataset_mb=100, num_workers=2, iterations=30, num_features=20).feature_row()
+    assert (row["shard_mb"], row["shard_x_iters"], row["shard_x_features"]) == (50, 1500, 1000)
+    assert pr.PredictionRequest("kmeans", 100, 2, 4).feature_row()["shard_x_iters"] is None
 
 
 def test_non_kmeans_ignores_cluster_count(model_dir):
@@ -256,7 +265,7 @@ def test_cli_table_and_json(model_dir, capsys):
     results = cli.main(args)
     out = capsys.readouterr().out
     assert [r.status for r in results] == ["ok", "ok", "out_of_domain"]
-    assert "PER DRIVER" in out and "cores_per_driver=16 outside" in out
+    assert "memory of the largest driver" in out and "cores_per_driver=16 outside" in out
     cli.main([*args, "--json"])
     records = json.loads(capsys.readouterr().out)
     assert len(records) == 3 and records[0]["source"]["cpu_cores_mean"] == "local_rf"
