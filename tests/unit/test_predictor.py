@@ -150,7 +150,9 @@ def test_in_domain_request_gets_predictions_and_upper_bounds(model_dir):
     for target in m.TARGETS:
         value, upper = getattr(res, target), getattr(res, f"{target}_upper")
         assert value > 0
-        assert upper - value == pytest.approx(card[target]["upper_margins"]["rf"]["logreg"])
+        method = pr.MARGIN_POLICY.get(target, {}).get("logreg", pr.DEFAULT_MARGIN_METHOD)
+        margin = m.margin_for(card[target]["calibrated_margins"]["rf"][method], "logreg")
+        assert upper == pytest.approx(m.apply_margin(value, margin, method))
     assert res.source == {t: "local_rf" for t in m.TARGETS}
     assert res.model_version == p.card["model_version"]
     assert res.cpu_cores_mean == pytest.approx(2.0, abs=0.5)  # 1 + 0.5·log2(4)
@@ -212,6 +214,17 @@ def test_out_of_domain_requests_are_flagged(model_dir, change, flagged):
     assert res.status == "out_of_domain" and res.out_of_domain
     assert any(flagged in r for r in res.reasons)
     assert res.cpu_cores_mean is not None  # numbers still given; allocator decides
+
+
+def test_data_per_driver_beyond_measured_is_flagged(model_dir):
+    p = pr.ResourcePredictor.load(str(model_dir), "rf")
+    assert p.predict(_req()).status == "ok"  # 100 MB / 2 workers = 50 MB per driver
+    for entry in p.card["growth_trends"]["size"]["logreg"].values():
+        entry["x_max"] = 40.0  # pretend the largest measured was 40 MB per driver
+    res = p.predict(_req())  # dataset_mb and num_workers each still in range
+    assert res.status == "out_of_domain"
+    assert any("data per driver 50 MB" in r and "largest measured 40 MB" in r for r in res.reasons)
+    assert not any("dataset_mb=" in r or "num_workers=" in r for r in res.reasons)
 
 
 def test_unmeasured_value_inside_range_is_only_a_note(model_dir):
@@ -286,6 +299,36 @@ def test_kmeans_peak_memory_uses_the_power_law_model(model_dir):
     assert lr.source["mem_mb_peak_max"] == pr.SOURCE_NAMES[p.families["mem_mb_peak_max"]]
     explicit = pr.ResourcePredictor.load(str(model_dir), "rf")  # explicit model: no exceptions
     assert explicit.family_for("mem_mb_peak_max", "kmeans") == "rf"
+
+
+def test_card_has_calibrated_and_beyond_range_margins(model_dir):
+    card = json.loads((model_dir / "model_card.json").read_text())
+    cal = card["choices"]["cpu_cores_p95"]["calibrated_margins"]["rf_wl"]
+    assert set(cal) == set(m.MARGIN_METHODS)
+    assert "cores" in card["extrapolation_margins"]["cpu_cores_p95"]
+
+
+def test_margin_method_follows_the_policy(model_dir):
+    p = pr.ResourcePredictor.load(str(model_dir))
+    cal = p.card["choices"]["cpu_cores_p95"]["calibrated_margins"]["rf_wl"]
+    lr = p.predict(_req())  # LogReg: relative margin
+    r = m.margin_for(cal["relative_groups"], "logreg")
+    assert lr.cpu_cores_p95_upper == pytest.approx(lr.cpu_cores_p95 * (1 + r))
+    km = p.predict(_req(workload_type="kmeans", num_clusters=5))  # K-Means: additive margin
+    a = m.margin_for(cal["additive_rows"], "kmeans")
+    assert km.cpu_cores_p95_upper == pytest.approx(km.cpu_cores_p95 + a)
+
+
+def test_beyond_range_requests_get_the_stress_test_floor(model_dir):
+    p = pr.ResourcePredictor.load(str(model_dir))
+    km = {"workload_type": "kmeans", "num_clusters": 5}
+    # K-Means: the synthetic table has data per driver above the 50 MB stress limit
+    p.card["extrapolation_margins"]["mem_mb_p95_max"]["size"]["kmeans"]["margin"] = 2.0
+    res = p.predict(_req(dataset_mb=400, num_workers=1, **km))  # beyond the measured size
+    assert res.mem_mb_p95_max_upper == pytest.approx(res.mem_mb_p95_max * 3.0)
+    assert any("upper bound widened" in n for n in res.notes)
+    inside = p.predict(_req(**km))
+    assert not any("upper bound widened" in n for n in inside.notes)
 
 
 def test_size_trend_is_scout_informed_by_default(model_dir):

@@ -254,3 +254,21 @@ def test_trend_tests_script_end_to_end(tmp_path):
     case = report["cases"]["size_S2|size|logreg|mem_mb_p95_max"]
     assert case["beta_scout"]["beta"] == pytest.approx(0.3, abs=1e-6)
     assert case["beta_combined"]["source"] == "scout_informed"
+
+
+# ── beyond-range margins (calibration.py) ─────────────────────
+
+
+def test_stress_margins_score_core_sweeps_only():
+    from mpj_spark.resource_prediction import calibration as cal
+
+    local = m.add_derived(_local())  # cores 1, 2, 4 for both workloads
+    local["experiment"] = np.where(local["cores_per_driver"] == 4, "A", "D")
+    local.loc[(local["cores_per_driver"] == 4) & (local["rep"] == 1), "experiment"] = "D"
+    keys = {"kmeans": "ridge_wl|1.0", "logreg": "ridge_wl|1.0"}
+    out = cal.stress_margins(local, "mem_mb_p95_max", keys, {}, None, "capped")
+    km_cores = out["cores"]["kmeans"]
+    held_d = local[(local["workload_type"] == "kmeans") & (local["cores_per_driver"] > 2)]
+    assert km_cores["rows"] == int((held_d["experiment"] == "D").sum())  # Set A not scored
+    assert out["size"]["kmeans"]["rows"] > 0 and km_cores["margin"] >= 0
+    assert "cores" not in out or "logreg" not in out["cores"]  # LogReg has nothing above 4 cores

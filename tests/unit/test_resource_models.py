@@ -386,3 +386,41 @@ def test_power_law_ridge_recovers_a_power_law_and_stays_positive():
     expected = 300 * 800**0.4 * np.where(big["workload_type"] == "logreg", 2, 1)
     assert model.predict(big[m.FEATURES]) == pytest.approx(expected, rel=0.05)  # extrapolates
     assert (model.predict(big[m.FEATURES]) > 0).all()
+
+
+# ── calibrated margins (step A3) ──────────────────────────────
+
+
+def _residual_rows():
+    """One big group with large residuals, nine small groups with small ones."""
+    rows = [{"config_group": "big", "actual": 20.0, "predicted": 10.0} for _ in range(30)]
+    for g in range(9):
+        rows += [{"config_group": f"g{g}", "actual": 11.0, "predicted": 10.0} for _ in range(2)]
+    df = pd.DataFrame(rows)
+    df["workload_type"] = "kmeans"
+    return df
+
+
+def test_weighted_quantile():
+    assert m.weighted_quantile([1, 2, 3, 4], [1, 1, 1, 1], 0.5) == 2
+    assert m.weighted_quantile([1, 2, 3, 4], [3, 1, 1, 1], 0.5) == 1
+
+
+def test_group_weighting_stops_one_big_group_dominating():
+    rows = _residual_rows()
+    by_rows = m.calibrate_margin(rows, 0.5, "additive_rows")
+    by_groups = m.calibrate_margin(rows, 0.5, "additive_groups")
+    assert by_rows == pytest.approx(10.0)  # 30 of 48 rows come from one group
+    assert by_groups == pytest.approx(1.0)  # each group counts once
+
+
+def test_conformal_level_and_relative_margin():
+    rows = _residual_rows()
+    # level q·(1 + 1/G) with G = 10 groups: 0.9 → 0.99, reaching the big group
+    assert m.calibrate_margin(rows, 0.9, "additive_groups") == pytest.approx(10.0)
+    rel = m.calibrate_margin(rows, 0.5, "relative_groups")
+    assert rel == pytest.approx(0.1)  # (11 - 10) / 10
+    assert m.apply_margin(200.0, rel, "relative_groups") == pytest.approx(220.0)
+    assert m.apply_margin(200.0, 5.0, "additive_rows") == pytest.approx(205.0)
+    out = m.calibrated_margins(rows, 0.9)
+    assert set(out) == set(m.MARGIN_METHODS) and set(out["additive_rows"]) == {"pooled", "kmeans"}

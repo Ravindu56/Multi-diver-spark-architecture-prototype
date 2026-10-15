@@ -28,7 +28,9 @@
 #   * pre-launch inputs only; `iterations` is the PLANNED iteration count
 #   * missing / invalid mandatory inputs are rejected (ValueError)
 #   * inputs outside the values measured for that workload are flagged,
-#     never silently trusted; values between measured ones become notes
+#     never silently trusted; values between measured ones become notes;
+#     so is data per driver (dataset_mb / num_workers) beyond the largest
+#     measured, even when each input alone is in range
 #   * no numbers are invented for workloads without training data — they
 #     come back "unsupported" so the allocator uses its static fallback
 #   * this module predicts DEMAND; turning demand into Docker limits, with a
@@ -60,7 +62,7 @@ import sklearn
 from mpj_spark.resource_prediction import models as m
 
 # model card layout this module understands (written by the training script)
-CARD_SCHEMA_VERSION = 3
+CARD_SCHEMA_VERSION = 4
 
 # model family in the model card → provenance name reported to the allocator
 SOURCE_NAMES: dict[str, str] = {
@@ -85,6 +87,16 @@ FAMILY_POLICY: dict[str, str] = {"cpu_cores_p95": "rf_wl", "cpu_cores_mean": "rf
 #   scripts/kmeans_memory_test.py — beats ridge_wl in range (−4.6 MB, CI below
 #   0) and in the extrapolation check (−14.6 MB); K-Means memory p95 and all
 #   LogReg memory keep ridge_wl (no candidate qualified there).
+# Upper-bound method per target and workload (models.MARGIN_METHODS); default
+# "additive_rows".  Decided by scripts/upper_bound_tests.py (calibration-CV on
+# train+val: the narrowest method with coverage >= 0.88): LogReg CPU uses a
+# relative margin (same coverage, narrower), everything else the original one.
+MARGIN_POLICY: dict[str, dict[str, str]] = {
+    "cpu_cores_p95": {"logreg": "relative_groups"},
+    "cpu_cores_mean": {"logreg": "relative_groups"},
+}
+DEFAULT_MARGIN_METHOD = "additive_rows"
+
 WORKLOAD_FAMILY_POLICY: dict[str, dict[str, str]] = {
     "mem_mb_peak_max": {"kmeans": "ridge_log_wl"},
 }
@@ -292,6 +304,16 @@ class ResourcePredictor:
                     f"{col}={_fmt(v)} was not measured for {wl} (measured: {measured}); "
                     "the model interpolates"
                 )
+        # each input can be in range while their combination is not: 125 MB on
+        # 1 worker = 125 MB per driver, beyond the largest measured (card x_max)
+        by_target = self.card.get("growth_trends", {}).get("size", {}).get(wl, {})
+        shard_max = max((e["x_max"] for e in by_target.values() if e), default=None)
+        shard = row["dataset_mb"] / row["num_workers"]
+        if shard_max is not None and shard > shard_max:
+            res.reasons.append(
+                f"data per driver {_fmt(shard)} MB (dataset_mb / num_workers) beyond the "
+                f"largest measured {_fmt(shard_max)} MB for {wl}"
+            )
         cap = req.thread_cap if req.thread_cap is not None else req.cores_per_driver
         policy = self.card.get("thread_cap_policy")
         if policy == "equals_cores" and cap != req.cores_per_driver:
@@ -345,9 +367,11 @@ class ResourcePredictor:
             for k, (i, row) in enumerate(zip(idx, rows, strict=True)):
                 res, fam = results[i], fams[k]
                 model, value = by_family[fam], values[k]
-                margins = self.card["choices"][target]["upper_margins"][fam]
+                method = MARGIN_POLICY.get(target, {}).get(res.workload_type, DEFAULT_MARGIN_METHOD)
+                margins = self.card["choices"][target]["calibrated_margins"][fam][method]
                 margin = m.margin_for(margins, res.workload_type)
-                value, upper = self._apply_trends(target, model, row, value, margin, res)
+                value, upper = self._apply_trends(target, model, row, value, margin, method, res)
+                upper = self._extrapolation_floor(target, row, value, upper, res)
                 if value < 0:  # linear models can dip below zero; demand cannot
                     res.notes.append(f"{target} prediction {value:.3f} clipped to 0")
                     value, upper = 0.0, max(upper, 0.0)
@@ -355,7 +379,30 @@ class ResourcePredictor:
                 setattr(res, f"{target}_upper", float(upper))
         return results
 
-    def _apply_trends(self, target, model, row, value, margin, res) -> tuple[float, float]:
+    def _extrapolation_floor(self, target, row, value, upper, res) -> float:
+        """Beyond the measured range: upper >= value × (1 + stress-test margin)."""
+        wl = res.workload_type
+        for axis in ("size", "cores"):
+            entry = self.card.get("growth_trends", {}).get(axis, {}).get(wl, {}).get(target)
+            extra = self.card.get("extrapolation_margins", {}).get(target, {}).get(axis, {}).get(wl)
+            if not entry or not extra:
+                continue
+            x = (
+                row["dataset_mb"] / row["num_workers"]
+                if axis == "size"
+                else row["cores_per_driver"]
+            )
+            if x > entry["x_max"]:
+                floor = value * (1 + extra["margin"])
+                if floor > upper:
+                    upper = floor
+                    res.notes.append(
+                        f"{target}: upper bound widened to +{100 * extra['margin']:.0f} % "
+                        f"beyond the measured {axis} (stress test)"
+                    )
+        return upper
+
+    def _apply_trends(self, target, model, row, value, margin, method, res) -> tuple[float, float]:
         """Prediction and upper bound, grown by TREND_POLICY trends beyond the measured range."""
         wl = res.workload_type
         anchor, factor, applied = dict(row), 1.0, []
@@ -384,11 +431,11 @@ class ResourcePredictor:
             label = TREND_SOURCE_LABELS.get(source, source)
             applied.append(f"{axis}^{beta:.2f} {label} trend from {x_max:g} to {x:g}")
         if not applied:
-            return float(value), float(value + margin)
+            return float(value), float(m.apply_margin(value, margin, method))
         anchor_df = m.add_derived(pd.DataFrame([anchor]))[self.features]
         base = float(model.predict(anchor_df)[0])
         res.source[target] = f"{res.source[target]}+trend"
         res.notes.append(
             f"{target}: grown ×{factor:.2f} beyond the measured range ({'; '.join(applied)})"
         )
-        return base * factor, (base + margin) * factor
+        return base * factor, m.apply_margin(base, margin, method) * factor

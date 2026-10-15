@@ -27,6 +27,8 @@
 #      local train+val rows, from Scout, and Scout-informed) in the model card;
 #      the predictor applies the ones its TREND_POLICY selects beyond the
 #      measured range (see scripts/transfer_trend_tests.py).
+#   9. stores calibrated margins (models.MARGIN_METHODS) and beyond-range
+#      margins from train+val stress tests (calibration.py) in the model card.
 #
 # The model card also records, per workload, the input values the models
 # were trained on (valid_inputs) and the thread-cap rule of the training
@@ -79,9 +81,10 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from mpj_spark.resource_prediction import calibration as cal  # noqa: E402
 from mpj_spark.resource_prediction import models as m  # noqa: E402
+from mpj_spark.resource_prediction import predictor as pr  # noqa: E402
 from mpj_spark.resource_prediction import transfer as t  # noqa: E402
-from mpj_spark.resource_prediction.predictor import CARD_SCHEMA_VERSION  # noqa: E402
 
 # inputs with at most this many distinct training values also list them
 _MAX_LISTED_VALUES = 12
@@ -245,12 +248,13 @@ def select_and_train(
     uncertainty["rf_wl_vs_rf"] = m.group_bootstrap(oof, "rf_wl", baseline="rf")
 
     h = holdout[holdout[target].notna()] if holdout is not None else None
-    rows, preds, fitted, margins_by_model = [], [], {}, {}
+    rows, preds, fitted, margins_by_model, calibrated_by_model = [], [], {}, {}, {}
     holdout_rows, holdout_preds = [], []
     for name, factory in factories.items():
         # per-workload upper margins from out-of-fold residuals of the selection
         margins = m.upper_margins(oof[oof["model"] == name], q)
         margins_by_model[name] = margins
+        calibrated_by_model[name] = m.calibrated_margins(oof[oof["model"] == name], q)
         # final model on TRAIN+VAL, evaluated once on TEST
         model, test_pred = _fit_predict(factory(), trval, test, target, features)
         upper = test_pred + np.array([m.margin_for(margins, w) for w in test["workload_type"]])
@@ -290,6 +294,7 @@ def select_and_train(
         "cv_mae_by_candidate": cand_mae.round(4).to_dict(),
         "cv_uncertainty": uncertainty,
         "upper_margins": margins_by_model,
+        "calibrated_margins": calibrated_by_model,
         "n_trainval_rows": len(trval),
         "n_trainval_groups": int(trval["config_group"].nunique()),
         "n_test_rows": len(test),
@@ -333,6 +338,22 @@ def growth_trends(trval: pd.DataFrame, scout: pd.DataFrame | None) -> dict:
                     "scout": scout_b,
                     "combined": t.combine_elasticity(local, scout_b),
                 }
+    return out
+
+
+def extrapolation_margins(
+    trval: pd.DataFrame, choices: dict, scout: pd.DataFrame | None, training_set: str
+) -> dict:
+    """{target: {axis: {workload: margin info}}} for the families the predictor deploys."""
+    out = {}
+    for target in m.TARGETS:
+        default = pr._pick_family({"choices": choices}, target, "best_cv")
+        sel = choices[target]["selected"]
+        keys = {
+            wl: sel[pr.WORKLOAD_FAMILY_POLICY.get(target, {}).get(wl, default)]
+            for wl in sorted(trval["workload_type"].unique())
+        }
+        out[target] = cal.stress_margins(trval, target, keys, pr.TREND_POLICY, scout, training_set)
     return out
 
 
@@ -385,8 +406,9 @@ def main(argv=None):
     with open(args.drivers, "rb") as fh:
         data_sha = hashlib.sha256(fh.read()).hexdigest()
     trval = df[df["split"].isin(["train", "val"])]
+    scout = pd.read_csv(args.scout_hosts) if os.path.isfile(args.scout_hosts) else None
     card = {
-        "card_schema_version": CARD_SCHEMA_VERSION,
+        "card_schema_version": pr.CARD_SCHEMA_VERSION,
         "model_version": f"{args.training_set}-{data_sha[:12]}",
         "stage": "local_only_baselines",
         "training_set": args.training_set,
@@ -412,10 +434,12 @@ def main(argv=None):
             else {},
         },
         "noise_ceiling": ceilings,
-        "growth_trends": growth_trends(
-            trval,
-            pd.read_csv(args.scout_hosts) if os.path.isfile(args.scout_hosts) else None,
+        "growth_trends": growth_trends(trval, scout),
+        "extrapolation_margins": extrapolation_margins(
+            trval, card_targets, scout, args.training_set
         ),
+        "extrapolation_margins_note": "relative margins from train+val stress tests "
+        "(calibration.py); the predictor uses them as a floor beyond the measured range",
         "growth_trends_note": "x_max = largest data per driver (size) or cores (cores) in "
         "train+val; beta: demand ∝ x^beta; applied by the predictor's TREND_POLICY only",
         "upper_quantile": args.upper_quantile,

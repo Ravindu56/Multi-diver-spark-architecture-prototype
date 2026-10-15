@@ -150,6 +150,33 @@ RIDGE_ALPHAS = [0.1, 1.0, 10.0, 100.0]
 RF_GRID = [{"max_depth": d, "min_samples_leaf": leaf} for d in (3, 5, 8) for leaf in (2, 5)]
 
 
+def factory_from_key(key: str, numeric: list[str], n_estimators: int | None = None):
+    """
+    Model factory from a CV selection key such as 'rf_wl|8|2' or 'ridge_wl|0.1'.
+    Forests use make_rf's default size unless `n_estimators` is given.
+    """
+    family, *params = key.split("|")
+    if family == "lookup":
+        return lambda: LookupModel(CATEGORICAL_FEATURES + numeric)
+    if family in ("rf", "rf_wl"):
+        kw = {"max_depth": int(params[0]), "min_samples_leaf": int(params[1])}
+        if n_estimators is not None:
+            kw["n_estimators"] = n_estimators
+        if family == "rf":
+            return lambda: make_rf(**kw)
+        return lambda: PerWorkloadModel(make_rf(**kw))
+    builders = {
+        "ridge": make_ridge,
+        "ridge_wl": make_ridge_wl,
+        "ridge_log_wl": make_ridge_log_wl,
+        "ridge_int_wl": make_ridge_int_wl,
+    }
+    if family in builders:
+        alpha = float(params[0])
+        return lambda: builders[family](alpha, numeric)
+    raise ValueError(f"unknown model key {key!r}")
+
+
 def check_features(df: pd.DataFrame, features: list[str] = FEATURES) -> None:
     """Reject rows that miss a mandatory pre-run input."""
     missing = [c for c in features if c not in df]
@@ -413,6 +440,61 @@ def upper_margins(oof: pd.DataFrame, quantile: float = 0.9) -> dict[str, float]:
     for wl, g in oof.groupby("workload_type"):
         if len(g) >= MIN_ROWS_WORKLOAD_MARGIN:
             out[wl] = upper_margin(g["actual"], g["predicted"], quantile)
+    return out
+
+
+# ── calibrated margins: methods compared in scripts/upper_bound_tests.py ──
+#   additive_rows    q-quantile of (actual − predicted) over rows (the original)
+#   additive_groups  same score, every configuration group weighted equally and
+#                    a finite-sample (conformal) correction of the level
+#   relative_groups  score (actual − predicted) / predicted, group-weighted with
+#                    the same correction; upper = predicted × (1 + margin), so the
+#                    margin grows with the size of the prediction
+MARGIN_METHODS = ("additive_rows", "additive_groups", "relative_groups")
+
+
+def weighted_quantile(values, weights, level: float) -> float:
+    """Smallest value whose cumulative weight share reaches `level`."""
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    order = np.argsort(v)
+    cum = np.cumsum(w[order]) / w.sum()
+    return float(v[order][min(np.searchsorted(cum, level), len(v) - 1)])
+
+
+def margin_score(actual, predicted, method: str) -> np.ndarray:
+    a, p = np.asarray(actual, dtype=float), np.asarray(predicted, dtype=float)
+    if method == "relative_groups":
+        return (a - p) / np.maximum(np.abs(p), 1e-9)
+    return a - p
+
+
+def calibrate_margin(rows: pd.DataFrame, quantile: float, method: str) -> float:
+    """Margin from out-of-fold rows (actual, predicted, config_group) for one method."""
+    score = margin_score(rows["actual"], rows["predicted"], method)
+    if method == "additive_rows":
+        return float(max(np.quantile(score, quantile), 0.0))
+    sizes = rows.groupby("config_group")["actual"].transform("size").to_numpy(float)
+    n_groups = rows["config_group"].nunique()
+    level = min(1.0, quantile * (1 + 1 / n_groups))  # conformal correction
+    return float(max(weighted_quantile(score, 1 / sizes, level), 0.0))
+
+
+def apply_margin(predicted, margin: float, method: str):
+    """Upper bound for a prediction (array or float) under a margin method."""
+    if method == "relative_groups":
+        return predicted * (1 + margin)
+    return predicted + margin
+
+
+def calibrated_margins(oof: pd.DataFrame, quantile: float = 0.9) -> dict:
+    """{method: {workload | "pooled": margin}} for every MARGIN_METHODS entry."""
+    out = {}
+    for method in MARGIN_METHODS:
+        out[method] = {"pooled": calibrate_margin(oof, quantile, method)}
+        for wl, g in oof.groupby("workload_type"):
+            if len(g) >= MIN_ROWS_WORKLOAD_MARGIN:
+                out[method][wl] = calibrate_margin(g, quantile, method)
     return out
 
 
