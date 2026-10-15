@@ -127,15 +127,18 @@ def load_holdout_rows(path: str, training_set: str) -> pd.DataFrame:
     return m.add_derived(h) if len(h) else h
 
 
-def noise_ceiling(path: str, target: str) -> dict | None:
+def noise_ceiling(path: str, target: str, workload: str | None = None) -> dict | None:
     """
     R² reached by the mean of replicate runs of each exact configuration
-    (Sets D + E2): 1 − within-configuration SS / total SS.
+    (Sets D + E2): 1 − within-configuration SS / total SS; optionally for
+    one workload only.
     """
     df = pd.read_csv(path)
     if "exact_config" not in df or "experiment" not in df:
         return None
     d = df[df["experiment"].isin(NOISE_CEILING_SETS) & (df["status"] == "ok")]
+    if workload is not None:
+        d = d[d["workload_type"] == workload]
     d = d[d[target].notna()]
     d = d[d.groupby("exact_config")[target].transform("size") >= 2]
     if d.empty:
