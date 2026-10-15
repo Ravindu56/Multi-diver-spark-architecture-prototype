@@ -53,6 +53,7 @@ import os
 from dataclasses import asdict, dataclass, field
 
 import joblib
+import numpy as np
 import pandas as pd
 import sklearn
 
@@ -68,6 +69,7 @@ SOURCE_NAMES: dict[str, str] = {
     "ridge_wl": "local_ridge_wl",
     "rf": "local_rf",
     "rf_wl": "local_rf_wl",
+    "ridge_log_wl": "local_ridge_log_wl",
 }
 MODEL_CHOICES = ["best_cv", *SOURCE_NAMES]
 
@@ -78,6 +80,14 @@ MODEL_CHOICES = ["best_cv", *SOURCE_NAMES]
 #   (T3: CPU p95 MAE 6.35 → 0.47 cores) while in-range accuracy is not worse.
 BEST_CV_FAMILIES = ("lookup", "ridge", "ridge_wl", "rf")
 FAMILY_POLICY: dict[str, str] = {"cpu_cores_p95": "rf_wl", "cpu_cores_mean": "rf_wl"}
+# Per-workload exceptions in "best_cv" mode (target → workload → family):
+#   K-Means peak memory → ridge_log_wl (per-workload power law):
+#   scripts/kmeans_memory_test.py — beats ridge_wl in range (−4.6 MB, CI below
+#   0) and in the extrapolation check (−14.6 MB); K-Means memory p95 and all
+#   LogReg memory keep ridge_wl (no candidate qualified there).
+WORKLOAD_FAMILY_POLICY: dict[str, dict[str, str]] = {
+    "mem_mb_peak_max": {"kmeans": "ridge_log_wl"},
+}
 
 # Growth trends used BEYOND the measured range: axis → workload → target →
 # beta source ("combined" = Scout-informed, "local" = local data only).
@@ -186,10 +196,18 @@ def _pick_family(card: dict, target: str, model: str) -> str:
 class ResourcePredictor:
     """Trained per-driver CPU / memory models plus the checks around them."""
 
-    def __init__(self, card: dict, models: dict, families: dict[str, str], trends: str = "policy"):
+    def __init__(
+        self,
+        card: dict,
+        models: dict,
+        families: dict[str, str],
+        trends: str = "policy",
+        overrides: dict[str, dict[str, str]] | None = None,
+    ):
         self.card = card
-        self.models = models
-        self.families = families
+        self.models = models  # target → {family → fitted model}
+        self.families = families  # target → default family
+        self.overrides = overrides or {}  # target → workload → family
         self.features = card["features"]
         self.valid = card["valid_inputs"]
         if trends not in TREND_CHOICES:
@@ -210,11 +228,21 @@ class ResourcePredictor:
                 "re-run scripts/train_resource_predictor.py"
             )
         families = {t: _pick_family(card, t, model) for t in m.TARGETS}
-        models = {
-            t: joblib.load(os.path.join(model_dir, f"{t}__{fam}.joblib"))
-            for t, fam in families.items()
-        }
-        return cls(card, models, families, trends)
+        overrides = {}
+        if model == "best_cv":
+            for t, by_wl in WORKLOAD_FAMILY_POLICY.items():
+                cv = card["choices"][t]["cv_uncertainty"]
+                overrides[t] = {wl: fam for wl, fam in by_wl.items() if fam in cv}
+        models = {}
+        for t, fam in families.items():
+            for f in {fam, *overrides.get(t, {}).values()}:
+                path = os.path.join(model_dir, f"{t}__{f}.joblib")
+                models.setdefault(t, {})[f] = joblib.load(path)
+        return cls(card, models, families, trends, overrides)
+
+    def family_for(self, target: str, workload: str) -> str:
+        """Model family that answers `target` for `workload`."""
+        return self.overrides.get(target, {}).get(workload, self.families[target])
 
     # ── checks ────────────────────────────────────────────────────────────
 
@@ -224,7 +252,7 @@ class ResourcePredictor:
             workload_type=req.workload_type,
             num_workers=req.num_workers,
             upper_quantile=self.card["upper_quantile"],
-            source={t: SOURCE_NAMES[f] for t, f in self.families.items()},
+            source={t: SOURCE_NAMES[self.family_for(t, req.workload_type)] for t in self.families},
             training_set=self.card["training_set"],
             model_version=self.card["model_version"],
         )
@@ -309,10 +337,15 @@ class ResourcePredictor:
         if not rows:
             return results
         X = pd.DataFrame(rows, columns=self.features)
-        for target, model in self.models.items():
-            margins = self.card["choices"][target]["upper_margins"][self.families[target]]
-            for i, row, value in zip(idx, rows, model.predict(X), strict=True):
-                res = results[i]
+        for target, by_family in self.models.items():
+            fams = np.array([self.family_for(target, results[i].workload_type) for i in idx])
+            values = np.empty(len(idx))
+            for f in set(fams):  # each family predicts only the rows routed to it
+                values[fams == f] = by_family[f].predict(X[fams == f])
+            for k, (i, row) in enumerate(zip(idx, rows, strict=True)):
+                res, fam = results[i], fams[k]
+                model, value = by_family[fam], values[k]
+                margins = self.card["choices"][target]["upper_margins"][fam]
                 margin = m.margin_for(margins, res.workload_type)
                 value, upper = self._apply_trends(target, model, row, value, margin, res)
                 if value < 0:  # linear models can dip below zero; demand cannot

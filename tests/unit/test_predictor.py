@@ -275,6 +275,19 @@ def test_size_trend_only_for_logreg_memory(model_dir):
     assert not res.source["cpu_cores_p95"].endswith("+trend")
 
 
+def test_kmeans_peak_memory_uses_the_power_law_model(model_dir):
+    p = pr.ResourcePredictor.load(str(model_dir))
+    assert p.family_for("mem_mb_peak_max", "kmeans") == "ridge_log_wl"
+    assert p.family_for("mem_mb_peak_max", "logreg") == p.families["mem_mb_peak_max"]
+    assert p.family_for("mem_mb_p95_max", "kmeans") == p.families["mem_mb_p95_max"]
+    km = p.predict(_req(workload_type="kmeans", num_clusters=5))
+    lr = p.predict(_req())
+    assert km.source["mem_mb_peak_max"] == "local_ridge_log_wl"
+    assert lr.source["mem_mb_peak_max"] == pr.SOURCE_NAMES[p.families["mem_mb_peak_max"]]
+    explicit = pr.ResourcePredictor.load(str(model_dir), "rf")  # explicit model: no exceptions
+    assert explicit.family_for("mem_mb_peak_max", "kmeans") == "rf"
+
+
 def test_size_trend_is_scout_informed_by_default(model_dir):
     p = pr.ResourcePredictor.load(str(model_dir), "rf")
     assert pr.TREND_POLICY["size"]["logreg"]["mem_mb_p95_max"] == "combined"

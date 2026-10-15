@@ -361,3 +361,28 @@ def test_per_workload_model_is_one_saveable_object(tmp_path):
     back = joblib.load(path)
     assert back.predict(df[m.FEATURES]) == pytest.approx(per_wl.predict(df[m.FEATURES]))
     assert clone(per_wl).get_params()["base"] is not None  # scikit-learn compatible
+
+
+def test_power_law_ridge_recovers_a_power_law_and_stays_positive():
+    rows = []
+    for wl in ("kmeans", "logreg"):
+        for size in (25, 50, 100, 200):
+            for cores in (1, 2, 4):
+                rows.append(
+                    {
+                        "workload_type": wl,
+                        "dataset_mb": size,
+                        "num_workers": 2,
+                        "cores_per_driver": cores,
+                        "heap_mb_per_driver": 3072,
+                        "mem_mb_peak": 300 * size**0.4 * (2 if wl == "logreg" else 1),
+                    }
+                )
+    df = pd.DataFrame(rows)
+    model = m.make_ridge_log_wl(0.01).fit(df[m.FEATURES], df["mem_mb_peak"])
+    pred = model.predict(df[m.FEATURES])
+    assert m.regression_metrics(df["mem_mb_peak"], pred)["mape_pct"] < 1
+    big = df[df["dataset_mb"] == 200].assign(dataset_mb=800)
+    expected = 300 * 800**0.4 * np.where(big["workload_type"] == "logreg", 2, 1)
+    assert model.predict(big[m.FEATURES]) == pytest.approx(expected, rel=0.05)  # extrapolates
+    assert (model.predict(big[m.FEATURES]) > 0).all()

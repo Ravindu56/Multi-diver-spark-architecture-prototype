@@ -9,7 +9,8 @@
 # peak of the largest driver per run) this script:
 #   Models: lookup, ridge (shared slopes), ridge_wl (per-workload slopes), rf,
 #   rf_wl (the forest fitted per workload inside one model; see
-#   scripts/per_workload_rf_test.py).
+#   scripts/per_workload_rf_test.py), ridge_log_wl (per-workload power law;
+#   see scripts/kmeans_memory_test.py).
 #   1. runs leave-one-configuration-out CV on TRAIN+VAL: every configuration
 #      group is predicted by models trained on all other groups,
 #   2. picks Ridge alpha and RF depth/leaf size by CV MAE,
@@ -206,6 +207,9 @@ def select_and_train(
     candidates = {"lookup": lambda: m.LookupModel(features)}
     candidates |= {f"ridge|{a}": (lambda a=a: m.make_ridge(a, num)) for a in m.RIDGE_ALPHAS}
     candidates |= {f"ridge_wl|{a}": (lambda a=a: m.make_ridge_wl(a, num)) for a in m.RIDGE_ALPHAS}
+    candidates |= {
+        f"ridge_log_wl|{a}": (lambda a=a: m.make_ridge_log_wl(a, num)) for a in m.RIDGE_ALPHAS
+    }
     candidates |= {
         f"rf|{p['max_depth']}|{p['min_samples_leaf']}": (lambda p=p: m.make_rf(**p))
         for p in m.RF_GRID

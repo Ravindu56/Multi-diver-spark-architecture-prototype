@@ -46,11 +46,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin, clone
-from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+from sklearn.preprocessing import (
+    FunctionTransformer,
+    OneHotEncoder,
+    PolynomialFeatures,
+    StandardScaler,
+)
 
 # =============================================================================
 # Feature contract
@@ -139,7 +144,7 @@ TARGETS: dict[str, str] = {
     "mem_mb_peak_max": "MB",  # largest driver of the run
 }
 
-MODEL_FAMILIES = ("lookup", "ridge", "ridge_wl", "rf", "rf_wl")
+MODEL_FAMILIES = ("lookup", "ridge", "ridge_wl", "rf", "rf_wl", "ridge_log_wl")
 
 RIDGE_ALPHAS = [0.1, 1.0, 10.0, 100.0]
 RF_GRID = [{"max_depth": d, "min_samples_leaf": leaf} for d in (3, 5, 8) for leaf in (2, 5)]
@@ -274,6 +279,47 @@ def make_rf_wl(
 ) -> PerWorkloadModel:
     """make_rf fitted per workload (see PerWorkloadModel)."""
     return PerWorkloadModel(make_rf(max_depth, min_samples_leaf, seed, n_estimators))
+
+
+def make_ridge_log_wl(
+    alpha: float = 1.0, numeric: list[str] = NUMERIC_FEATURES
+) -> TransformedTargetRegressor:
+    """
+    make_ridge_wl on log(target): a per-workload POWER-LAW model
+    (target ∝ Π x^β on the log inputs), the form of the growth laws seen
+    in the data.  Predictions are exp(·) of the log prediction.
+    """
+    return TransformedTargetRegressor(
+        regressor=make_ridge_wl(alpha, numeric), func=np.log, inverse_func=np.exp
+    )
+
+
+def make_ridge_int_wl(
+    alpha: float = 1.0, numeric: list[str] = NUMERIC_FEATURES
+) -> PerWorkloadModel:
+    """
+    Ridge with all pairwise products of the standardised inputs (e.g. size ×
+    cores), fitted per workload (see PerWorkloadModel).
+    """
+    pre = ColumnTransformer(
+        [
+            (
+                "log",
+                FunctionTransformer(_log2),
+                [c for c in numeric if c in LOG_FEATURES],
+            ),
+            ("lin", "passthrough", [c for c in numeric if c not in LOG_FEATURES]),
+        ]
+    )
+    base = Pipeline(
+        [
+            ("pre", pre),
+            ("scale", StandardScaler()),
+            ("pairs", PolynomialFeatures(degree=2, include_bias=False)),
+            ("model", Ridge(alpha=alpha)),
+        ]
+    )
+    return PerWorkloadModel(base)
 
 
 def make_ridge_wl(alpha: float = 1.0, numeric: list[str] = NUMERIC_FEATURES) -> Pipeline:
