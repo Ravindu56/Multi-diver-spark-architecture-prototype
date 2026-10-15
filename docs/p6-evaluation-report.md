@@ -518,11 +518,17 @@ the script on the laptop for the thesis figure.
   been validated against OOM.
 - **Possible improvements found during A4.** The deployed predictor is
   unchanged.
-  1. In CV, the power-law Ridge (`ridge_log_wl`) also has lower error for
-     LogReg memory (p95 212 vs 273 MB; peak 204 vs 262 MB). Step A2 tested it
-     for K-Means only. Testing LogReg memory under the same A2 protocol (an
-     in-range paired CI plus the extrapolation check) is a candidate next
-     step.
+  1. **LogReg memory model, tested in step A2b**
+     (`scripts/logreg_memory_test.py`, rules fixed before the run). The
+     power-law Ridge (`ridge_log_wl`) beat the deployed Ridge in range
+     (p95 −61 MB [−113, −14]; peak −58 MB [−108, −15]) and for larger data per
+     driver (−54 MB [−75, −6]; −37 MB [−51, −4]). It was clearly worse beyond
+     the measured cores (+163 MB [+1, +313]; +168 MB [+0.2, +327]), so it did
+     not qualify, and LogReg memory keeps `ridge_wl`.
+     - The other two candidates did not beat `ridge_wl` in range.
+     - On the confirmation sets (seen, not blind) the evidence is mixed: the
+       power law is worse on the test split (memory p95 144 vs 94 MB) and
+       better on E1 (179 vs 206 MB interior, 62 vs 170 MB extrap).
   2. Beyond 8 LogReg cores, the Scout-informed core trend beat the model's own
      memory prediction (section 6.2). This matters only if more than 8 cores
      per LogReg driver are ever allowed.
@@ -559,4 +565,5 @@ python scripts/evaluate_resource_predictor.py  # data/models/evaluation (about 5
 python scripts/transfer_experiment.py          # Scout label transfer (6.1)
 python scripts/transfer_trend_tests.py         # Scout growth trends (6.2)
 python scripts/upper_bound_tests.py            # upper-bound methods (5)
+python scripts/logreg_memory_test.py           # LogReg memory model, A2b (10)
 ```

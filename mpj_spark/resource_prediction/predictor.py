@@ -86,7 +86,10 @@ FAMILY_POLICY: dict[str, str] = {"cpu_cores_p95": "rf_wl", "cpu_cores_mean": "rf
 #   K-Means peak memory → ridge_log_wl (per-workload power law):
 #   scripts/kmeans_memory_test.py — beats ridge_wl in range (−4.6 MB, CI below
 #   0) and in the extrapolation check (−14.6 MB); K-Means memory p95 and all
-#   LogReg memory keep ridge_wl (no candidate qualified there).
+#   LogReg memory keep ridge_wl (no candidate qualified there).  LogReg memory
+#   was tested separately (scripts/logreg_memory_test.py, step A2b): the
+#   power law wins in range and for larger data per driver but is clearly
+#   worse beyond the measured cores, so ridge_wl stays.
 # Upper-bound method per target and workload (models.MARGIN_METHODS); default
 # "additive_rows".  Decided by scripts/upper_bound_tests.py (calibration-CV on
 # train+val: the narrowest method with coverage >= 0.88): LogReg CPU uses a

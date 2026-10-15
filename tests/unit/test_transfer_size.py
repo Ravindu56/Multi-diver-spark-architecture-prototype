@@ -272,3 +272,41 @@ def test_stress_margins_score_core_sweeps_only():
     assert km_cores["rows"] == int((held_d["experiment"] == "D").sum())  # Set A not scored
     assert out["size"]["kmeans"]["rows"] > 0 and km_cores["margin"] >= 0
     assert "cores" not in out or "logreg" not in out["cores"]  # LogReg has nothing above 4 cores
+
+
+def test_stress_predict_grows_beyond_the_training_range_only():
+    from mpj_spark.resource_prediction import calibration as cal
+
+    local = m.add_derived(_local(beta=0.5))
+    train, ev = cal.stress_split(local, "size", "logreg")  # LogReg above 100 MB per driver
+    assert (t.axis_value(ev, "size") > 100).all() and len(ev) > 0
+    assert not ((train["workload_type"] == "logreg") & (t.axis_value(train, "size") > 100)).any()
+    features = m.features_for("capped")
+    policy = {"size": {"logreg": {"mem_mb_p95_max": "local"}}}
+    grown, source = cal.stress_predict(
+        m.make_ridge_wl(1.0, m.TRAINING_SETS["capped"]["numeric"]),
+        train, ev, "mem_mb_p95_max", "logreg", "size", policy, None, features,
+    )  # fmt: skip
+    own, none = cal.stress_predict(
+        m.make_ridge_wl(1.0, m.TRAINING_SETS["capped"]["numeric"]),
+        train, ev, "mem_mb_p95_max", "logreg", "size", {}, None, features,
+    )  # fmt: skip
+    assert source == "local" and none is None
+    assert not np.allclose(grown, own)  # the trend replaces the model's own extrapolation
+    err_trend = np.abs(grown - ev["mem_mb_p95_max"]).mean()
+    assert err_trend < np.abs(own - ev["mem_mb_p95_max"]).mean()  # true law is a power law
+
+
+def test_a2b_power_law_candidate_uses_the_card_alpha():
+    sys.path.insert(0, os.path.abspath(_SCRIPTS))
+    import logreg_memory_test as a2b
+
+    card = {"choices": {"mem_mb_p95_max": {"selected": {"ridge_log_wl": "ridge_log_wl|10.0"}}}}
+    lr_mae = pd.Series(
+        {"ridge_int_wl|0.1": 5.0, "ridge_int_wl|1.0": 3.0,
+         "ridge_log_wl|0.1": 1.0, "ridge_log_wl|10.0": 9.0}
+    )  # fmt: skip
+    keys = a2b.chosen_keys(card, "mem_mb_p95_max", lr_mae)
+    assert keys["ridge_log_wl"] == "ridge_log_wl|10.0"  # deployed alpha, not the CV-best one
+    assert keys["ridge_int_wl"] == "ridge_int_wl|1.0"  # lowest LogReg CV MAE, as in A2
+    assert keys["ridge_wl"] == "ridge_wl" and keys["rf_wl"] == "rf_wl"

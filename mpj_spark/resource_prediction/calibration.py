@@ -39,6 +39,45 @@ STRESS: dict[str, dict[str, float]] = {
 STRESS_SCORED_SETS: dict[str, tuple[str, ...] | None] = {"size": None, "cores": ("D",)}
 
 
+def stress_split(d: pd.DataFrame, axis: str, wl: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(training rows, scored held-out rows) of the `axis` stress test for `wl`."""
+    held = (d["workload_type"] == wl).to_numpy() & (t.axis_value(d, axis) > STRESS[axis][wl])
+    scored = held.copy()
+    scored_sets = STRESS_SCORED_SETS[axis]
+    if scored_sets is not None and "experiment" in d:
+        scored &= d["experiment"].isin(scored_sets).to_numpy()
+    return d[~held], d[scored]
+
+
+def stress_predict(
+    model,
+    train: pd.DataFrame,
+    ev: pd.DataFrame,
+    target: str,
+    wl: str,
+    axis: str,
+    trend_policy: dict,
+    scout: pd.DataFrame | None,
+    features: list[str],
+) -> tuple[np.ndarray, str | None]:
+    """
+    Fit `model` on `train` and predict `ev` the way the predictor does: the
+    model at the largest training value of `axis`, grown by the trend_policy
+    trend (local or Scout-informed β) when there is one.
+    """
+    model.fit(train[features], train[target])
+    source = trend_policy.get(axis, {}).get(wl, {}).get(target)
+    beta = None
+    if source:
+        local = t.local_elasticity(train, target, wl, axis)
+        sc = t.scout_elasticity(scout, target, wl, axis) if scout is not None else None
+        info = t.combine_elasticity(local, sc) if source == "combined" else local
+        beta = info["beta"] if info else None
+    x_max = float(t.axis_value(train[train["workload_type"] == wl], axis).max())
+    pred = t.anchor_and_scale(model, ev, features, x_max, beta, axis)
+    return np.asarray(pred, dtype=float), source
+
+
 def stress_margins(
     trval: pd.DataFrame,
     target: str,
@@ -58,32 +97,20 @@ def stress_margins(
     d = trval[trval[target].notna()]
     out = {}
     for axis, by_wl in STRESS.items():
-        for wl, limit in by_wl.items():
+        for wl in by_wl:
             if wl not in keys:
                 continue
-            held = (d["workload_type"] == wl).to_numpy() & (t.axis_value(d, axis) > limit)
-            scored_sets = STRESS_SCORED_SETS[axis]
-            scored = held.copy()
-            if scored_sets is not None and "experiment" in d:
-                scored &= d["experiment"].isin(scored_sets).to_numpy()
-            train, ev = d[~held], d[scored]
+            train, ev = stress_split(d, axis, wl)
             if ev.empty or train[train["workload_type"] == wl].empty:
                 continue
             model = m.factory_from_key(keys[wl], num, n_estimators)()
-            model.fit(train[features], train[target])
-            source = trend_policy.get(axis, {}).get(wl, {}).get(target)
-            beta = None
-            if source:
-                local = t.local_elasticity(train, target, wl, axis)
-                sc = t.scout_elasticity(scout, target, wl, axis) if scout is not None else None
-                info = t.combine_elasticity(local, sc) if source == "combined" else local
-                beta = info["beta"] if info else None
-            x_max = float(t.axis_value(train[train["workload_type"] == wl], axis).max())
-            pred = t.anchor_and_scale(model, ev, features, x_max, beta, axis)
+            pred, source = stress_predict(
+                model, train, ev, target, wl, axis, trend_policy, scout, features
+            )
             rows = pd.DataFrame(
                 {
                     "actual": ev[target].to_numpy(float),
-                    "predicted": np.asarray(pred, dtype=float),
+                    "predicted": pred,
                     "config_group": ev["config_group"].values,
                 }
             )

@@ -213,6 +213,7 @@ source of labels and as a source of growth trends.
 | CPU forest per workload (`FAMILY_POLICY`) | `scripts/per_workload_rf_test.py` | `data/models/per_workload_rf/` |
 | CPU model beyond the measured data per driver (fix 1) | `scripts/extrapolation_model_tests.py` | `data/models/extrapolation/` |
 | K-Means peak memory power law (`WORKLOAD_FAMILY_POLICY`, A2) | `scripts/kmeans_memory_test.py` | `data/models/kmeans_memory/` |
+| LogReg memory keeps `ridge_wl` (A2b: power law clearly worse beyond the measured cores) | `scripts/logreg_memory_test.py` | `data/models/logreg_memory/` |
 | Scout label transfer | `scripts/transfer_experiment.py` | `data/models/transfer_capped/` |
 | Scout size trend | `scripts/transfer_size_trend.py` | `data/models/transfer_size/` |
 | growth trends (`TREND_POLICY`, A1) | `scripts/transfer_trend_tests.py` | `data/models/transfer_trends/` |
