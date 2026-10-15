@@ -45,3 +45,4 @@ results/resource_runs.csv.lock
 *.csv.lock.*
 *.out
 *.done
+results/.predictor_sets_v2
