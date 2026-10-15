@@ -67,9 +67,12 @@ def _serve(
     tag_down: int = TAG_ALLREDUCE_DOWN,
     poll_interval_s: float = 0.001,
     timeout_s: float = 900.0,
+    label: str = "LogReg",
 ) -> dict[str, Any]:
     """Core async-PS serving loop.  Testable with any Queue-like fake comm
     implementing Iprobe(source, tag) / recv(source, tag) / send(msg, dest, tag).
+
+    ``label`` only changes the log prefix ("LogReg" or "KMeans").
     """
     worker_ranks = list(range(1, num_workers + 1))
     updates_done = dict.fromkeys(worker_ranks, 0)
@@ -80,7 +83,7 @@ def _serve(
     records: list[dict[str, Any]] = []
 
     print(
-        f"  [LogReg Async PS] Serving - {num_workers} workers x "
+        f"  [{label} Async PS] Serving - {num_workers} workers x "
         f"{num_iterations} rounds  (server_lr={server_lr}, "
         f"staleness_damping={'on' if staleness_damping else 'off'})"
     )
@@ -89,7 +92,7 @@ def _serve(
     while not all(updates_done[r] >= num_iterations for r in worker_ranks):
         if time.perf_counter() - t_start > timeout_s:
             raise TimeoutError(
-                f"[LogReg Async PS] Timed out after {timeout_s:.0f}s - "
+                f"[{label} Async PS] Timed out after {timeout_s:.0f}s - "
                 f"updates per worker: {updates_done} "
                 f"(expected {num_iterations} each)."
             )
@@ -100,7 +103,7 @@ def _serve(
         msg = comm.recv(source=any_source, tag=tag_up)
         rank = int(msg["rank"])
         if rank not in updates_done:
-            raise ValueError(f"[LogReg Async PS] Update from unexpected rank {rank}")
+            raise ValueError(f"[{label} Async PS] Update from unexpected rank {rank}")
 
         base_version = int(msg.get("base_version", 0))
         staleness = max(0, global_version - base_version)
@@ -141,7 +144,7 @@ def _serve(
             }
         )
         print(
-            f"  [LogReg Async PS] v{global_version} <- worker {rank} "
+            f"  [{label} Async PS] v{global_version} <- worker {rank} "
             f"(round {msg.get('worker_round', '?')})  staleness={staleness}  "
             f"alpha={alpha:.3f}  |w|={weight_norm:.4f}"
         )
@@ -151,7 +154,7 @@ def _serve(
     mean_staleness = float(sum(staleness_vals) / len(staleness_vals)) if staleness_vals else 0.0
     max_staleness = int(max(staleness_vals)) if staleness_vals else 0
     print(
-        f"  [LogReg Async PS] Complete - {global_version} updates in {wall_time:.3f}s  "
+        f"  [{label} Async PS] Complete - {global_version} updates in {wall_time:.3f}s  "
         f"mean staleness={mean_staleness:.2f}  max={max_staleness}"
     )
 
@@ -196,6 +199,7 @@ def run_logreg_async_ps(
     results_dir: str = "results",
     tag_up: int = TAG_ALLREDUCE_UP,
     tag_down: int = TAG_ALLREDUCE_DOWN,
+    label: str = "LogReg",
 ) -> dict[str, Any]:
     """Root-side async PS entry point (called in a daemon thread by root_mpi).
 
@@ -215,7 +219,8 @@ def run_logreg_async_ps(
         staleness_damping=staleness_damping,
         tag_up=tag_up,
         tag_down=tag_down,
+        label=label,
     )
     csv_path = _write_staleness_csv(result.pop("staleness_records"), results_dir)
-    print(f"  [LogReg Async PS] Staleness log : {csv_path}")
+    print(f"  [{label} Async PS] Staleness log : {csv_path}")
     return result

@@ -15,6 +15,26 @@
 #   this module stays importable on CI runners that have the mpi4py
 #   wheel but no system OpenMPI (libmpi.so).  Unit tests import this
 #   module; only the MPI runtime path needs the real library.
+# fix(convergence): centroid-shift convergence is now measured on the
+#   POST-sync (globally averaged) centroids, not the pre-sync local
+#   centroids.  The old test compared a worker's locally-updated
+#   centroids against the round start, so on multi-driver runs the
+#   worker→global disagreement floor (~0.01) kept every run at
+#   max_iter (observed: shift≈0.0118 for all 20 rounds, WCSS flat).
+#   Post-sync shift is identical on every rank, so a non-convergence
+#   decision can never deadlock one rank waiting at comm.gather.
+#   local_shift is still logged for sync-overhead analysis.
+# fix(wcss): the returned ``wcss`` was the ALREADY-GLOBAL per-round sum
+#   (``global_wcss``), but the root's aggregate_kmeans_results() sums
+#   ``wcss`` across workers, so the reported Total WCSS was inflated by the
+#   number of workers (observed on 2 workers: 5,233,332 vs the true
+#   2,616,666).  ``wcss`` is now the WCSS of the returned (synced) centroids
+#   on THIS worker's partition, so the root's sum is the exact global WCSS of
+#   the returned model.  The old cross-worker sum is still returned as
+#   ``global_wcss``.  Cost: one extra pass over the partition after the loop.
+# perf(vectorise): _local_wcss() now uses the blocked numpy implementation
+#   (local_iteration.compute_local_wcss) for real Spark RDDs; the per-point
+#   path remains for RDD-like objects without mapPartitions.
 # ================================================================
 from __future__ import annotations
 
@@ -24,6 +44,7 @@ import numpy as np
 
 from mpj_spark.applications.kmeans.local_iteration import (
     compute_local_stats,
+    compute_local_wcss,
     init_centroids,
     load_partition_rdd,
 )
@@ -51,12 +72,27 @@ def _unpack_stats(stats):
 
 def _local_wcss(points_rdd, centroids: np.ndarray) -> float:
     """Sum of squared distances from each point to its nearest centroid."""
+    if hasattr(type(points_rdd), "mapPartitions"):
+        return compute_local_wcss(points_rdd, np.asarray(centroids, dtype=np.float64))
+
     c = centroids  # closure for Spark serialisation
 
     def _sq_dist(p):
         return float(np.min(np.sum((c - np.asarray(p, dtype=np.float64)) ** 2, axis=1)))
 
     return float(points_rdd.map(_sq_dist).sum())
+
+
+def _post_sync_shift(prev_centroids: np.ndarray, synced_centroids: np.ndarray) -> float:
+    """Frobenius shift between the previous round's global centroids and the
+    freshly synchronised (FedAvg-averaged) centroids.
+
+    Because the synced centroids are broadcast, this value is identical on
+    every rank — the stopping test can therefore never strand a rank at
+    comm.gather.  It is equal to the local-update shift only when fedavg
+    converged (workers no longer move the global model between rounds).
+    """
+    return float(np.linalg.norm(synced_centroids - prev_centroids))
 
 
 def run_kmeans_fedavg_mpi(
@@ -83,7 +119,14 @@ def run_kmeans_fedavg_mpi(
          and aggregates total WCSS
       4. comm.bcast() of the global centroids + WCSS back to all workers
 
-    Convergence: stop early when Frobenius centroid shift < tol.
+    Convergence: stop early when the POST-sync Frobenius centroid shift
+    < tol (identical value on all ranks; see _post_sync_shift).
+    The pre-sync local shift is logged (local_shift=…) for analysis but
+    intentionally does NOT gate the loop.
+
+    Returned ``wcss`` is the WCSS of the final synced centroids on THIS
+    worker's partition (the root sums it across workers);
+    ``global_wcss`` is the last round's already-global pre-sync sum.
     """
     from mpi4py import MPI  # lazy: module must import without libmpi (CI)
     from pyspark.sql import SparkSession
@@ -123,7 +166,7 @@ def run_kmeans_fedavg_mpi(
         t_iter_start = time.perf_counter()
         prev_centroids = centroids.copy()
 
-        # ── Local Lloyd iterations ────────────────────────────────────
+        # ── Local Lloyd iterations ─────────────────────────────────────
         t_spark = time.perf_counter()
         local_wcss = 0.0
         for _ in range(local_epochs):
@@ -140,7 +183,9 @@ def run_kmeans_fedavg_mpi(
         if local_wcss <= 0.0:
             local_wcss = _local_wcss(points_rdd, centroids)
 
-        centroid_shift = float(np.linalg.norm(centroids - prev_centroids))
+        # Pre-sync local shift: how far this worker's local Lloyd steps
+        # moved centroids from the round start.  Diagnostic only.
+        local_shift = float(np.linalg.norm(centroids - prev_centroids))
 
         # ── MPI collective sync: gather → align → FedAvg → bcast ──────
         t_sync = time.perf_counter()
@@ -177,6 +222,11 @@ def run_kmeans_fedavg_mpi(
         global_wcss = float(result_payload["global_wcss"])
         sync_time_s = time.perf_counter() - t_sync
 
+        # Convergence on the POST-sync global centroids: identical on every
+        # rank (no divergent-time break → no deadlock), and tires whether
+        # workers still move the *averaged* model between rounds.
+        centroid_shift = _post_sync_shift(prev_centroids, centroids)
+
         iter_time_s = time.perf_counter() - t_iter_start
         iter_times.append(iter_time_s)
 
@@ -192,12 +242,17 @@ def run_kmeans_fedavg_mpi(
         print(
             f"[KMeans FedAvg MPI Rank {rank}] round {it + 1}/{max_iter}  "
             f"({iter_time_s:.3f}s)  shift={centroid_shift:.6f}  "
+            f"local_shift={local_shift:.6f}  "
             f"WCSS={global_wcss:.2f}"
         )
 
         if centroid_shift < tol:
             converged = True
             break
+
+    # PER-PARTITION WCSS of the returned (synced) model.  The root sums ``wcss``
+    # across workers, so this must not be the already-global ``global_wcss``.
+    final_local_wcss = _local_wcss(points_rdd, centroids)
 
     total_time_s = load_time + sum(iter_times)
 
@@ -214,7 +269,8 @@ def run_kmeans_fedavg_mpi(
 
     return {
         "centres": centroids.tolist(),
-        "wcss": global_wcss,
+        "wcss": final_local_wcss,
+        "global_wcss": global_wcss,
         "row_count": row_count,
         "iterations_done": len(iter_times),
         "converged": converged,

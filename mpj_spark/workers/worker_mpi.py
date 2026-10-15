@@ -154,17 +154,34 @@ def run_worker_mpi(comm):
             up_queue = MpiWorkerAllreduceAdapter(comm, direction="up")
             down_queue = MpiWorkerAllreduceAdapter(comm, direction="down")
 
-    outcome = run_worker_core(
-        worker_id=worker_id,
-        partition_path=partition_path,
-        spark=spark,
-        worker_config=cfg,
-        up_queue=up_queue,
-        down_queue=down_queue,
-        reassign_adapter=reassign,
-        comm=worker_comm,
-        root_comm=comm,  # P3-09: COMM_WORLD channel for the async-PS P2P protocol
-    )
+    t_run_start = time.perf_counter()
+    try:
+        outcome = run_worker_core(
+            worker_id=worker_id,
+            partition_path=partition_path,
+            spark=spark,
+            worker_config=cfg,
+            up_queue=up_queue,
+            down_queue=down_queue,
+            reassign_adapter=reassign,
+            comm=worker_comm,
+            root_comm=comm,  # P3-09: COMM_WORLD channel for the async-PS P2P protocol
+        )
+    except Exception as exc:
+        # Report the failure to the root. Dying here without sending TAG_RESULT /
+        # TAG_TIMING leaves the root blocked in comm.recv() forever.
+        print(f"{_tag(worker_id, 'ERROR')} run_worker_core FAILED: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        outcome = {
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "result": None,
+            "timing": {
+                "worker_id": worker_id,
+                "load_time": 0.0,
+                "processing_time": time.perf_counter() - t_run_start,
+            },
+        }
 
     outcome["timing"]["init_time"] = init_time
     outcome["timing"]["total_time"] = (
