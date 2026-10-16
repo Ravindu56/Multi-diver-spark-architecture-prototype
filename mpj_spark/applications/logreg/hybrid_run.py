@@ -25,24 +25,33 @@ Both are provided by run_worker_core() on the MPI execution path.
 Import-safe on CI runners without a system MPI library: mpi4py is
 imported lazily inside run(); unit tests exercise helpers and the
 dispatch contract without libmpi.so.
+
+CHANGE LOG
+----------
+fix(warm-start): the local step used pyspark.ml LogisticRegression and a
+  swallowed ``setInitialWeights`` call that does not exist in PySpark, so every
+  round refit from zero.  It now runs warm-started L-BFGS-B from the current
+  global model (mpj_spark.applications.logreg.warm_common).
+  New per-round metrics: loss_start (loss of the global model entering the
+  round, on this worker's partition), loss_end, n_eval, solver; ``final_loss``
+  is returned.  No early stop: the root scalar PS serves exactly
+  num_iterations rounds, so a worker leaving early would stall it.
 """
 
 from __future__ import annotations
 
 import csv
-import math
 import os
 import time
 from typing import Any
 
 import numpy as np
-from pyspark.ml.classification import LogisticRegression
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.types import IntegerType
 
-from mpj_spark.applications.logreg.fedavg_mpi_run import _build_schema, _weight_norm
+from mpj_spark.applications.logreg.fedavg_mpi_run import _correct_count, _weight_norm
+from mpj_spark.applications.logreg.warm_common import SOLVER, load_points, local_step, model_loss
 from mpj_spark.core.sync_modes import MODE_HYBRID_PS_ALLREDUCE
+from mpj_spark.core.warm_start_lr import spark_loss_grad
 
 TAG_ALLREDUCE_UP = 30
 TAG_ALLREDUCE_DOWN = 31
@@ -65,6 +74,10 @@ def _write_hybrid_worker_metrics(
         "local_weight_norm",
         "intercept",
         "row_count",
+        "loss_start",
+        "loss_end",
+        "n_eval",
+        "solver",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -130,28 +143,10 @@ def run(
     if spark is None:
         raise RuntimeError(f"[Hybrid Worker {world_rank}] No active SparkSession found.")
 
-    schema = _build_schema(num_features)
-    df_raw = spark.read.csv(partition_path, schema=schema, header=False)
-    df_base = (
-        df_raw.filter(F.col("f0").isNotNull())
-        .dropna()
-        .withColumn("label", F.col("label").cast(IntegerType()))
-        .cache()
+    df_base, points, row_count = load_points(
+        spark, partition_path, num_features, f"Hybrid Worker {world_rank}"
     )
-
-    feature_cols = [f"f{i}" for i in range(num_features)]
-    row_count = df_base.count()
-
-    if row_count == 0:
-        raise RuntimeError(
-            f"[Hybrid Worker {world_rank}] Partition is empty after cleaning: {partition_path}"
-        )
-
-    from pyspark.ml.feature import VectorAssembler
-
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
-    df_vec = assembler.transform(df_base).select("features", "label").cache()
-    df_vec.count()
+    loss_grad = spark_loss_grad(points, num_features, reg_param, row_count)
 
     # One-time row-count exchange (static per run): afterwards the
     # Allreduce of frac-weighted vectors directly yields the global mean.
@@ -174,30 +169,9 @@ def run(
     for iteration in range(max_iter):
         t_iter = time.perf_counter()
 
-        lr = LogisticRegression(
-            featuresCol="features",
-            labelCol="label",
-            maxIter=local_epochs,
-            regParam=reg_param,
-            elasticNetParam=0.0,
-            family="binomial",
-            fitIntercept=True,
-            standardization=True,
+        local_weights_arr, local_intercept, info, local_norm = local_step(
+            loss_grad, current_weights, current_intercept, num_features, local_epochs
         )
-
-        if current_weights is not None:
-            try:
-                from pyspark.ml.linalg import Vectors
-
-                lr = lr.setInitialWeights(Vectors.dense(current_weights))
-                lr = lr.setInitialIntercept(float(current_intercept))
-            except Exception:
-                pass
-
-        model = lr.fit(df_vec)
-        local_weights_arr = model.coefficients.toArray()
-        local_intercept = float(model.intercept)
-        local_norm = float(np.linalg.norm(local_weights_arr))
 
         # ── Channel 1: dense weights via Allreduce over the worker sub-comm ──
         t_allreduce = time.perf_counter()
@@ -245,6 +219,10 @@ def run(
                 "local_weight_norm": round(local_norm, 8),
                 "intercept": round(current_intercept, 8),
                 "row_count": row_count,
+                "loss_start": round(info["loss_start"], 8),
+                "loss_end": round(info["loss_end"], 8),
+                "n_eval": info["n_eval"],
+                "solver": SOLVER,
             }
         )
         print(
@@ -253,24 +231,13 @@ def run(
             f"allreduce={allreduce_time:.4f}s  ps={ps_time:.4f}s"
         )
 
-    # Compute final accuracy on the local partition
+    # Final loss and accuracy of the global model on this worker's partition
     w_list = current_weights or [0.0] * num_features
-    b_val = current_intercept
-
-    @F.udf(returnType=IntegerType())
-    def predict(features):
-        arr = features.toArray()
-        logit = sum(w_list[i] * arr[i] for i in range(len(w_list))) + b_val
-        return int(1.0 / (1.0 + math.exp(-logit)) >= 0.5)
-
-    correct = (
-        df_vec.withColumn("pred", predict(F.col("features")))
-        .filter(F.col("pred") == F.col("label"))
-        .count()
-    )
+    final_loss = model_loss(loss_grad, w_list, current_intercept)
+    correct = _correct_count(points, w_list, current_intercept)
     train_accuracy = correct / row_count if row_count > 0 else 0.0
 
-    df_vec.unpersist()
+    points.unpersist()
     df_base.unpersist()
 
     _write_hybrid_worker_metrics(world_rank, iter_metrics, results_dir)
@@ -279,6 +246,7 @@ def run(
         "weight_vector": current_weights or [0.0] * num_features,
         "intercept": current_intercept,
         "train_accuracy": train_accuracy,
+        "final_loss": final_loss,
         "row_count": row_count,
         "iterations_done": iterations_done,
         "partition_path": partition_path,

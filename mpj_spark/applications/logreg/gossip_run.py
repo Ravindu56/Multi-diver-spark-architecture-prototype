@@ -21,23 +21,31 @@ mean of the (near-consensus) worker models.
 
 Import-safe on CI: this module never imports mpi4py - the ring exchange
 uses Python-object sendrecv only, so no MPI constants are needed.
+
+CHANGE LOG
+----------
+fix(warm-start): the local step used pyspark.ml LogisticRegression and a
+  swallowed ``setInitialWeights`` call that does not exist in PySpark, so every
+  round refit from zero.  It now runs warm-started L-BFGS-B from the worker's
+  current consensus model (mpj_spark.applications.logreg.warm_common).
+  New per-round metrics: loss_start (loss of the model entering the round, on
+  this worker's partition), loss_end, n_eval, solver; ``final_loss`` is
+  returned.  There is no global early stop: the mode is decentralized by design
+  (no collective to agree on one), so it always runs max_iter rounds.
 """
 
 from __future__ import annotations
 
 import csv
-import math
 import os
 import time
 from typing import Any
 
 import numpy as np
-from pyspark.ml.classification import LogisticRegression
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.types import IntegerType
 
-from mpj_spark.applications.logreg.fedavg_mpi_run import _build_schema, _weight_norm
+from mpj_spark.applications.logreg.fedavg_mpi_run import _correct_count, _weight_norm
+from mpj_spark.applications.logreg.warm_common import SOLVER, load_points, local_step, model_loss
 from mpj_spark.core.gossip_protocol import (
     TAG_GOSSIP_EXCHANGE,
     consensus_mix,
@@ -45,6 +53,7 @@ from mpj_spark.core.gossip_protocol import (
     ring_neighbors,
 )
 from mpj_spark.core.sync_modes import MODE_GOSSIP
+from mpj_spark.core.warm_start_lr import spark_loss_grad
 
 
 def _write_gossip_worker_metrics(rank: int, records: list[dict[str, Any]], results_dir: str) -> str:
@@ -63,6 +72,10 @@ def _write_gossip_worker_metrics(rank: int, records: list[dict[str, Any]], resul
         "intercept",
         "row_count",
         "frozen",
+        "loss_start",
+        "loss_end",
+        "n_eval",
+        "solver",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -122,28 +135,10 @@ def run(
     if spark is None:
         raise RuntimeError(f"[Gossip Worker {rank}] No active SparkSession found.")
 
-    schema = _build_schema(num_features)
-    df_raw = spark.read.csv(partition_path, schema=schema, header=False)
-    df_base = (
-        df_raw.filter(F.col("f0").isNotNull())
-        .dropna()
-        .withColumn("label", F.col("label").cast(IntegerType()))
-        .cache()
+    df_base, points, row_count = load_points(
+        spark, partition_path, num_features, f"Gossip Worker {rank}"
     )
-
-    feature_cols = [f"f{i}" for i in range(num_features)]
-    row_count = df_base.count()
-
-    if row_count == 0:
-        raise RuntimeError(
-            f"[Gossip Worker {rank}] Partition is empty after cleaning: {partition_path}"
-        )
-
-    from pyspark.ml.feature import VectorAssembler
-
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
-    df_vec = assembler.transform(df_base).select("features", "label").cache()
-    df_vec.count()
+    loss_grad = spark_loss_grad(points, num_features, reg_param, row_count)
 
     peers = ring_neighbors(rank, num_workers, fanout)
     if not peers and num_workers > 1:
@@ -168,32 +163,16 @@ def run(
     for iteration in range(max_iter):
         t_iter = time.perf_counter()
 
+        loss_start: float | str = ""
+        loss_end: float | str = ""
+        n_eval: int | str = ""
         if not frozen:
-            lr = LogisticRegression(
-                featuresCol="features",
-                labelCol="label",
-                maxIter=local_epochs,
-                regParam=reg_param,
-                elasticNetParam=0.0,
-                family="binomial",
-                fitIntercept=True,
-                standardization=True,
+            w_local, b_local, info, local_norm = local_step(
+                loss_grad, current_weights, current_intercept, num_features, local_epochs
             )
-
-            if current_weights is not None:
-                try:
-                    from pyspark.ml.linalg import Vectors
-
-                    lr = lr.setInitialWeights(Vectors.dense(current_weights))
-                    lr = lr.setInitialIntercept(float(current_intercept))
-                except Exception:
-                    pass
-
-            model = lr.fit(df_vec)
-            local_weights_arr = model.coefficients.toArray()
-            current_weights = local_weights_arr.tolist()
-            current_intercept = float(model.intercept)
-            local_norm = float(np.linalg.norm(local_weights_arr))
+            current_weights = w_local.tolist()
+            current_intercept = b_local
+            loss_start, loss_end, n_eval = info["loss_start"], info["loss_end"], info["n_eval"]
         else:
             local_norm = _weight_norm(current_weights or [0.0] * num_features)
 
@@ -243,6 +222,10 @@ def run(
                 "intercept": round(current_intercept, 8),
                 "row_count": row_count,
                 "frozen": int(frozen),
+                "loss_start": loss_start if loss_start == "" else round(loss_start, 8),
+                "loss_end": loss_end if loss_end == "" else round(loss_end, 8),
+                "n_eval": n_eval,
+                "solver": SOLVER,
             }
         )
         print(
@@ -252,24 +235,13 @@ def run(
             f"{'  [frozen]' if frozen else ''}"
         )
 
-    # Compute final accuracy on the local partition
+    # Final loss and accuracy of this worker's model on its own partition
     w_list = current_weights or [0.0] * num_features
-    b_val = current_intercept
-
-    @F.udf(returnType=IntegerType())
-    def predict(features):
-        arr = features.toArray()
-        logit = sum(w_list[i] * arr[i] for i in range(len(w_list))) + b_val
-        return int(1.0 / (1.0 + math.exp(-logit)) >= 0.5)
-
-    correct = (
-        df_vec.withColumn("pred", predict(F.col("features")))
-        .filter(F.col("pred") == F.col("label"))
-        .count()
-    )
+    final_loss = model_loss(loss_grad, w_list, current_intercept)
+    correct = _correct_count(points, w_list, current_intercept)
     train_accuracy = correct / row_count if row_count > 0 else 0.0
 
-    df_vec.unpersist()
+    points.unpersist()
     df_base.unpersist()
 
     _write_gossip_worker_metrics(rank, iter_metrics, results_dir)
@@ -278,6 +250,7 @@ def run(
         "weight_vector": current_weights or [0.0] * num_features,
         "intercept": current_intercept,
         "train_accuracy": train_accuracy,
+        "final_loss": final_loss,
         "row_count": row_count,
         "iterations_done": iterations_done,
         "partition_path": partition_path,

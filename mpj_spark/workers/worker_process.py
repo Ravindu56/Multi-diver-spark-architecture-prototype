@@ -7,7 +7,11 @@
 #   sync_mode='queue'  →  logreg.queue_run.run()   [M2 — FedAvg]
 #   sync_mode='none'   →  logreg.nosync_run.run()  [M1 — no sync]
 #
-# All other apps (wordcount, kmeans) are unaffected.
+# kmeans: gossip, hybrid_ps_allreduce and ps_async run their own kmeans.*_run runners on
+# the MPI worker sub-communicator (hybrid / async also need COMM_WORLD for the root
+# parameter server).  Those modes without the channels they need (the multiprocessing
+# transport) raise instead of silently running allreduce.
+# All other apps (wordcount) are unaffected.
 # ================================================================
 import time
 
@@ -52,6 +56,15 @@ def run_worker_core(
         result = run_wordcount(partition_path, spark)
 
     elif app == "kmeans":
+        ps_mode = sync_mode in (MODE_PS_ASYNC, MODE_HYBRID_PS_ALLREDUCE)
+        if (sync_mode == MODE_GOSSIP and comm is None) or (
+            ps_mode and (comm is None or root_comm is None)
+        ):
+            raise RuntimeError(
+                f"[W{worker_id}] sync_mode='{sync_mode}' is registered but not wired "
+                "for kmeans on this transport — refusing silent fallback to allreduce."
+            )
+
         try:
             from mpj_spark.applications.kmeans.allreduce import run_kmeans_allreduce
 
@@ -60,7 +73,57 @@ def run_worker_core(
             use_allreduce = False
             run_kmeans_allreduce = None
 
-        if sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
+        if sync_mode == MODE_GOSSIP:
+            from mpj_spark.applications.kmeans.gossip_run import run_kmeans_gossip
+
+            result = run_kmeans_gossip(
+                comm=comm,  # worker sub-comm: decentralized ring exchange
+                rank=worker_id,  # 0-based sub-comm rank
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
+                fanout=worker_config.get("gossip_fanout", 1),
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif sync_mode == MODE_HYBRID_PS_ALLREDUCE:
+            from mpj_spark.applications.kmeans.hybrid_run import run_kmeans_hybrid
+
+            result = run_kmeans_hybrid(
+                comm=comm,  # worker sub-comm: dense-centroid Allreduce channel
+                root_comm=root_comm,  # COMM_WORLD: scalar PS channel (root is rank 0)
+                rank=worker_id,  # 0-based sub-comm rank
+                world_rank=worker_id + 1,  # COMM_WORLD rank (workers are 1..N)
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif sync_mode == MODE_PS_ASYNC:
+            from mpj_spark.applications.kmeans.async_ps_run import run_kmeans_async_ps
+
+            result = run_kmeans_async_ps(
+                comm=comm,  # worker sub-comm: one-time seed broadcast
+                root_comm=root_comm,  # COMM_WORLD: async parameter server (root is rank 0)
+                rank=worker_id,  # 0-based sub-comm rank
+                world_rank=worker_id + 1,  # COMM_WORLD rank (workers are 1..N)
+                size=num_workers,
+                input_file=partition_path,
+                k=worker_config.get("kmeans_k", 3),
+                max_iter=worker_config.get("kmeans_max_iter", 20),
+                local_epochs=worker_config.get("kmeans_local_epochs", 5),
+                seed=42,
+                metrics_output_dir=results_dir,
+                sync_mode=sync_mode,
+            )
+        elif sync_mode == MODE_PS_SYNC_FEDAVG_MPI and comm is not None:
             from mpj_spark.applications.kmeans.fedavg_mpi_run import run_kmeans_fedavg_mpi
 
             result = run_kmeans_fedavg_mpi(
