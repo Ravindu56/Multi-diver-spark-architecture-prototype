@@ -88,17 +88,14 @@
 # =============================================================================
 
 
-
 from __future__ import annotations
 
 import itertools
 import logging
 
-
 import numpy as np
 from pyspark import RDD
 from pyspark.sql import SparkSession
-
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +168,6 @@ def _chunk_source(points_rdd):
 # ---------------------------------------------------------------------------
 
 
-
 def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     """
     Load a numeric CSV partition file into a cached numpy-row RDD.
@@ -205,12 +201,10 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     """
     raw_rdd = spark.sparkContext.textFile(partition_path)
 
-
     # Detect number of features from first valid line so we can filter
     # ragged rows without collecting the whole RDD to the driver.
     first_line = raw_rdd.first()
     n_features = len(first_line.strip().split(","))
-
 
     def _parse_line(line: str):
         """
@@ -226,9 +220,7 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
         except ValueError:
             return None
 
-
     points_rdd = raw_rdd.map(_parse_line).filter(lambda x: x is not None).cache()
-
 
     # Trigger the cache by counting — ensures data is loaded into memory
     # before the first iteration begins so timing measurements (Step 4)
@@ -244,11 +236,9 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     return points_rdd
 
 
-
 # ---------------------------------------------------------------------------
 # 2. Centroid initialisation  (k-means++ single-pass)
 # ---------------------------------------------------------------------------
-
 
 
 def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
@@ -350,7 +340,6 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     """
     rng = np.random.default_rng(seed)
 
-
     # --- Collect a bounded sample to driver ---
     row_count = points_rdd.count()
     if row_count == 0:
@@ -389,7 +378,6 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     idx = rng.integers(0, len(sample))
     centres = [sample[idx]]
 
-
     for _ in range(k - 1):
         # Squared distance from each sample point to the nearest existing centre
         dists = np.array(
@@ -406,7 +394,6 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
             chosen_idx = rng.integers(0, len(sample))
         centres.append(sample[chosen_idx])
 
-
     centroids = np.array(centres, dtype=np.float64)  # shape: (k, D)
     logger.info(
         "[rank local] init_centroids: k=%d, D=%d, sample_size=%d",
@@ -417,11 +404,9 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     return centroids
 
 
-
 # ---------------------------------------------------------------------------
 # 3. Per-iteration local centroid stats  (the core Step 3 output)
 # ---------------------------------------------------------------------------
-
 
 
 def compute_local_stats(
@@ -492,7 +477,6 @@ def compute_local_stats(
     """
     k, d = centroids.shape
 
-
     # Capture centroids as a local variable so Spark can serialise the
     # closure without pickling the entire calling frame.
     _centroids = np.asarray(centroids, dtype=np.float64)
@@ -522,7 +506,6 @@ def compute_local_stats(
             if counts[j] > 0:
                 yield (j, (sums[j], int(counts[j])))
 
-
     def _reduce_partition_stats(a, b):
         """Merge two (sum_vec, count) tuples from different Spark partition slices."""
         return (a[0] + b[0], a[1] + b[1])
@@ -533,7 +516,6 @@ def compute_local_stats(
         source.mapPartitions(_map_partition).reduceByKey(_reduce_partition_stats).collect()
     )
 
-
     # Assemble into dense K-indexed arrays.
     # Clusters with zero local points remain as zeros — the Allreduce
     # of all-zero sums across all ranks is still zero, which is correct:
@@ -541,7 +523,6 @@ def compute_local_stats(
     # and the convergence check in Step 4 will handle the ZeroDivision guard.
     local_sums = np.zeros((k, d), dtype=np.float64)
     local_counts = np.zeros(k, dtype=np.float64)  # float64 for Allreduce compat
-
 
     for cluster_id, (sum_vec, count) in raw_results:
         local_sums[cluster_id] = sum_vec
