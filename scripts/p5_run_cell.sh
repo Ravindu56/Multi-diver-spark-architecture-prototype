@@ -9,7 +9,8 @@
 # rep 0 of each configuration is the PILOT (not a measured sample); reps 1..N-1 are measured.
 # A failed pilot marks the configuration infeasible and skips its remaining reps.
 # No automatic retries: failed runs keep their logs and are excluded from timing.
-# UNVERIFIED: the LogReg entry point (LR_MODULE) - confirm it has a CLI with --help first.
+# LogReg runs through mpj_spark.applications.logreg.cli (added for #30); hand-run it once
+# in Cell A before leaving the runner unattended.
 set -u -o pipefail
 CELL=${1:?usage: p5_run_cell.sh A|B}
 case $CELL in A) NP=3;; B) NP=5;; *) exit 2;; esac
@@ -19,7 +20,7 @@ CIDR=${CIDR:-10.0.1.0/24}
 REPS=${REPS:-4}; TMO=${TMO:-5400}; COOL=${COOL:-60}
 KM_SIZES=${KM_SIZES:-"100 500 1024"}
 LR_FEATS=${LR_FEATS:-"10 50 200"}; LR_SIZE=${LR_SIZE:-100}
-LR_MODULE=${LR_MODULE:-mpj_spark.applications.logreg.allreduce}
+LR_MODULE=${LR_MODULE:-mpj_spark.applications.logreg.cli}
 OUT=$HOME/p5-runs/$(date +%Y%m%d-%H%M%S)-cell$CELL; mkdir -p "$OUT"
 LOG=$OUT/runlog.csv
 echo "name,cell,np,workload,param,rep,rc,wall_s,start" > "$LOG"
