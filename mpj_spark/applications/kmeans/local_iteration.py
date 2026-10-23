@@ -31,10 +31,17 @@
 #       |
 #   (local_sums: K x D,  local_counts: K)   <- RETURNED to caller
 #       |
+#       |
+#   assign_and_sum()  ->  one Spark mapPartitions + reduceByKey action
+#       |
+#   (local_sums: K x D,  local_counts: K)   <- RETURNED to caller
+#       |
 #   Step 4: comm.Allreduce(local_sums, global_sums, op=MPI.SUM)
 #           comm.Allreduce(local_counts, global_counts, op=MPI.SUM)
 #       |
+#       |
 #   global_centroids = global_sums / global_counts[:, np.newaxis]
+#       |
 #       |
 #   repeat
 #
@@ -81,14 +88,17 @@
 # =============================================================================
 
 
+
 from __future__ import annotations
 
 import itertools
 import logging
 
+
 import numpy as np
 from pyspark import RDD
 from pyspark.sql import SparkSession
+
 
 logger = logging.getLogger(__name__)
 
@@ -161,15 +171,18 @@ def _chunk_source(points_rdd):
 # ---------------------------------------------------------------------------
 
 
+
 def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     """
     Load a numeric CSV partition file into a cached numpy-row RDD.
+
 
 
     Each line is parsed into a numpy float64 array.  Malformed lines
     (non-numeric tokens, empty lines, mismatched column counts) are
     silently dropped — consistent with VectorAssembler(handleInvalid='skip')
     used in the baseline.
+
 
 
     The RDD is cached so that repeated scans during K-Means iterations
@@ -184,6 +197,7 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     partition_path : path to the rank's CSV shard
 
 
+
     Returns
     -------
     RDD of numpy.ndarray, shape (D,), dtype float64
@@ -191,13 +205,16 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     """
     raw_rdd = spark.sparkContext.textFile(partition_path)
 
+
     # Detect number of features from first valid line so we can filter
     # ragged rows without collecting the whole RDD to the driver.
     first_line = raw_rdd.first()
     n_features = len(first_line.strip().split(","))
 
+
     def _parse_line(line: str):
         """
+        Parse one CSV line -> numpy array.  Returns None for bad lines.
         Parse one CSV line -> numpy array.  Returns None for bad lines.
         Only rows with exactly n_features numeric columns are kept.
         """
@@ -209,7 +226,9 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
         except ValueError:
             return None
 
+
     points_rdd = raw_rdd.map(_parse_line).filter(lambda x: x is not None).cache()
+
 
     # Trigger the cache by counting — ensures data is loaded into memory
     # before the first iteration begins so timing measurements (Step 4)
@@ -225,14 +244,17 @@ def load_partition_rdd(spark: SparkSession, partition_path: str) -> RDD:
     return points_rdd
 
 
+
 # ---------------------------------------------------------------------------
 # 2. Centroid initialisation  (k-means++ single-pass)
 # ---------------------------------------------------------------------------
 
 
+
 def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     """
     Initialise K cluster centroids using k-means++ sampling.
+
 
 
     Strategy
@@ -245,12 +267,36 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
       1. Sample min(max(10k, 200), row_count) points from the RDD into
          driver RAM.  (10k points is sufficient for stable initialisation
          up to ~1M rows)
+
+      1. Sample min(max(10k, 200), row_count) points from the RDD into
+         driver RAM.  (10k points is sufficient for stable initialisation
+         up to ~1M rows)
       2. Run k-means++ selection on the in-memory sample using numpy.
          This avoids k full Spark actions and runs in microseconds.
 
 
+
     This approach is consistent with how Spark's own k-means|| initialises
     on a subsample when the dataset is large.
+
+
+    ROBUSTNESS
+    ----------
+    Spark's takeSample(withReplacement=False) is a bounded Bernoulli
+    sampler: it retries at most a few times to fill the requested quota
+    and otherwise returns whatever it collected.  When the requested size
+    is a tiny fraction of the RDD (e.g. 30 of 1.2M rows, draw probability
+    ~2.5e-5) an empty or under-full sample is a legitimate outcome and
+    was observed as ValueError('high <= 0') from rng.integers().  This
+    function therefore:
+      * raises a clear error on a truly empty RDD,
+      * floors the draw at 200 rows (empty-outcome probability becomes
+        negligible and 200 rows is still free at this scale),
+      * retries the draw up to twice with varied seeds,
+      * falls back to a deterministic take() before k-means++ selection,
+      * falls back to uniform selection if the sampled points are all
+        identical (dists.sum() == 0 would otherwise yield NaN probs).
+
 
 
     ROBUSTNESS
@@ -282,10 +328,12 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     through a common initialisation.
 
 
+
     If a globally synchronised init is required (e.g. for reproducibility
     benchmarks), rank 0 can run init_centroids() and broadcast the result
     via comm.bcast() before the iteration loop.  That is an optional
     enhancement; it is NOT required for the acceptance criterion of Issue #8.
+
 
 
     Parameters
@@ -295,11 +343,13 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     seed       : random seed for reproducibility
 
 
+
     Returns
     -------
     numpy.ndarray, shape (k, D), dtype float64
     """
     rng = np.random.default_rng(seed)
+
 
     # --- Collect a bounded sample to driver ---
     row_count = points_rdd.count()
@@ -339,6 +389,7 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     idx = rng.integers(0, len(sample))
     centres = [sample[idx]]
 
+
     for _ in range(k - 1):
         # Squared distance from each sample point to the nearest existing centre
         dists = np.array(
@@ -355,6 +406,7 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
             chosen_idx = rng.integers(0, len(sample))
         centres.append(sample[chosen_idx])
 
+
     centroids = np.array(centres, dtype=np.float64)  # shape: (k, D)
     logger.info(
         "[rank local] init_centroids: k=%d, D=%d, sample_size=%d",
@@ -365,9 +417,11 @@ def init_centroids(points_rdd: RDD, k: int, seed: int = 42) -> np.ndarray:
     return centroids
 
 
+
 # ---------------------------------------------------------------------------
 # 3. Per-iteration local centroid stats  (the core Step 3 output)
 # ---------------------------------------------------------------------------
+
 
 
 def compute_local_stats(
@@ -378,10 +432,12 @@ def compute_local_stats(
     Compute LOCAL centroid sums and point counts for this rank's data shard.
 
 
+
     This is the single Spark action executed per K-Means iteration.  It
     does NOT compute the final centroid averages — it returns the raw sums
     and counts so that Step 4 (comm.Allreduce) can aggregate them globally
     across all ranks before division.
+
 
 
     Algorithm (one mapPartitions + reduceByKey action)
@@ -390,6 +446,7 @@ def compute_local_stats(
       1. Assign p to the nearest centroid: j = argmin_j ||p - centroids[j]||^2
       2. Accumulate: cluster_sums[j] += p
                      cluster_counts[j] += 1
+
 
 
     The accumulation is done inside mapPartitions (once per Spark partition
@@ -408,6 +465,7 @@ def compute_local_stats(
                  sc.broadcast() is not required for prototype scale).
 
 
+
     Returns
     -------
     local_sums   : numpy.ndarray, shape (K, D)
@@ -415,9 +473,11 @@ def compute_local_stats(
         NOT divided by count — ready for comm.Allreduce(op=MPI.SUM).
 
 
+
     local_counts : numpy.ndarray, shape (K,)
         Number of data points assigned to each cluster on THIS rank's shard.
         NOT normalised — ready for comm.Allreduce(op=MPI.SUM).
+
 
 
     Post-Allreduce usage (Step 4)
@@ -425,11 +485,13 @@ def compute_local_stats(
         global_centroids = global_sums / global_counts[:, np.newaxis]
 
 
+
     IMPORTANT: clusters with global_counts[j] == 0 must be handled by
     the caller (Step 4) before division.  This file raises no ZeroDivision
     error — it only produces raw sums and counts.
     """
     k, d = centroids.shape
+
 
     # Capture centroids as a local variable so Spark can serialise the
     # closure without pickling the entire calling frame.
@@ -460,6 +522,7 @@ def compute_local_stats(
             if counts[j] > 0:
                 yield (j, (sums[j], int(counts[j])))
 
+
     def _reduce_partition_stats(a, b):
         """Merge two (sum_vec, count) tuples from different Spark partition slices."""
         return (a[0] + b[0], a[1] + b[1])
@@ -470,6 +533,7 @@ def compute_local_stats(
         source.mapPartitions(_map_partition).reduceByKey(_reduce_partition_stats).collect()
     )
 
+
     # Assemble into dense K-indexed arrays.
     # Clusters with zero local points remain as zeros — the Allreduce
     # of all-zero sums across all ranks is still zero, which is correct:
@@ -477,6 +541,7 @@ def compute_local_stats(
     # and the convergence check in Step 4 will handle the ZeroDivision guard.
     local_sums = np.zeros((k, d), dtype=np.float64)
     local_counts = np.zeros(k, dtype=np.float64)  # float64 for Allreduce compat
+
 
     for cluster_id, (sum_vec, count) in raw_results:
         local_sums[cluster_id] = sum_vec
