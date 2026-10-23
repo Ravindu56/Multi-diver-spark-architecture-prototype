@@ -95,18 +95,6 @@ def _post_sync_shift(prev_centroids: np.ndarray, synced_centroids: np.ndarray) -
     return float(np.linalg.norm(synced_centroids - prev_centroids))
 
 
-def _post_sync_shift(prev_centroids: np.ndarray, synced_centroids: np.ndarray) -> float:
-    """Frobenius shift between the previous round's global centroids and the
-    freshly synchronised (FedAvg-averaged) centroids.
-
-    Because the synced centroids are broadcast, this value is identical on
-    every rank — the stopping test can therefore never strand a rank at
-    comm.gather.  It is equal to the local-update shift only when fedavg
-    converged (workers no longer move the global model between rounds).
-    """
-    return float(np.linalg.norm(synced_centroids - prev_centroids))
-
-
 def run_kmeans_fedavg_mpi(
     comm,
     rank: int,
@@ -198,9 +186,6 @@ def run_kmeans_fedavg_mpi(
         # Pre-sync local shift: how far this worker's local Lloyd steps
         # moved centroids from the round start.  Diagnostic only.
         local_shift = float(np.linalg.norm(centroids - prev_centroids))
-        # Pre-sync local shift: how far this worker's local Lloyd steps
-        # moved centroids from the round start.  Diagnostic only.
-        local_shift = float(np.linalg.norm(centroids - prev_centroids))
 
         # ── MPI collective sync: gather → align → FedAvg → bcast ──────
         t_sync = time.perf_counter()
@@ -242,11 +227,6 @@ def run_kmeans_fedavg_mpi(
         # workers still move the *averaged* model between rounds.
         centroid_shift = _post_sync_shift(prev_centroids, centroids)
 
-        # Convergence on the POST-sync global centroids: identical on every
-        # rank (no divergent-time break → no deadlock), and tires whether
-        # workers still move the *averaged* model between rounds.
-        centroid_shift = _post_sync_shift(prev_centroids, centroids)
-
         iter_time_s = time.perf_counter() - t_iter_start
         iter_times.append(iter_time_s)
 
@@ -262,7 +242,6 @@ def run_kmeans_fedavg_mpi(
         print(
             f"[KMeans FedAvg MPI Rank {rank}] round {it + 1}/{max_iter}  "
             f"({iter_time_s:.3f}s)  shift={centroid_shift:.6f}  "
-            f"local_shift={local_shift:.6f}  "
             f"local_shift={local_shift:.6f}  "
             f"WCSS={global_wcss:.2f}"
         )
