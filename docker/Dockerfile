@@ -137,6 +137,17 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # ---------------------------------------------------------------------------
+# 11. Build provenance (set by scripts/build_and_distribute_image.sh)
+#     Placed last so a new commit hash does not invalidate the cached layers
+#     above (dependency install, SSH keys). scripts/build_and_distribute_image.sh
+#     refuses an image whose revision label differs from the checked-out commit.
+# ---------------------------------------------------------------------------
+ARG GIT_COMMIT=unknown
+ARG BUILD_VERSION=unknown
+LABEL org.opencontainers.image.revision=$GIT_COMMIT
+LABEL org.opencontainers.image.version=$BUILD_VERSION
+
+# ---------------------------------------------------------------------------
 # Ports
 #   22   — SSH (mpirun inter-container)
 #   4040 — Spark Web UI (per driver; mapped per-container in compose)
