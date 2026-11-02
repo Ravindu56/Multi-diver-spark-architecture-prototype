@@ -4,12 +4,20 @@
 # Idempotent - safe to re-run; redeploys and re-validates.
 #
 # Usage (P5-04 experimental cells, see docs/p5-04-experimental-design.md):
+#   ./scripts/build_and_distribute_image.sh   # first: builds + distributes the image,
+#                                             # writes scripts/.image-tag (IMAGE_TAG)
 #   ./scripts/bootstrap_stack.sh        # Cell A: dedicated 3-rank (base only)
 #   ./scripts/bootstrap_stack.sh 4w     # Cell B: 5-rank (base + 4w overlay)
 #   ./scripts/bootstrap_stack.sh 8w     # Cell C: 9-rank (base + 8w overlay)
 #
-# The overlay files add the co-located ranks (SPARK_DRIVER_MEMORY=400m) and
+# The overlay files add the co-located ranks (SPARK_DRIVER_MEMORY=480m) and
 # override MPI_SIZE per service, so no manual env exports are required.
+#
+# Image handling: the stack runs mpj-spark:$IMAGE_TAG (never :latest). A new tag
+# changes the service spec, so `docker stack deploy` replaces the tasks - no
+# `docker stack rm` needed. The script refuses to deploy when the image revision
+# label differs from the checked-out commit (ALLOW_STALE_IMAGE=1 overrides) and
+# fails after deploy if mpi-root is not running the expected tag.
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -75,11 +83,19 @@ set +a
 STACK="${STACK_NAME:-mpj}"
 MANAGER="$MANAGER_IP"
 
+# --- image tag written by scripts/build_and_distribute_image.sh --------------
+[[ -f scripts/.image-tag ]] \
+  || { echo "[stack] ERROR: scripts/.image-tag missing - run scripts/build_and_distribute_image.sh first"; exit 1; }
+IMAGE_TAG="${IMAGE_TAG:-$(cat scripts/.image-tag)}"
+export IMAGE_TAG
+IMAGE_REF="mpj-spark:${IMAGE_TAG}"
+
 COMPOSE_ARGS=()
 for f in "${COMPOSE_FILES[@]}"; do COMPOSE_ARGS+=(-f "$f"); done
 
 echo "[stack] manager: $MANAGER | stack: $STACK | cell: $CELL"
 echo "[stack] MPI_SIZE=$MPI_SIZE  NUM_WORKERS=${NUM_WORKERS:-2}  overlay=${OVERLAY:-none}"
+echo "[stack] image: $IMAGE_REF"
 
 # --- precondition 1: overlay network exists on the manager ------------------
 ssh -o ConnectTimeout=10 "$SSH_USER@$MANAGER" \
@@ -87,15 +103,28 @@ ssh -o ConnectTimeout=10 "$SSH_USER@$MANAGER" \
   || { echo "[stack] ERROR: mpj-net missing on manager - run scripts/bootstrap_swarm.sh first"; exit 1; }
 echo "[stack] mpj-net present on manager"
 
-# --- precondition 2: identical image on every node --------------------------
-HOST_ID="$(docker image inspect -f '{{.Id}}' mpj-spark:latest 2>/dev/null || true)"
-[[ -n "$HOST_ID" ]] || { echo "[stack] ERROR: mpj-spark:latest missing on host - run scripts/build_and_distribute_image.sh"; exit 1; }
+# --- precondition 2: identical image (this tag) on every node ---------------
+HOST_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE_REF" 2>/dev/null || true)"
+[[ -n "$HOST_ID" ]] || { echo "[stack] ERROR: $IMAGE_REF missing on host - run scripts/build_and_distribute_image.sh"; exit 1; }
 for ip in $NODE_IPS; do
-  rid="$(ssh "$SSH_USER@$ip" "docker image inspect -f '{{.Id}}' mpj-spark:latest 2>/dev/null" || true)"
+  rid="$(ssh "$SSH_USER@$ip" "docker image inspect -f '{{.Id}}' $IMAGE_REF 2>/dev/null" || true)"
   [[ "$rid" == "$HOST_ID" ]] \
-    || { echo "[stack] ERROR: $ip has stale/missing image (${rid:-none}) - run scripts/build_and_distribute_image.sh"; exit 1; }
+    || { echo "[stack] ERROR: $ip has stale/missing $IMAGE_REF (${rid:-none}) - run scripts/build_and_distribute_image.sh"; exit 1; }
   echo "[stack] $ip: image OK"
 done
+
+# --- precondition 3: the image was built from the code that is checked out ---
+IMAGE_REV="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_REF")"
+HEAD_REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+if [[ "$IMAGE_REV" != "$HEAD_REV" ]]; then
+  if [[ "${ALLOW_STALE_IMAGE:-0}" == 1 ]]; then
+    echo "[stack] WARNING: image revision $IMAGE_REV != checkout $HEAD_REV (ALLOW_STALE_IMAGE=1)"
+  else
+    echo "[stack] ERROR: image revision $IMAGE_REV != checkout $HEAD_REV - rerun scripts/build_and_distribute_image.sh (or ALLOW_STALE_IMAGE=1)"
+    exit 1
+  fi
+fi
+echo "[stack] image revision: $IMAGE_REV"
 
 # --- render (shell env interpolation) and copy to the manager ---------------
 # NOTE: `docker compose config --quiet` VALIDATES ONLY and prints nothing;
@@ -117,7 +146,9 @@ rm -f "$RENDERED"
 echo "[stack] stack file rendered and staged on manager"
 
 # --- deploy -----------------------------------------------------------------
-ssh "$SSH_USER@$MANAGER" "docker stack deploy -c /tmp/stack-mpj-spark.rendered.yml $STACK"
+# --resolve-image never: the image exists only in each node's local store (no
+# registry), so Swarm must not try to look it up.
+ssh "$SSH_USER@$MANAGER" "docker stack deploy --resolve-image never -c /tmp/stack-mpj-spark.rendered.yml $STACK"
 
 # --- wait for convergence (max ~3 min/service) ------------------------------
 for svc in "${SERVICES[@]}"; do
@@ -169,6 +200,12 @@ for ip in $NODE_IPS; do
 done
 ssh "$SSH_USER@$MANAGER" "docker exec $ROOT_CID rm -f /data/.p5-03-probe"
 
+# --- acceptance check 3: the running containers use the expected image -------
+RUNNING_IMG="$(ssh "$SSH_USER@$MANAGER" "docker inspect -f '{{.Config.Image}}' $ROOT_CID")"
+echo "[stack] mpi-root runs image: $RUNNING_IMG"
+[[ "$RUNNING_IMG" == "$IMAGE_REF"* ]] \
+  || { echo "[stack] ERROR: mpi-root runs $RUNNING_IMG, expected $IMAGE_REF"; exit 1; }
+
 echo "[stack] docker stack services ${STACK}:"
 ssh "$SSH_USER@$MANAGER" "docker stack services $STACK"
-echo "[stack] P5-03/P5-04 acceptance criteria met - issues #28 / #82 (cell: $CELL)"
+echo "[stack] P5-03/P5-04 acceptance criteria met - issues #28 / #82 (cell: $CELL, image: $IMAGE_REF, revision: $IMAGE_REV)"
