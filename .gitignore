@@ -47,3 +47,6 @@ results/resource_runs.csv.lock
 *.csv.lock.*
 *.out
 *.done
+# Image pipeline state (written by scripts/build_and_distribute_image.sh)
+scripts/.image-tag
+scripts/.image-manifest
