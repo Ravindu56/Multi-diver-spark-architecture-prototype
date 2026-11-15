@@ -27,6 +27,8 @@ OUT=$HOME/p5-runs/$(date +%Y%m%d-%H%M%S)-cell$CELL; mkdir -p "$OUT"
 LOG=$OUT/runlog.csv
 echo "name,cell,np,workload,param,rep,rc,wall_s,start" > "$LOG"
 echo "commit=$(git rev-parse HEAD 2>/dev/null) cell=$CELL np=$NP" > "$OUT/meta.txt"
+# VM CPU pinning in force for this cell (see scripts/pin_swarm_vms.sh).
+{ echo "== vcpu pinning"; "$(dirname "$0")/pin_swarm_vms.sh" status 2>&1; } >> "$OUT/meta.txt" || true
 ROOT='docker exec $(docker ps -q -f name=mpj_mpi-root | head -1)'
 
 # Linux pressure stall information (PSI), sampled once per second. Each line is

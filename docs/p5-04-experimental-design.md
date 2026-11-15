@@ -65,6 +65,7 @@ VM memory is chosen once, from pilot runs, before any measured repetition, and i
 4. Keep datasets, seeds, initialization, algorithm settings, iteration budgets, and stopping rules matched across cells. Record both fixed-budget results and whether convergence tolerance was reached. Do not assume convergence iterations are rank-invariant.
 5. Collect at least three successful measured repetitions per feasible retained configuration; report individual runs and a summary with variability. Distinguish smoke tests from measured repetitions.
 6. Record background workload and cache policy. Avoid other substantial interactive workloads during measured runs.
+7. Pin the VMs before the pilots with `./scripts/pin_swarm_vms.sh apply`, and keep the same pinning for the pilots and the whole grid. The host's Core Ultra 7 155H mixes performance (P), efficiency (E) and low-power cores, and unpinned vCPUs can migrate between core types. Each vCPU is pinned to its own P-core: one hyperthread per physical core, so no two vCPUs share a core. Each worker VM gets one 4.8 GHz and one 4.5 GHz boost core, and the QEMU emulator threads go on the E-cores. The sibling hyperthreads stay available to the host, so host activity can still share those cores; run headless to keep it small. Pinning does not make the vCPUs independent hosts. The runner writes the pinning in force to each cell's `meta.txt`; `./scripts/pin_swarm_vms.sh unpin` reverts it.
 
 ## Deployment
 
