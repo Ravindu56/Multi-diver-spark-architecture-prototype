@@ -9,6 +9,8 @@
 # rep 0 of each configuration is the PILOT (not a measured sample); reps 1..N-1 are measured.
 # A failed pilot marks the configuration infeasible and skips its remaining reps.
 # No automatic retries: failed runs keep their logs and are excluded from timing.
+# Per run, for the host and each VM: vmstat-*.log and psi-*.log (1 s samples),
+# mem-before.txt / mem-after.txt (free -m, nproc), stack-before/after.txt (task states).
 # LogReg runs through mpj_spark.applications.logreg.cli (added for #30); hand-run it once
 # in Cell A before leaving the runner unattended.
 set -u -o pipefail
@@ -27,16 +29,36 @@ echo "name,cell,np,workload,param,rep,rc,wall_s,start" > "$LOG"
 echo "commit=$(git rev-parse HEAD 2>/dev/null) cell=$CELL np=$NP" > "$OUT/meta.txt"
 ROOT='docker exec $(docker ps -q -f name=mpj_mpi-root | head -1)'
 
+# Linux pressure stall information (PSI), sampled once per second. Each line is
+# "<epoch_s> <cpu|memory|io> <some|full> avg10=.. avg60=.. avg300=.. total=<us>".
+# total= is a cumulative stall counter in microseconds: the difference between the
+# first and last sample of a run gives the exact stall time for that run.
+# The trailing p5-psi-sampler argument names the process so stop_samplers can find it.
+PSI_LOOP='if [ -r /proc/pressure/memory ]; then while :; do t=$(date +%s); for r in cpu memory io; do sed "s/^/$t $r /" /proc/pressure/$r; done; sleep 1; done; else echo "PSI unavailable: /proc/pressure not readable"; fi'
+
 start_samplers() {
   vmstat -t 1 > "$1/vmstat-host.log" 2>&1 & HOSTPID=$!
+  bash -c "$PSI_LOOP" p5-psi-sampler > "$1/psi-host.log" 2>&1 & HOSTPSI=$!
   for ip in $VMS; do
     ssh -n $SSHU@$ip "timeout $TMO vmstat -t 1" > "$1/vmstat-$ip.log" 2>&1 &
+    ssh -n $SSHU@$ip "timeout $TMO bash -c '$PSI_LOOP' p5-psi-sampler" > "$1/psi-$ip.log" 2>&1 &
   done
 }
 stop_samplers() {
-  kill $HOSTPID 2>/dev/null
-  for ip in $VMS; do ssh -n $SSHU@$ip 'pkill -u $USER -x vmstat' 2>/dev/null; done
+  kill $HOSTPID $HOSTPSI 2>/dev/null
+  # [r] keeps the pattern from matching the remote shell that runs this pkill.
+  for ip in $VMS; do
+    ssh -n $SSHU@$ip 'pkill -u $USER -x vmstat; pkill -u $USER -f "p5-psi-sample[r]"' 2>/dev/null
+  done
   wait 2>/dev/null
+}
+
+mem_snapshot() { # file: free -m (plus vCPU count) for the host and every VM
+  { echo "== host $(date -Is) nproc=$(nproc)"; free -m
+    for ip in $VMS; do
+      echo "== $ip"; ssh -n $SSHU@$ip 'echo "$(date -Is) nproc=$(nproc)"; free -m' 2>&1
+    done
+  } > "$1"
 }
 
 run_one() { # name workload param rep module args...
@@ -52,12 +74,14 @@ mpirun -n $NP --hostfile /etc/mpi/hostfile \\
   -mca plm_rsh_args "-p 22" \\
   python -m $module $* --output /data/results/p5-04/$name
 EOF
+  mem_snapshot "$d/mem-before.txt"
   start_samplers "$d"
   local t0; t0=$(date +%s)
   timeout $TMO ssh -n $SSHU@$MGR "$ROOT bash -lc 'bash /data/run_cmd/$name.sh'" > "$d/run.log" 2>&1
   local rc=$? t1; t1=$(date +%s)
   [ $rc -ne 0 ] && ssh -n $SSHU@$MGR "$ROOT pkill -f mpirun" 2>/dev/null
   stop_samplers
+  mem_snapshot "$d/mem-after.txt"
   ssh -n $SSHU@$MGR "docker stack ps mpj --format '{{.Name}} {{.Node}} {{.CurrentState}}'" > "$d/stack-after.txt"
   scp -q -r $SSHU@$MGR:/srv/mpj-share/results/p5-04/$name "$d/" 2>/dev/null
   echo "$name,$CELL,$NP,$wl,$param,$rep,$rc,$((t1-t0)),$(date -d @$t0 -Is)" >> "$LOG"
