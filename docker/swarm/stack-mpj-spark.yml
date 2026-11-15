@@ -19,6 +19,15 @@
 #     docker stack deploy -c - mpj   # 9 ranks
 #
 # See docs/p5-04-experimental-design.md for the co-location research rationale.
+#
+# Cell A budget parity (P5-04): every rank here sets SLOTS_OVERRIDE=2 and
+# SPARK_DRIVER_MEMORY=960m explicitly instead of falling back to nproc and the
+# proportional RAM formula. Two workers x (2 cores, 960m) matches Cell B's four
+# workers x (1 core, 480m): 4 cores and 1920m of heap in both cells, so the
+# 2 -> 4 worker comparison changes process count, not the application budget.
+# The values are set on mpi-root as well because mpirun -x forwards mpi-root's
+# own environment to the remote ranks. The 4w/8w overlays override all three
+# services, so this block applies to Cell A only.
 
 x-common-env: &common-env
   SPARK_LOCAL_IP: 0.0.0.0
@@ -57,6 +66,8 @@ services:
       <<: *common-env
       MPI_RANK: "0"
       MPI_SIZE: "${MPI_SIZE:-3}"
+      SPARK_DRIVER_MEMORY: "960m"
+      SLOTS_OVERRIDE: "2"
     volumes:
       - *data-mount
     networks:
@@ -76,6 +87,8 @@ services:
       <<: *common-env
       MPI_RANK: "1"
       MPI_SIZE: "${MPI_SIZE:-3}"
+      SPARK_DRIVER_MEMORY: "960m"
+      SLOTS_OVERRIDE: "2"
     volumes:
       - *data-mount
     networks:
@@ -95,6 +108,8 @@ services:
       <<: *common-env
       MPI_RANK: "2"
       MPI_SIZE: "${MPI_SIZE:-3}"
+      SPARK_DRIVER_MEMORY: "960m"
+      SLOTS_OVERRIDE: "2"
     volumes:
       - *data-mount
     networks:
