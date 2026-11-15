@@ -33,7 +33,7 @@ Cell C (eight non-root workers / nine MPI ranks) is excluded from required runs 
 
 ## Workloads and dataset matrix
 
-- K-Means: workers {2, 4} x dataset sizes {100 MB, 500 MB, 1 GB}: six candidate configurations, before repetitions. Revised on 2026-11-15 after the VM RAM gate: Cell A at all three sizes and Cell B at 100 MB only (see "Scope revision" under the VM RAM decision outcome).
+- K-Means: workers {2, 4} x dataset sizes {100 MB, 500 MB, 1 GB}: six candidate configurations, before repetitions. Revised on 2026-11-15 after the VM RAM gate: Cell A at 50 MB, 100 MB, 200 MB, 500 MB and 1 GB, and Cell B at 50 MB, 100 MB and 200 MB (see "Scope revision" under the VM RAM decision outcome).
 - Logistic regression: workers {2, 4}, with documented dataset and feature-count variations. Current inputs: `logreg_f{10,50,200}_100mb.csv` (100 MB each, 10/50/200 features plus a label column, seed 42), staged with `scripts/stage_datasets.sh`. The md5 values, byte sizes and line counts for every staged input are in `results/p5-04/ram-gate/datasets-20261115.txt`.
 - WordCount: deployment and correctness validation. Verify remote-rank compute participation before interpreting any WordCount worker-scaling result.
 - Pilot dataset feasibility separately. Four-worker success at 100 MB does not establish feasibility at 500 MB or 1 GB.
@@ -82,13 +82,15 @@ Observations to carry forward:
 
 | Cell | K-Means sizes | Purpose |
 |---|---|---|
-| A (2 workers) | 100 MB, 500 MB, 1 GB | Data-size scaling at two workers |
-| B (4 workers) | 100 MB | Two-versus-four worker comparison at 100 MB |
+| A (2 workers) | 50 MB, 100 MB, 200 MB, 500 MB, 1 GB | Data-size scaling at two workers; comparison sizes |
+| B (4 workers) | 50 MB, 100 MB, 200 MB | Two-versus-four worker comparison at 50, 100 and 200 MB |
+
+The approved revision was Cell A at 100 MB, 500 MB and 1 GB and Cell B at 100 MB. The team then added 50 MB and 200 MB to both cells on 2026-11-15, so that the two-versus-four comparison covers three sizes; the supervisor is to be informed of this addition. The 50 MB and 200 MB inputs (`kmeans_data_50mb.csv`, `kmeans_data_200mb.csv`) were generated with the same generator and seed 42 as the other inputs; md5, bytes and line counts for all five K-Means inputs are in `results/p5-04/km-grid/datasets-20261115.txt`. Cell B at 200 MB was not piloted under the VM RAM rule; its rep 0 is the pilot.
 
 - Cell B at 500 MB and 1 GB is recorded as infeasible at 3072 MB per VM (documented exclusion, step 5), with the pilot evidence listed above. It is not dropped silently, and the result is reported as a finding: on this testbed, four workers at 1 core / 480m each cannot hold K-Means inputs of 500 MB or more.
-- The two-versus-four worker comparison for K-Means is made at 100 MB only. The LogReg grid (below) gives the comparison across three problem shapes.
+- The two-versus-four worker comparison for K-Means is made at 50, 100 and 200 MB. The LogReg grid (below) gives the comparison across three problem shapes.
 - Considered and not chosen: smaller inputs for both cells (a new dataset matrix and another pilot round), and a different per-rank budget. 480m is already the smallest heap Spark accepted, most of the per-rank memory is JVM overhead and the Spark Python worker, and more memory for Cell B would break the matched budget.
-- The grid uses `REPS=4` per configuration (one pilot plus three measured repetitions) and the unchanged algorithm settings (k=5, 20 iterations, seed 42). Cell B at 100 MB was not piloted under the VM RAM rule; its rep 0 is the pilot, and a failed pilot marks it infeasible as usual.
+- The grid uses `REPS=4` per configuration (one pilot plus three measured repetitions) and the unchanged algorithm settings (k=5, 20 iterations, seed 42). Cell B at 50, 100 and 200 MB was not piloted under the VM RAM rule; each rep 0 is the pilot, and a failed pilot marks that configuration infeasible as usual.
 
 ## Resource controls and reproducibility
 
