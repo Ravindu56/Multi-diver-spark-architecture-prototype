@@ -1,0 +1,3 @@
+name,verdict,rc,wall_s,new_tasks,mem_full_pct_192.168.122.224,mem_full_pct_192.168.122.27,mem_full_pct_192.168.122.7,mem_full_pct_host,mem_some_pct_192.168.122.224,mem_some_pct_192.168.122.27,mem_some_pct_192.168.122.7,mem_some_pct_host,reasons
+km-B-500mb-r0,FAIL,124,5400,0,0.02,0.01,0.03,0.00,0.02,0.01,0.04,0.00,exit code 124
+km-B-1024mb-r0,FAIL,205,1087,1,0.03,0.17,4.23,0.01,0.04,0.23,7.90,0.01,exit code 205; 1 new Swarm task(s)

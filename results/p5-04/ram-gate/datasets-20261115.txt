@@ -1,0 +1,7 @@
+OK    kmeans_data_100mb.csv  (md5=adb87cda4f199c9695ad9582704c0441, 104857653 bytes, 1116141 lines, seed=42, identical on all 3 nodes)
+OK    kmeans_data_500mb.csv  (md5=6326473571862ed9044bdb1105eb277f, 524288019 bytes, 5581058 lines, seed=42, identical on all 3 nodes)
+OK    kmeans_data_1024mb.csv  (md5=b705d92f6ea71cfe7f2a65f9d94a0e8a, 1073741842 bytes, 11430433 lines, seed=42, identical on all 3 nodes)
+OK    logreg_f10_100mb.csv  (md5=91174a20e4d73890969e17d4d0c2c602, 104857643 bytes, 1081026 lines, seed=42, identical on all 3 nodes)
+OK    logreg_f50_100mb.csv  (md5=6713a41f8bf357cbb38d9430781bc458, 104857746 bytes, 219370 lines, seed=42, identical on all 3 nodes)
+OK    logreg_f200_100mb.csv  (md5=dd8d0df3b306a1ba7c64d9ad8494edcb, 104857608 bytes, 55102 lines, seed=42, identical on all 3 nodes)
+all datasets byte-identical across nodes - #82 dataset acceptance criterion met
