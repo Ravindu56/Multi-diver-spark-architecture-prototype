@@ -40,6 +40,23 @@ Cell C (eight non-root workers / nine MPI ranks) is excluded from required runs 
 - Record dataset checksums, actual bytes, row counts, generation seeds, and feature counts.
 - Record every infeasible configuration and its failure evidence. Any dataset reduction requires an explicit documented scope revision; do not silently drop failed cases.
 
+## VM RAM decision (pilot gate before the measured grid)
+
+VM memory is chosen once, from pilot runs, before any measured repetition, and is then held fixed for every cell and workload. The rule below is fixed before pilot data exists. Do not change it after seeing the results.
+
+1. Run pilots and the measured grid in the same host mode: research (headless, `./scripts/host-mode.sh research`). Stage the 500 MB and 1 GB K-Means inputs on the NFS share first (`scripts/stage_datasets.sh`).
+2. On the current 2560 MB per-VM profile, pilot K-Means at 500 MB and 1 GB in Cell B first (two JVMs per worker VM, the densest cell), then in Cell A. Use one rep per configuration and skip LogReg:
+   ```bash
+   ./scripts/bootstrap_stack.sh 4w
+   REPS=1 KM_SIZES="500 1024" LR_FEATS= ./scripts/p5_run_cell.sh B
+   ./scripts/bootstrap_stack.sh
+   REPS=1 KM_SIZES="500 1024" LR_FEATS= ./scripts/p5_run_cell.sh A
+   ```
+3. Check each pilot directory with `python scripts/p5_pilot_check.py ~/p5-runs/<dir> --csv <dir>/pilot_check.csv`. A pilot passes when it exits 0, starts no new Swarm tasks during the run, and keeps memory "full" pressure stall at or below 5% of the sampled interval on every node. A node with no PSI samples makes the pilot INCOMPLETE, not PASS. The 5% threshold is a proposal for the team to confirm before the pilots run.
+4. If every pilot passes, keep 2560 MB. If any pilot fails or is incomplete, resize all three VMs to 3072 MB (`MEM_MB=3072 ./scripts/resize_swarm_vms.sh`, the research-mode profile in `p5-01-low-ram-host-tuning.md`) and repeat steps 2 and 3.
+5. If a configuration still fails at 3072 MB, record it as infeasible, with its pilot logs and checker output, under the documented-exclusion rule above. Do not go above 3072 MB per VM: with QEMU overhead and the 2 GB host margin, three VMs at that size reach the sizing limit in `p5-01-low-ram-host-tuning.md`.
+6. Record the chosen VM size, the pilot directories and the checker CSVs with the Phase 5 results. Pilots are not measured samples.
+
 ## Resource controls and reproducibility
 
 1. Keep VM topology and provisioned vCPUs unchanged across the worker-count comparison. The current profile exposes six virtual CPUs in total; these are not six independent physical cores.
