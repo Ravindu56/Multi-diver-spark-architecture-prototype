@@ -111,6 +111,24 @@ Use the canonical MPI invocation in [the Swarm invocation notes](p5-swarm-mpi-in
 - Reject an unstable run as a timing sample, retain its failure log, and report the exclusion reason.
 - Verify synchronized model state across participating ranks and compare final objective values under matched settings as correctness checks.
 
+## Results: LogReg grid (P5-05, #30), 2026-11-15
+
+Runs: `REPS=4 KM_SIZES= LR_FEATS="10 50 200" bash scripts/p5_run_cell.sh A|B` at commit f663536 (image `mpj-spark:p5-campain-1-9-gf663536`), 3072 MB per VM (the VM RAM outcome above), research host mode, pinned vCPUs, and the per-rank budgets above. Inputs are `logreg_f{10,50,200}_100mb.csv`; checksums are in `results/p5-04/ram-gate/datasets-20261115.txt`. Each feature count has one pilot (rep 0) and three measured repetitions; epochs 30 max, lr 0.01, tol 1e-4. The code includes the LogReg timing fix: `sync_time_s` covers the MPI calls only and the Spark loss pass is reported separately as `loss_time_s` (`docs/measurement_notes.md`, caveat 9).
+
+Generated outputs (the source for any reported number; do not copy values by hand):
+
+- `results/p5-05/lr-grid/cell{A,B}_pilot_check_all.csv`: `scripts/p5_pilot_check.py --all-reps` for every run, pilots included.
+- `results/p5-05/lr-grid/summary.csv`: `scripts/p5_summarize_runs.py` over the measured repetitions. It gives wall and application time (mean and standard deviation), startup (wall - app), in-app setup (app - sum of epoch times), per-epoch Spark / loss-pass / sync / epoch time and sync share, epochs, convergence, same-model-on-all-ranks, and final loss. The command and run directories are in `results/p5-05/lr-grid/README.md`.
+
+Findings:
+
+1. **Feasibility.** All 24 runs passed the gate criteria (exit 0, no new Swarm tasks, memory "full" PSI stall at or below 5%), with no OOM kills. LogReg at 100 MB with 10, 50 and 200 features is feasible in both cells at 3072 MB, unlike K-Means at 500 MB and 1 GB in Cell B.
+2. **Correctness.** Every run reached the loss tolerance in the same number of epochs. All ranks ended with the same model in every run, and for each feature count the final loss is identical in Cell A and Cell B, so splitting the data across two or four workers does not change the model.
+3. **Two vs four workers at a fixed worker budget.** Cell B (four workers, 1 core / 480m each) took longer than Cell A (two workers, 2 cores / 960m each) for every feature count. Every per-epoch phase was slower, the sync share of an epoch was higher, and in-app setup was longer. The gap grows as epochs get shorter (fewer rows at the fixed 100 MB size). On this testbed, adding processes within the same CPU and heap budget added overhead rather than speed.
+4. **Startup and setup.** Report iteration time separately from startup (wall - app) and in-app setup. Both are a large share of the shortest runs (f200).
+
+Scope of these results: all three VMs share one laptop, so they describe co-location and process density on a fixed-capacity testbed. They are not evidence of multi-host scale-out or of networked synchronisation cost. `sync_time_s` includes waiting for the slowest rank at each collective, so it is not pure communication time.
+
 ## Existing evidence — not a completed grid
 
 Issue #82 and the 2026-10-06 carry-over comment on #29 record a completed Cell B K-Means smoke run on the 100 MB input: 1,116,141 rows, 20 iterations, 115.32 seconds total, and rank-identical centroid-shift/WCSS values. It lacked resource sampling and must be repeated for the measured grid. Convergence tolerance was not reached in that recorded run.
