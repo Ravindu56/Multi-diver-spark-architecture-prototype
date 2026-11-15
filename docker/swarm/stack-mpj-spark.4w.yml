@@ -20,6 +20,9 @@
 # -x PYTHONPATH -x PYTHONUNBUFFERED), which forwards the value from
 # mpi-root's OWN environment -- hence these vars are set here on mpi-root
 # too, not just on the co-located worker services.
+#
+# IMAGE_TAG: workers 3 and 4 use the same version tag as the base stack file
+# (see scripts/build_and_distribute_image.sh), so all five ranks run one image.
 
 services:
   mpi-root:
@@ -41,7 +44,7 @@ services:
       SLOTS_OVERRIDE: "1"
 
   mpi-worker-3:
-    image: mpj-spark:latest
+    image: mpj-spark:${IMAGE_TAG:?run scripts/build_and_distribute_image.sh first}
     hostname: mpi-worker-3
     working_dir: /data
     environment:
@@ -76,7 +79,7 @@ services:
           - node.hostname == swarm-worker1
 
   mpi-worker-4:
-    image: mpj-spark:latest
+    image: mpj-spark:${IMAGE_TAG:?run scripts/build_and_distribute_image.sh first}
     hostname: mpi-worker-4
     working_dir: /data
     environment:
