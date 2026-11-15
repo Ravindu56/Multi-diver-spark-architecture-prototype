@@ -49,6 +49,17 @@ code that produced a result is the commit hash in `results/collection_manifest.t
    workers, so total memory should match between baseline and multi-driver runs. Verify
    from the `[SparkSession] ... heap=` lines in a baseline and a multi-driver `run.log`.
 8. **Pilot numbers are not results.** Smoke runs use one repetition and 4 rounds.
+9. **LogReg Allreduce `sync_time_s` before the P5-05 timing fix includes a Spark pass.**
+   In `mpj_spark/applications/logreg/allreduce.py`, the timed sync window used to cover
+   `check_loss_convergence()`, which runs two Spark actions over the rank's partition
+   (loss map/reduce and `count()`) before the loss Allreduce. On the Cell A f10 100 MB
+   smoke run this put about 2 s per epoch into `sync_time_s` on every rank. Since the
+   fix, `sync_time_s` covers only the MPI calls (gradient Allreduce, loss Allreduce,
+   convergence broadcast, including waiting for slower ranks). The loss pass is reported
+   as `loss_time_s`, the last column of `logreg_rank*_epochs.csv`. Epoch files without
+   `loss_time_s` come from the old code: do not report their `sync_time_s` as
+   synchronisation overhead. Their `epoch_time_s`, loss and weights are unaffected; the
+   fix also drops one `count()` pass per epoch, so their epoch times are slightly longer.
 
 ## Reproduce
 

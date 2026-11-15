@@ -26,6 +26,16 @@
 # METRICS KWARG FIX
 # ─────────────────
 # record_epoch() kwargs corrected to match LogRegMetricsCollector signature.
+#
+# SYNC TIMING FIX (P5-05 / #30)
+# ─────────────────────────────
+# sync_time_s used to include check_loss_convergence(), which runs two Spark
+# actions over the whole partition (loss map/reduce and count()) before the
+# loss Allreduce. On the f10 100 MB smoke run that made sync_time_s ~2 s per
+# epoch on every rank. The loss pass is now timed as loss_time_s, sync_time_s
+# covers only the MPI calls (gradient Allreduce, loss Allreduce, convergence
+# bcast, including any wait for slower ranks), and the loss pass reuses the
+# row count from compute_gradient_spark(). The arithmetic is unchanged.
 # =============================================================================
 
 from __future__ import annotations
@@ -88,25 +98,23 @@ def allreduce_gradients(
 
 
 # ===========================================================================
-# STEP 5b — Loss Allreduce + convergence broadcast  (unchanged)
+# STEP 5b — Loss computation (Spark) + loss Allreduce / convergence (MPI)
 # ===========================================================================
+# The loss check is split into a Spark part and an MPI part so the runner can
+# time them separately: compute_local_loss() is a full pass over the rank's
+# partition and belongs in loss_time_s, not sync_time_s. The arithmetic is
+# unchanged from the previous single function, so losses, convergence epochs
+# and weights are identical.
 
 
-def check_loss_convergence(
-    comm,
-    rank: int,
-    size: int,
-    data_rdd,
-    w: np.ndarray,
-    prev_loss: float,
-    tol: float,
-    epoch: int,
-) -> tuple[bool, float]:
+def compute_local_loss(data_rdd, w: np.ndarray, n_local: int | None = None) -> float:
     """
-    Compute global cross-entropy loss and broadcast a convergence flag.
-    """
-    from mpi4py import MPI
+    Mean cross-entropy loss over this rank's partition (one Spark pass).
 
+    n_local is the partition's row count. Pass the value already returned by
+    compute_gradient_spark() to avoid a second count() pass; if None, it is
+    counted here.
+    """
     _w = w
     _eps = 1e-15
 
@@ -117,8 +125,29 @@ def check_loss_convergence(
         return -(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
 
     local_loss_sum = float(data_rdd.map(local_loss_fn).reduce(lambda a, b: a + b))
-    n_local = data_rdd.count()
-    local_loss = local_loss_sum / float(n_local) if n_local > 0 else 0.0
+    if n_local is None:
+        n_local = data_rdd.count()
+    return local_loss_sum / float(n_local) if n_local > 0 else 0.0
+
+
+def allreduce_loss_and_check(
+    comm,
+    rank: int,
+    size: int,
+    local_loss: float,
+    prev_loss: float,
+    tol: float,
+    epoch: int,
+) -> tuple[bool, float]:
+    """
+    Average the per-rank losses with MPI Allreduce and broadcast rank 0's
+    convergence decision (|prev_loss - global_loss| < tol).
+
+    The global loss is the unweighted mean of per-rank mean losses. It equals
+    the mean over all rows only when partitions have equal row counts, which
+    partition_and_init_spark() produces to within one row.
+    """
+    from mpi4py import MPI
 
     local_arr = np.array([local_loss], dtype=np.float64)
     global_arr = np.zeros(1, dtype=np.float64)
@@ -140,6 +169,27 @@ def check_loss_convergence(
 
     converged = comm.bcast(converged, root=0)
     return converged, global_loss
+
+
+def check_loss_convergence(
+    comm,
+    rank: int,
+    size: int,
+    data_rdd,
+    w: np.ndarray,
+    prev_loss: float,
+    tol: float,
+    epoch: int,
+) -> tuple[bool, float]:
+    """
+    Compute global cross-entropy loss and broadcast a convergence flag.
+
+    Kept for callers of the previous API: compute_local_loss() followed by
+    allreduce_loss_and_check(). The runner calls the two parts directly so it
+    can time them separately.
+    """
+    local_loss = compute_local_loss(data_rdd, w)
+    return allreduce_loss_and_check(comm, rank, size, local_loss, prev_loss, tol, epoch)
 
 
 # ===========================================================================
@@ -213,21 +263,32 @@ def run_logreg_allreduce(
     for epoch in range(max_epochs):
         t_epoch = time.perf_counter()
 
-        # Step 4b — local gradient
+        # Step 4b — local gradient (Spark)
         t_spark = time.perf_counter()
-        grad_local, _ = compute_gradient_spark(data_rdd, w)
+        grad_local, n_local = compute_gradient_spark(data_rdd, w)
         spark_time_s = time.perf_counter() - t_spark
 
-        # Step 5 — allreduce + loss check
-        t_sync = time.perf_counter()
         lr_t = _cosine_lr(epoch, max_epochs, lr_max=learning_rate)
+
+        # Step 5a — gradient Allreduce + weight update (MPI)
+        t_sync = time.perf_counter()
         w, global_grad = allreduce_gradients(
             comm, size, w, grad_local, learning_rate=lr_t, reg_param=reg_param
         )
-        converged, global_loss = check_loss_convergence(
-            comm, rank, size, data_rdd, w, prev_loss, tol, epoch
-        )
         sync_time_s = time.perf_counter() - t_sync
+
+        # Step 5b — local loss on the updated weights (Spark). Reuses the row
+        # count from compute_gradient_spark() instead of a second count() pass.
+        t_loss = time.perf_counter()
+        local_loss = compute_local_loss(data_rdd, w, n_local)
+        loss_time_s = time.perf_counter() - t_loss
+
+        # Step 5c — loss Allreduce + convergence broadcast (MPI)
+        t_sync = time.perf_counter()
+        converged, global_loss = allreduce_loss_and_check(
+            comm, rank, size, local_loss, prev_loss, tol, epoch
+        )
+        sync_time_s += time.perf_counter() - t_sync
 
         epoch_time_s = time.perf_counter() - t_epoch
         grad_norm = float(np.linalg.norm(global_grad))
@@ -241,11 +302,13 @@ def run_logreg_allreduce(
             grad_norm=grad_norm,
             global_loss=global_loss,
             weight_norm=float(np.linalg.norm(w)),
+            loss_time_s=loss_time_s,
         )
 
         if rank == 0:
             logger.info(
-                "epoch %d/%d  lr=%.5f  |w|=%.4f  |grad|=%.6f  loss=%.6f  spark=%.3fs  sync=%.3fs",
+                "epoch %d/%d  lr=%.5f  |w|=%.4f  |grad|=%.6f  loss=%.6f  "
+                "spark=%.3fs  loss_pass=%.3fs  sync=%.3fs",
                 epoch + 1,
                 max_epochs,
                 lr_t,
@@ -253,6 +316,7 @@ def run_logreg_allreduce(
                 grad_norm,
                 global_loss,
                 spark_time_s,
+                loss_time_s,
                 sync_time_s,
             )
 

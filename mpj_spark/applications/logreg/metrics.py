@@ -13,12 +13,17 @@
 # --------------------------------
 #   epoch         int    — current epoch number (1-indexed)
 #   spark_time_s  float  — seconds inside compute_gradient_spark() only
-#   sync_time_s   float  — seconds for the full MPI-collective window
-#                           (allreduce_gradients + check_loss_convergence)
+#   sync_time_s   float  — seconds in MPI calls only: gradient Allreduce +
+#                           weight update, loss Allreduce, convergence bcast
+#                           (includes waiting for slower ranks to arrive)
 #   epoch_time_s  float  — wall-clock seconds for the full epoch
 #   grad_norm     float  — L2 norm of the global gradient after Allreduce
 #   global_loss   float  — cross-entropy loss averaged across all ranks
 #   weight_norm   float  — L2 norm of the weight vector after update
+#   loss_time_s   float  — seconds in the Spark loss pass (compute_local_loss)
+#                           Last column, added for P5-05; files written before
+#                           it existed have no loss_time_s and their
+#                           sync_time_s includes the loss pass.
 #
 # RUN-LEVEL FIELDS (record_run)
 # ------------------------------
@@ -64,6 +69,7 @@ class LogRegMetricsCollector:
         "grad_norm",
         "global_loss",
         "weight_norm",
+        "loss_time_s",
     ]
 
     def __init__(self, rank: int, output_dir: str = "./metrics") -> None:
@@ -87,6 +93,7 @@ class LogRegMetricsCollector:
         grad_norm: float,
         global_loss: float,
         weight_norm: float,
+        loss_time_s: float = 0.0,
     ) -> None:
         """Append one epoch's metrics to the in-memory list."""
         self._epochs.append(
@@ -98,6 +105,7 @@ class LogRegMetricsCollector:
                 "grad_norm": round(float(grad_norm), 8),
                 "global_loss": round(float(global_loss), 8),
                 "weight_norm": round(float(weight_norm), 8),
+                "loss_time_s": round(loss_time_s, 6),
             }
         )
 
