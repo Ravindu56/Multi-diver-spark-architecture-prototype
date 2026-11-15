@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # stage_datasets.sh - P5-04-prep (#82): generate the K-Means scaling datasets
-# (100 MB / 500 MB / 1 GB by default) and verify they are byte-identical
-# across every Swarm node before starting the P5-04 (#29) scaling grid.
+# (100 MB / 500 MB / 1 GB by default) and the P5-05 (#30) LogReg inputs
+# (logreg_f{10,50,200}_100mb.csv by default) and verify they are byte-identical
+# across every Swarm node before starting the P5-04/P5-05 grids.
 #
 # Datasets are generated ONCE, inside the running mpi-root container,
 # directly onto the NFS-backed /data/input mount (docker/nfs-setup.sh,
@@ -16,14 +17,22 @@
 # Usage:
 #   ./scripts/stage_datasets.sh                  # sizes: 100 500 1024 (MB)
 #   SIZES_MB="100 500" ./scripts/stage_datasets.sh
+#   SIZES_MB= LR_FEATS="50 200" ./scripts/stage_datasets.sh   # LogReg only
 #   FORCE=1 ./scripts/stage_datasets.sh           # regenerate even if present
+#
+# Every OK line records md5, bytes and line count (LogReg files include a
+# header line). Keep the output with the run records: the P5-04 design asks
+# for checksums, bytes, row counts, seeds and feature counts.
 #
 # Prerequisites:
 #   - scripts/.swarm-inventory exists (provision_swarm_vms.sh)
 #   - the stack is deployed and mpi-root is running (bootstrap_stack.sh)
 set -euo pipefail
 
-SIZES_MB="${SIZES_MB:-100 500 1024}"
+SIZES_MB="${SIZES_MB-100 500 1024}"   # K-Means sizes; empty skips K-Means
+LR_FEATS="${LR_FEATS-10 50 200}"       # LogReg feature counts; empty skips LogReg
+LR_SIZE_MB="${LR_SIZE_MB:-100}"        # LogReg file size (MB)
+SEED="${SEED:-42}"                     # generator seed for every file
 STACK="${STACK_NAME:-mpj}"
 SSH_USER="${SSH_USER:-ubuntu}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10}"
@@ -67,7 +76,20 @@ for mb in $SIZES_MB; do
     FILES+=("$fname")
     log "==> ${fname}: generating ${mb} MB via mpi-root -> ${CONTAINER_INPUT_DIR}/${fname}"
     ssh_vm "$MGR_IP" "docker exec -e MPJ_KMEANS_DATA=${CONTAINER_INPUT_DIR}/${fname} \
-        $ROOT_CID python3 ${APP_DIR}/scripts/generate_datasets.py --kmeans-only --size-mb ${mb} ${FORCE_FLAG}" \
+        $ROOT_CID python3 ${APP_DIR}/scripts/generate_datasets.py --kmeans-only --size-mb ${mb} --seed ${SEED} ${FORCE_FLAG}" \
+        | sed 's/^/[stage]   /'
+done
+
+# ---- 1b. LogReg inputs for P5-05 (#30): one file per feature count ----------
+# logreg_f<F>_<S>mb.csv: header f0..f<F-1>,label; same generator and seed as the
+# K-Means files. Matches the names p5_run_cell.sh reads (LR_FEATS, LR_SIZE).
+for f in $LR_FEATS; do
+    fname="logreg_f${f}_${LR_SIZE_MB}mb.csv"
+    FILES+=("$fname")
+    log "==> ${fname}: generating ${LR_SIZE_MB} MB, ${f} features via mpi-root -> ${CONTAINER_INPUT_DIR}/${fname}"
+    ssh_vm "$MGR_IP" "docker exec -e MPJ_LOGREG_DATA=${CONTAINER_INPUT_DIR}/${fname} \
+        $ROOT_CID python3 ${APP_DIR}/scripts/generate_datasets.py --logreg-only \
+        --num-features ${f} --size-mb ${LR_SIZE_MB} --seed ${SEED} ${FORCE_FLAG}" \
         | sed 's/^/[stage]   /'
 done
 
@@ -97,7 +119,8 @@ for fname in "${FILES[@]}"; do
     done
     if [[ $file_fail -eq 0 ]]; then
         size_bytes="$(ssh_vm "$MGR_IP" "stat -c %s '${HOST_SHARE_PATH}/input/${fname}' 2>/dev/null" || echo '?')"
-        log "  OK    ${fname}  (md5=${ref_sum}, ${size_bytes} bytes, identical on all ${#NODES[@]} nodes)"
+        lines="$(ssh_vm "$MGR_IP" "wc -l < '${HOST_SHARE_PATH}/input/${fname}' 2>/dev/null" || echo '?')"
+        log "  OK    ${fname}  (md5=${ref_sum}, ${size_bytes} bytes, ${lines} lines, seed=${SEED}, identical on all ${#NODES[@]} nodes)"
     else
         overall_fail=1
     fi
