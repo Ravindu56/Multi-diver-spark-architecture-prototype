@@ -61,7 +61,7 @@ sync overhead, convergence rate.
 - Do not claim multi-host scale-out or networked sync cost from co-located VM results.
   Separate useful iteration time from startup overhead.
 
-## Status (as of 2026-11-15, `dev` @ dc0c727)
+## Status (as of 2026-11-15, end of day; `dev` @ dc0c727, Phase 5 work on `run/p5-04-pilots`, not yet merged)
 
 | Phase | Status |
 |---|---|
@@ -69,7 +69,7 @@ sync overhead, convergence rate.
 | 2 Iterative ML + simulated Allreduce | Done (v0.2.0) |
 | 3 Real MPI, six sync modes | Done (v0.3.0, v0.3.1) |
 | 4 Docker + NFS | Done (v0.3.1) |
-| 5 Multi-node Swarm | Partial: infra merged (PR #96); only a 4-worker 100 MB K-Means smoke run. The {2,4} × {100 MB, 500 MB, 1 GB} grid with repetitions is still to do |
+| 5 Multi-node Swarm | Partial: infra merged (PR #96). On `run/p5-04-pilots`: VM RAM gate done (3072 MB per VM); LogReg grid done (f10/f50/f200 × Cells A and B, 24/24 pass, `results/p5-05/lr-grid/`); K-Means scope revised (Cell A 50/100/200/500/1024 MB, Cell B 50/100/200 MB; Cell B 500 MB/1 GB infeasible, documented exclusion). K-Means grid not yet run (`~/p5-km-grid.sh`). PR into `dev` after the K-Means grid. See `docs/p5-04-experimental-design.md` |
 | 6 Allocator + evaluation | Partial: 2a data and 2b predictor done (`mpj_spark/resource_prediction/`, `docs/p6-evaluation-report.md`). Allocator #48 and Docker limit enforcement #49 not started. Full 2d comparison not run |
 
 Known issues to respect:
@@ -82,6 +82,21 @@ Known issues to respect:
 - Uneven baseline partitions may inflate multi-driver speedup by up to ~1.3×
   (`docs/measurement_notes.md`).
 - #97 (single subcommand CLI) is a design direction only.
+- Phase 5 memory: a Cell B worker VM runs two ranks, and each rank's JVM uses well above its
+  heap (about 800 MB at 480m) plus about 380 MB for the Spark Python worker. Cell B K-Means
+  at 500 MB and 1 GB is OOM-killed even at the 3072 MB cap. Do not raise VMs above 3072 MB
+  (host limit).
+- LogReg `sync_time_s` written before f663536 includes a Spark loss pass. Since the fix it
+  covers MPI calls only, and the loss pass is `loss_time_s` (`docs/measurement_notes.md`,
+  caveat 9).
+- On Swarm (one rank per container) MPI ranks are unbound and see both vCPUs, so the old
+  binding bug does not apply there; the runner does not set the binding policy.
+- A dead rank can leave the job blocked until the runner timeout (90 min). Two bootstrap
+  bugs need workarounds: rerun `bootstrap_stack.sh` once after `placement mismatch`, and
+  remove `mpj_mpi-worker-3/4` after deploying Cell A over `4w`. Issue drafts are in
+  `~/p5-issues/` (not yet filed).
+- `bootstrap_stack.sh` refuses an image built from another commit: rebuild with
+  `scripts/build_and_distribute_image.sh` after every commit before deploying.
 
 ## Repo conventions
 
