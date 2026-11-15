@@ -65,7 +65,7 @@ Use the canonical MPI invocation in [the Swarm invocation notes](p5-swarm-mpi-in
 - Capture end-to-end time, setup/load time, processing/iteration time, per-rank and aggregate CPU/memory behavior, and convergence traces.
 - Define aggregate throughput as total processed rows divided by end-to-end time. Logged local-rank throughput is not aggregate throughput.
 - Sample both host and guest resource behavior, including available memory, swap activity, CPU contention, I/O waiting, and service restarts. Use ssh -n for background remote samplers.
-- Record Linux pressure information where available. A host RAM-use percentage alone does not establish memory exhaustion.
+- Record Linux pressure information where available. A host RAM-use percentage alone does not establish memory exhaustion. `scripts/p5_run_cell.sh` samples `/proc/pressure/{cpu,memory,io}` once per second on the host and every VM (`psi-*.log`, alongside `vmstat-*.log`), and takes `free -m` snapshots before and after each run (`mem-before.txt`, `mem-after.txt`). Use the cumulative `total=` stall counters, last sample minus first, for per-run stall time.
 - Separate barrier/straggler waiting from collective-call timing where instrumented. Collective duration can still include arrival imbalance; do not label existing sync_time as pure network communication.
 - Reject an unstable run as a timing sample, retain its failure log, and report the exclusion reason.
 - Verify synchronized model state across participating ranks and compare final objective values under matched settings as correctness checks.
