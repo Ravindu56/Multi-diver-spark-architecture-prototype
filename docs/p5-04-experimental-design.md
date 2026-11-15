@@ -115,6 +115,23 @@ The existing 8w option, if retained by the deployment scripts, is outside the re
 
 Use the canonical MPI invocation in [the Swarm invocation notes](p5-swarm-mpi-invocation.md), selecting three ranks for Cell A or five ranks for Cell B, forwarding resource settings, and confirming the overlay CIDR against the deployed network.
 
+Measured grid (after the 2026-11-15 scope revision). `scripts/p5_run_cell.sh` defaults to the revised K-Means sizes (Cell A 50/100/200/500/1024 MB, Cell B 50/100/200 MB) and LogReg f10/f50/f200, with `REPS=4`. It refuses Cell B K-Means above 200 MB unless `ALLOW_EXCLUDED=1` is set. `DRY_RUN=1` prints the plan without touching the cluster, and every run directory records the plan in `meta.txt`.
+
+```bash
+./scripts/stage_datasets.sh                     # all K-Means and LogReg inputs, checksums
+./scripts/build_and_distribute_image.sh         # image must match HEAD for bootstrap
+./scripts/bootstrap_stack.sh 4w                 # Cell B
+DRY_RUN=1 bash scripts/p5_run_cell.sh B         # check the plan
+KM_SIZES="50 100 200" LR_FEATS= bash scripts/p5_run_cell.sh B
+./scripts/bootstrap_stack.sh                    # Cell A
+ssh <manager> docker service rm mpj_mpi-worker-3 mpj_mpi-worker-4   # see below
+KM_SIZES="50 100 200 500 1024" LR_FEATS= bash scripts/p5_run_cell.sh A
+python scripts/p5_pilot_check.py <run dir> --all-reps --csv <run dir>/pilot_check_all.csv
+python scripts/p5_summarize_runs.py <run dirs...> --csv <summary.csv>
+```
+
+Known deployment issues until fixed: `bootstrap_stack.sh` can fail its placement check right after a redeploy (`mpi-root -> none`; rerun once), and deploying the base stack after `4w` leaves `mpj_mpi-worker-3/4` running (remove them as above).
+
 ## Measurement and validity checks
 
 - Capture end-to-end time, setup/load time, processing/iteration time, per-rank and aggregate CPU/memory behavior, and convergence traces.

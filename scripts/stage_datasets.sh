@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # stage_datasets.sh - P5-04-prep (#82): generate the K-Means scaling datasets
-# (100 MB / 500 MB / 1 GB by default) and the P5-05 (#30) LogReg inputs
+# (50 MB / 100 MB / 200 MB / 500 MB / 1 GB by default) and the P5-05 (#30) LogReg inputs
 # (logreg_f{10,50,200}_100mb.csv by default) and verify they are byte-identical
 # across every Swarm node before starting the P5-04/P5-05 grids.
 #
@@ -15,7 +15,7 @@
 # of the target size exists at that path; pass FORCE=1 to regenerate anyway.
 #
 # Usage:
-#   ./scripts/stage_datasets.sh                  # sizes: 100 500 1024 (MB)
+#   ./scripts/stage_datasets.sh                  # K-Means 50 100 200 500 1024 MB + LogReg f10/f50/f200
 #   SIZES_MB="100 500" ./scripts/stage_datasets.sh
 #   SIZES_MB= LR_FEATS="50 200" ./scripts/stage_datasets.sh   # LogReg only
 #   FORCE=1 ./scripts/stage_datasets.sh           # regenerate even if present
@@ -29,7 +29,7 @@
 #   - the stack is deployed and mpi-root is running (bootstrap_stack.sh)
 set -euo pipefail
 
-SIZES_MB="${SIZES_MB-100 500 1024}"   # K-Means sizes; empty skips K-Means
+SIZES_MB="${SIZES_MB-50 100 200 500 1024}"   # K-Means sizes (MB); empty skips K-Means
 LR_FEATS="${LR_FEATS-10 50 200}"       # LogReg feature counts; empty skips LogReg
 LR_SIZE_MB="${LR_SIZE_MB:-100}"        # LogReg file size (MB)
 SEED="${SEED:-42}"                     # generator seed for every file

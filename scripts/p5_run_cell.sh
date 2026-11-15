@@ -13,6 +13,9 @@
 # mem-before.txt / mem-after.txt (free -m, nproc), stack-before/after.txt (task states).
 # LogReg runs through mpj_spark.applications.logreg.cli (added for #30); hand-run it once
 # in Cell A before leaving the runner unattended.
+# Defaults: KM_SIZES = 50 100 200 500 1024 (Cell A) / 50 100 200 (Cell B), LR_FEATS = 10 50 200.
+# Empty KM_SIZES= or LR_FEATS= skips that workload. DRY_RUN=1 prints the plan only.
+# The plan (sizes, features, reps) is printed and recorded in meta.txt before the first run.
 set -u -o pipefail
 CELL=${1:?usage: p5_run_cell.sh A|B}
 case $CELL in A) NP=3;; B) NP=5;; *) exit 2;; esac
@@ -20,13 +23,33 @@ SSHU=${SSHU:-ubuntu}; MGR=${MGR:-192.168.122.224}
 VMS=${VMS:-"192.168.122.224 192.168.122.27 192.168.122.7"}
 CIDR=${CIDR:-10.0.1.0/24}
 REPS=${REPS:-4}; TMO=${TMO:-5400}; COOL=${COOL:-60}
-KM_SIZES=${KM_SIZES-"100 500 1024"}
+# Default K-Means sizes (MB) per cell follow the 2026-11-15 scope revision in
+# docs/p5-04-experimental-design.md: at 3072 MB per VM Cell B is infeasible at 500 MB and
+# 1 GB (documented exclusion), so its grid is 50/100/200 MB; Cell A runs all five sizes.
+case $CELL in A) KM_DEFAULT="50 100 200 500 1024";; B) KM_DEFAULT="50 100 200";; esac
+KM_SIZES=${KM_SIZES-$KM_DEFAULT}
 LR_FEATS=${LR_FEATS-"10 50 200"}; LR_SIZE=${LR_SIZE:-100}
 LR_MODULE=${LR_MODULE:-mpj_spark.applications.logreg.cli}
+# Guard: Cell B K-Means above 200 MB is a recorded exclusion, not part of the grid.
+# Set ALLOW_EXCLUDED=1 to run it anyway (for example a deliberate re-pilot).
+if [ "$CELL" = B ] && [ "${ALLOW_EXCLUDED:-0}" != 1 ]; then
+  for s in $KM_SIZES; do
+    [ "$s" -gt 200 ] && { echo "refusing Cell B K-Means ${s} MB: excluded by the 2026-11-15 scope revision (set ALLOW_EXCLUDED=1 to override)" >&2; exit 2; }
+  done
+fi
+# DRY_RUN=1: print the plan and exit without touching the cluster.
+if [ "${DRY_RUN:-0}" = 1 ]; then
+  echo "cell=$CELL np=$NP reps=$REPS tmo=${TMO}s cool=${COOL}s"
+  echo "kmeans sizes (MB): ${KM_SIZES:-<none>}"
+  echo "logreg features:   ${LR_FEATS:-<none>} (size ${LR_SIZE} MB)"
+  exit 0
+fi
 OUT=$HOME/p5-runs/$(date +%Y%m%d-%H%M%S)-cell$CELL; mkdir -p "$OUT"
 LOG=$OUT/runlog.csv
 echo "name,cell,np,workload,param,rep,rc,wall_s,start" > "$LOG"
 echo "commit=$(git rev-parse HEAD 2>/dev/null) cell=$CELL np=$NP" > "$OUT/meta.txt"
+echo "plan: kmeans_mb=\"$KM_SIZES\" logreg_feats=\"$LR_FEATS\" logreg_mb=$LR_SIZE reps=$REPS tmo=$TMO cool=$COOL" \
+  | tee -a "$OUT/meta.txt"
 # VM CPU pinning in force for this cell (see scripts/pin_swarm_vms.sh).
 { echo "== vcpu pinning"; "$(dirname "$0")/pin_swarm_vms.sh" status 2>&1; } >> "$OUT/meta.txt" || true
 ROOT='docker exec $(docker ps -q -f name=mpj_mpi-root | head -1)'
